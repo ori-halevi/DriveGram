@@ -9,8 +9,16 @@ namespace DriveGram.Sync;
 public sealed record LeaseInfo(string Dev, string Name, long Until);
 public sealed record SnapInfo(int Msg, int Upto);
 
+/// <summary>
+/// Who a drive is: a unique id, a display name, and — the binding that matters — the id of the
+/// Telegram channel holding its data. With it, one account can hold (or be an admin of) several
+/// drives and each journal channel says exactly which data channel is its partner.
+/// Drives created before 0.7 have none; they get one the first time they mount writable.
+/// </summary>
+public sealed record DriveIdentity(string Id, string Name, long DataChannel);
+
 /// <summary>The one editable record of a drive (Telegram: the pinned text message of the journal channel).</summary>
-public sealed record ControlState(int V, VaultHeader Vault, LeaseInfo? Lease, SnapInfo? Snap)
+public sealed record ControlState(int V, VaultHeader Vault, LeaseInfo? Lease, SnapInfo? Snap, DriveIdentity? Drive = null)
 {
     public string ToJson() => JsonSerializer.Serialize(this, OpJson.Options);
     public static ControlState? FromJson(string? json) =>
@@ -74,12 +82,24 @@ public sealed class SyncService : IAsyncDisposable
 
     /// <summary>Create a new drive (vault) on an empty remote.</summary>
     public static async Task<Keys> CreateDriveAsync(IRemote remote, string password, CancellationToken ct,
-        int chunkSize = Keys.DefaultChunkSize, int frameSize = Keys.DefaultFrameSize, int iterations = Keys.DefaultIterations)
+        int chunkSize = Keys.DefaultChunkSize, int frameSize = Keys.DefaultFrameSize, int iterations = Keys.DefaultIterations,
+        DriveIdentity? identity = null)
     {
         if (await ReadControlAsync(remote, ct) is not null) throw new InvalidOperationException("This remote already holds a drive.");
         var (header, keys) = Keys.Create(password, chunkSize, frameSize, iterations);
-        await remote.WriteControlAsync(new ControlState(1, header, null, null).ToJson(), ct);
+        await remote.WriteControlAsync(new ControlState(1, header, null, null, identity).ToJson(), ct);
         return keys;
+    }
+
+    /// <summary>Give a pre-0.7 drive its identity (only the PC holding the lease writes the control record).</summary>
+    public async Task<DriveIdentity?> EnsureIdentityAsync(Func<DriveIdentity> make, CancellationToken ct)
+    {
+        var ctrl = (await ReadControlAsync(_remote, ct))!;
+        if (ctrl.Drive is not null || !Writable) return ctrl.Drive;
+        var id = make();
+        await _remote.WriteControlAsync((ctrl with { Drive = id }).ToJson(), ct);
+        Log.Info($"drive identity recorded: {id.Name} ({id.Id}), data channel {id.DataChannel}");
+        return id;
     }
 
     long NowUnix => DateTimeOffset.UtcNow.ToUnixTimeSeconds();

@@ -8,6 +8,9 @@ using Fsp.Interop;
 
 namespace DriveGram.Host;
 
+public sealed class DrivePairingException() : Exception(L.T(
+    "ערוץ הקבצים לא שייך ליומן של הכונן הזה (אולי ערוץ של כונן אחר עם אותו שם). פתח את 'הגדרות והתחברות' ובחר את הכונן מחדש.",
+    "The data channel does not belong to this drive's journal (perhaps another drive's channel with the same name). Open 'Settings and sign-in' and choose the drive again."));
 public sealed class AlreadyMountedException() : Exception("DriveGram is already running for this drive on this PC.");
 
 /// <summary>An item in the drive's own trash.</summary>
@@ -37,6 +40,20 @@ public sealed class DriveSession : IAsyncDisposable
     public event Action? SignedOut;
     /// <summary>Set when the configured letter was taken and another one was used ("T: → U:").</summary>
     public string? LetterChanged { get; private set; }
+
+    /// <summary>
+    /// Prove the data channel really belongs to this journal: a chunk the journal says is stored at
+    /// message M must be there under the name derived from its (password-keyed) chunk id. A data
+    /// channel of another drive — even one with the same title — can never pass.
+    /// </summary>
+    static async Task VerifyPairingAsync(IndexDb db, TelegramRemote remote, CancellationToken ct)
+    {
+        var sample = db.SampleChunks(3);
+        if (sample.Count == 0) return; // empty drive: nothing to prove yet
+        foreach (var c in sample)
+            if (await remote.HoldsChunkAsync(c.Msg, c.ChunkId, ct)) return;
+        throw new DrivePairingException();
+    }
 
     static bool LetterInUse(char letter) =>
         DriveInfo.GetDrives().Any(d => char.ToUpperInvariant(d.Name[0]) == char.ToUpperInvariant(letter));
@@ -89,7 +106,7 @@ public sealed class DriveSession : IAsyncDisposable
             "api_hash" => cfg.ApiHash,
             "device_model" => "DriveGram on " + Environment.MachineName,
             "system_version" => Environment.OSVersion.VersionString,
-            "app_version" => "DriveGram 0.6",
+            "app_version" => "DriveGram 0.7",
             "password" => askPassword is null ? throw new NotSignedInException() : askPassword(),
             "verification_code" or "first_name" or "last_name" or "email" or "email_verification_code" =>
                 throw new NotSignedInException(),
@@ -98,12 +115,14 @@ public sealed class DriveSession : IAsyncDisposable
         return new WTelegram.Client(Config, new DpapiSessionStream(state.SessionPath));
     }
 
-    public static async Task<IRemote> OpenRemoteAsync(AppState state, bool create)
+    /// <summary>Open the drive this profile is bound to (its channels are saved in the profile).</summary>
+    public static async Task<IRemote> OpenRemoteAsync(AppState state)
     {
         if (state.Folder is not null) return new FolderRemote(state.Folder);
+        if (state.Config.Channels is not { } known) throw new NoDriveException();
         var client = NewTelegramClient(state);
         TelegramRemote remote;
-        try { remote = await TelegramRemote.OpenAsync(client, state.Config.Channels, create); }
+        try { remote = await TelegramRemote.OpenAsync(client, known); }
         catch { client.Dispose(); throw; }
         bool changed = state.Config.Channels != remote.Channels;
         state.Config.Channels = remote.Channels;
@@ -148,7 +167,7 @@ public sealed class DriveSession : IAsyncDisposable
         SyncService? sync = null;
         try
         {
-            remote = await OpenRemoteAsync(state, create: false);
+            remote = await OpenRemoteAsync(state);
             var ctrl = await SyncService.ReadControlAsync(remote, ct)
                        ?? throw new NoDriveException();
             var keys = await unlock(ctrl);
@@ -166,6 +185,19 @@ public sealed class DriveSession : IAsyncDisposable
             sync.CanCollectGarbage = () => engineRef.Idle;
             sync.WritableChanged += () => Log.Warn(sync.Writable ? "the drive is now writable" : $"the drive is now READ-ONLY (open on {sync.LeaseHolder})");
             await sync.StartAsync(takeOver, ct);
+            if (remote is TelegramRemote telegram)
+            {
+                await VerifyPairingAsync(db, telegram, ct);
+                // drives from before 0.7: record which data channel belongs to this journal, so other
+                // accounts (e.g. a backup admin) and other drives on the account can tell them apart
+                var identity = await sync.EnsureIdentityAsync(() => new DriveIdentity(
+                    Guid.NewGuid().ToString("N"), state.Config.VolumeLabel, telegram.Channels.DataId), ct);
+                if (identity is not null && state.Config.DriveId != identity.Id)
+                {
+                    state.Config.DriveId = identity.Id;
+                    state.Save();
+                }
+            }
             engine.Start();
 
             var stopEvent = new EventWaitHandle(false, EventResetMode.AutoReset, StopEventName(state));

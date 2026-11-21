@@ -7,6 +7,9 @@ namespace DriveGram.Remote;
 /// <summary>Ids of the two private channels a drive lives in (saved locally after first lookup).</summary>
 public sealed record TelegramChannels(long DataId, long DataHash, long JournalId, long JournalHash);
 
+/// <summary>A drive found on an account. Channels is null when its data channel could not be found.</summary>
+public sealed record DriveCandidate(string? DriveId, string Name, TelegramChannels? Channels, bool Owned, bool HasVault, bool Bound);
+
 /// <summary>
 /// IRemote on a Telegram user account (MTProto via WTelegramClient). Two private channels:
 ///   "DriveGram Data"    — one document per encrypted chunk;
@@ -29,6 +32,7 @@ public sealed class TelegramRemote : IRemote
     readonly ConcurrentDictionary<int, Document> _docs = new(), _jdocs = new();
     readonly Governor _up, _down;
     int _controlId;
+    bool _ownsClient = true;
 
     /// <summary>The account this drive lives on.</summary>
     public User? Account { get; private set; }
@@ -77,37 +81,98 @@ public sealed class TelegramRemote : IRemote
         catch (RpcException e) when (e.Code == 401) { throw new NotSignedInException(); }
     }
 
-    /// <summary>Does this account hold a DriveGram drive (both channels)?</summary>
-    public static async Task<bool> DriveExistsAsync(Client client, TelegramChannels? known)
+    // ── finding drives on an account ─────────────────────────────────────────
+    static bool IsJournal(Channel c) => c.title == JournalTitle || c.title.StartsWith(JournalTitle + " · ");
+    static bool IsData(Channel c) => c.title == DataTitle || c.title.StartsWith(DataTitle + " · ");
+
+    static async Task<string?> ReadPinnedTextAsync(Client client, Channel channel)
     {
-        await ResumeAsync(client);
-        var all = (await client.Messages_GetAllChats()).chats.Values.OfType<Channel>().ToList();
-        bool Has(long? id, string title) => all.Any(c => c.id == id || c.title == title);
-        return Has(known?.DataId, DataTitle) && Has(known?.JournalId, JournalTitle);
+        var full = await client.Channels_GetFullChannel(channel);
+        if (full.full_chat is not ChannelFull { pinned_msg_id: > 0 } cf) return null;
+        var r = await client.Channels_GetMessages(channel, [new InputMessageID { id = cf.pinned_msg_id }]);
+        return r.Messages.FirstOrDefault() is Message m ? m.message : null;
     }
 
-    /// <summary>Open — or create — the drive's channels on the signed-in account.</summary>
-    public static async Task<TelegramRemote> OpenAsync(Client client, TelegramChannels? known, bool createIfMissing,
-        int uploadParallel = 8, int downloadParallel = 8)
+    /// <summary>
+    /// Every DriveGram drive this account can open — its own, and ones it was made an admin of (e.g. as
+    /// a backup account). A journal channel is paired with its data channel by:
+    ///   1. the binding in its control record (DriveIdentity.DataChannel) — drives from 0.7 on;
+    ///   2. otherwise (older drives): the data channel created closest in time to the journal — both are
+    ///      always created a few seconds apart — preferring the same owner;
+    /// and DrivePairing.VerifyAsync proves the pairing cryptographically once the password is known.
+    /// </summary>
+    public static async Task<List<DriveCandidate>> DiscoverAsync(Client client)
+    {
+        await ResumeAsync(client);
+        var all = (await client.Messages_GetAllChats()).chats.Values.OfType<Channel>().Where(c => !c.flags.HasFlag(Channel.Flags.left)).ToList();
+        var journals = all.Where(IsJournal).ToList();
+        var datas = all.Where(IsData).ToList();
+        var found = new List<(Channel J, Sync.ControlState? Ctrl)>();
+        foreach (var j in journals)
+        {
+            Sync.ControlState? ctrl = null;
+            try { ctrl = Sync.ControlState.FromJson(await ReadPinnedTextAsync(client, j)); }
+            catch (Exception ex) { Log.Warn($"discover: cannot read the control record of '{j.title}': {ex.Message}"); }
+            found.Add((j, ctrl));
+        }
+
+        var claimed = found.Where(f => f.Ctrl?.Drive is not null).Select(f => f.Ctrl!.Drive!.DataChannel).ToHashSet();
+        var result = new List<DriveCandidate>();
+        foreach (var (j, ctrl) in found.OrderBy(f => f.Ctrl?.Drive is null)) // explicit bindings first
+        {
+            Channel? data = ctrl?.Drive is { } id ? datas.FirstOrDefault(d => d.id == id.DataChannel) : null;
+            if (data is null && ctrl?.Drive is null)
+            {
+                bool owned = j.flags.HasFlag(Channel.Flags.creator);
+                data = datas.Where(d => !claimed.Contains(d.id))
+                    .OrderBy(d => d.flags.HasFlag(Channel.Flags.creator) == owned ? 0 : 1)
+                    .ThenBy(d => Math.Abs((d.date - j.date).TotalSeconds))
+                    .FirstOrDefault();
+            }
+            if (data is not null) claimed.Add(data.id);
+            result.Add(new DriveCandidate(
+                ctrl?.Drive?.Id, ctrl?.Drive?.Name ?? (j.title.Length > JournalTitle.Length + 3 ? j.title[(JournalTitle.Length + 3)..] : "DriveGram"),
+                data is null ? null : new TelegramChannels(data.id, data.access_hash, j.id, j.access_hash),
+                Owned: j.flags.HasFlag(Channel.Flags.creator), HasVault: ctrl is not null, Bound: ctrl?.Drive is not null));
+        }
+        return result;
+    }
+
+    /// <summary>Create the two channels of a new drive (named after it, bound by id in the control record).</summary>
+    public static async Task<TelegramChannels> CreateChannelsAsync(Client client, string name, string driveId)
+    {
+        await ResumeAsync(client);
+        var data = await CreateChannel(client, $"{DataTitle} · {name}",
+            $"DriveGram encrypted storage of drive {driveId}. Do not post or delete here.");
+        var journal = await CreateChannel(client, $"{JournalTitle} · {name}",
+            $"DriveGram journal of drive {driveId}. Do not post, pin or delete here.");
+        return new TelegramChannels(data.id, data.access_hash, journal.id, journal.access_hash);
+    }
+
+    /// <summary>Open a drive whose channels are known (from discovery or this PC's saved config).</summary>
+    public static async Task<TelegramRemote> OpenAsync(Client client, TelegramChannels known,
+        int uploadParallel = 8, int downloadParallel = 8, bool ownsClient = true)
     {
         var account = await ResumeAsync(client);
         var all = (await client.Messages_GetAllChats()).chats.Values.OfType<Channel>().ToList();
-
-        Channel? Find(long? id, string title) =>
-            (id is { } i ? all.FirstOrDefault(c => c.id == i) : null) ?? all.FirstOrDefault(c => c.title == title);
-
-        var data = Find(known?.DataId, DataTitle);
-        var journal = Find(known?.JournalId, JournalTitle);
-        if (data is null || journal is null)
-        {
-            // A drive this PC knew is gone: never quietly put an empty one in its place.
-            if (known is not null) throw new DriveVanishedException();
-            if (!createIfMissing) throw new NoDriveException();
-            data ??= await CreateChannel(client, DataTitle, "DriveGram encrypted storage. Do not post or delete here.");
-            journal ??= await CreateChannel(client, JournalTitle, "DriveGram journal. Do not post, pin or delete here.");
-        }
+        var data = all.FirstOrDefault(c => c.id == known.DataId && !c.flags.HasFlag(Channel.Flags.left));
+        var journal = all.FirstOrDefault(c => c.id == known.JournalId && !c.flags.HasFlag(Channel.Flags.left));
+        // A drive this PC knew is gone: never quietly put an empty one in its place.
+        if (data is null || journal is null) throw new DriveVanishedException();
         client.FloodRetryThreshold = 0; // flood waits surface to the governor from now on
-        return new TelegramRemote(client, data, journal, uploadParallel, downloadParallel) { Account = account };
+        return new TelegramRemote(client, data, journal, uploadParallel, downloadParallel) { Account = account, _ownsClient = ownsClient };
+    }
+
+    /// <summary>Does stored message `msg` in the data channel hold chunk `chunkId`? (Its file name is
+    /// derived from the chunk id, which only the password can produce: a wrong pairing never passes.)</summary>
+    public async Task<bool> HoldsChunkAsync(int msg, string chunkId, CancellationToken ct)
+    {
+        try
+        {
+            var name = (await GetDocAsync(_data, _docs, msg, ct)).Filename;
+            return name is null || name == $"{chunkId[..32]}.bin"; // only a clear contradiction fails
+        }
+        catch (FileNotFoundException) { return false; }
     }
 
     static async Task<Channel> CreateChannel(Client client, string title, string about)
@@ -261,7 +326,7 @@ public sealed class TelegramRemote : IRemote
 
     public ValueTask DisposeAsync()
     {
-        _client.Dispose();
+        if (_ownsClient) _client.Dispose();
         return ValueTask.CompletedTask;
     }
 }

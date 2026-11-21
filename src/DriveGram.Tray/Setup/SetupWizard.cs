@@ -31,7 +31,7 @@ sealed class SetupContext : IDisposable
         var c = Client;
         Client = null;
         User = null;
-        if (Remote is not null) { Remote.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5)); Remote = null; c = null; }
+        if (Remote is not null) { Remote.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5)); Remote = null; }
         if (c is not null)
         {
             if (signOut) { try { TL.SchemaExtensions.Auth_LogOut(c).Wait(TimeSpan.FromSeconds(10)); } catch { } }
@@ -42,8 +42,8 @@ sealed class SetupContext : IDisposable
 
     public void Dispose()
     {
-        if (Remote is not null) Remote.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5)); // disposes its client
-        else Client?.Dispose();
+        Remote?.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5)); // the wizard's remotes do not own the client
+        Client?.Dispose();
         Client = null;
         Remote = null;
     }

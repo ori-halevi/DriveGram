@@ -11,6 +11,8 @@ public sealed class AppConfig
     public int ApiId { get; set; }
     public string ApiHash { get; set; } = "";
     public TelegramChannels? Channels { get; set; }
+    /// <summary>The drive's unique id (from its control record; empty for drives not upgraded yet).</summary>
+    public string DriveId { get; set; } = "";
     /// <summary>Telegram user the drive lives on (0 = not known yet), and a display name for menus.</summary>
     public long AccountId { get; set; }
     public string AccountName { get; set; } = "";

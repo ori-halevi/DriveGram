@@ -138,6 +138,34 @@ public class SyncTests
     }
 
     [Fact]
+    public async Task OldDrivesGetAnIdentityOnceAndKeepIt()
+    {
+        await using var kit = await TestKit.CreateAsync(); // created like a pre-0.7 drive: no identity
+        var before = await SyncService.ReadControlAsync(kit.Remote, default);
+        Assert.Null(before!.Drive);
+
+        var a = kit.Pc("a");
+        await a.Sync.StartAsync(false, default);
+        var id = await a.Sync.EnsureIdentityAsync(() => new DriveIdentity("d1", "Photos", 42), default);
+        Assert.Equal("d1", id!.Id);
+        var again = await a.Sync.EnsureIdentityAsync(() => new DriveIdentity("other", "x", 1), default);
+        Assert.Equal("d1", again!.Id);                      // never replaced
+
+        var after = await SyncService.ReadControlAsync(kit.Remote, default);
+        Assert.Equal(42, after!.Drive!.DataChannel);
+        Assert.Equal(before.Vault, after.Vault);            // the rest of the record is untouched
+    }
+
+    [Fact]
+    public void ControlRecordsWithoutIdentityStillParse()
+    {
+        var legacy = """{"v":1,"vault":{"v":1,"salt":"AA==","iter":1000,"chunkSize":2097152,"frameSize":65536,"verifier":"ab"},"lease":null,"snap":null}""";
+        var ctrl = ControlState.FromJson(legacy)!;
+        Assert.Null(ctrl.Drive);
+        Assert.Equal(1000, ctrl.Vault.Iter);
+    }
+
+    [Fact]
     public async Task GarbageCollectionWaitsForUploads()
     {
         await using var kit = await TestKit.CreateAsync();

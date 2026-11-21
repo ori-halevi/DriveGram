@@ -375,6 +375,11 @@ public sealed class IndexDb : IDisposable
             OR EXISTS (SELECT 1 FROM dirty d WHERE d.chunk=c.id))
         """, r => new StoredChunk(r.GetString(0), r.GetInt32(1), r.GetInt32(2), r.GetString(3)), ("@id", chunkId)).FirstOrDefault();
 
+    /// <summary>A few committed chunks (for checking that the data channel is the right one).</summary>
+    public List<StoredChunk> SampleChunks(int n) => Query(
+        "SELECT c.id,c.msg,c.size,c.hash FROM chunks c WHERE EXISTS (SELECT 1 FROM file_chunks f WHERE f.chunk=c.id) ORDER BY c.created DESC LIMIT @n",
+        r => new StoredChunk(r.GetString(0), r.GetInt32(1), r.GetInt32(2), r.GetString(3)), ("@n", n));
+
     public StoredChunk? FindChunk(string chunkId) => Query("SELECT id,msg,size,hash FROM chunks WHERE id=@id",
         r => new StoredChunk(r.GetString(0), r.GetInt32(1), r.GetInt32(2), r.GetString(3)), ("@id", chunkId)).FirstOrDefault();
 

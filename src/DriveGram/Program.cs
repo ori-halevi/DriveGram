@@ -24,6 +24,9 @@ var envFile = Opt("--env");
 bool verbose = Flag("--verbose");
 bool takeOver = Flag("--take-over");
 bool usePhone = Flag("--phone");
+var pickArg = Opt("--pick");
+var nameArg = Opt("--name");
+DriveGram.Sync.DriveIdentity? newIdentity = null; // set when `init` creates a brand-new drive
 
 var driveSel = Opt("--drive");
 Log.Open(Path.Combine(AppState.Root, "logs"));
@@ -240,7 +243,7 @@ void OfferRemember(Keys keys)
 
 async Task<int> Init()
 {
-    await using var remote = await DriveSession.OpenRemoteAsync(state, create: true);
+    await using var remote = await OpenOrPickDriveAsync();
     var ctrl = await SyncService.ReadControlAsync(remote, default);
     if (ctrl is null)
     {
@@ -256,7 +259,7 @@ async Task<int> Init()
             if (Ask("Repeat it: ", secret: true) == pw) break;
             Console.WriteLine("They do not match.");
         }
-        var keys = await SyncService.CreateDriveAsync(remote, pw, default);
+        var keys = await SyncService.CreateDriveAsync(remote, pw, default, identity: newIdentity);
         state.Save();
         OfferRemember(keys);
         Console.WriteLine("Drive created. Next: drivegram-tray (or: drivegram mount)");
@@ -282,7 +285,7 @@ async Task<int> Init()
 
 async Task<int> Status()
 {
-    await using var remote = await DriveSession.OpenRemoteAsync(state, create: false);
+    await using var remote = await DriveSession.OpenRemoteAsync(state);
     var ctrl = await SyncService.ReadControlAsync(remote, default) ?? throw new DriveGram.Remote.NoDriveException();
     using var db = IndexDb.Open(state.IndexPath);
     var (files, dirs) = db.Counts();
@@ -298,6 +301,46 @@ async Task<int> Status()
 }
 
 // `unmount` without --drive unmounts every drive (the installer relies on this).
+// Which drive `init` sets up: the one this profile knows; else one found on the account (--pick N);
+// else a new one (--name). Drives are told apart by their identity, never by channel names.
+async Task<DriveGram.Remote.IRemote> OpenOrPickDriveAsync()
+{
+    if (state.Folder is not null) return new DriveGram.Remote.FolderRemote(state.Folder);
+    var client = DriveSession.NewTelegramClient(state, TwoFactor);
+    if (state.Config.Channels is null)
+    {
+        var onPc = AppState.All().Where(a => a.Dir != state.Dir && a.Config.Channels is not null).Select(a => a.Config.Channels!.JournalId).ToHashSet();
+        var found = (await DriveGram.Remote.TelegramRemote.DiscoverAsync(client))
+            .Where(c => c.Channels is not null && c.HasVault && !onPc.Contains(c.Channels.JournalId)).ToList();
+        int pick = int.TryParse(pickArg, out var p) ? p : (found.Count == 1 ? 1 : 0);
+        if (found.Count > 1 && pickArg is null)
+        {
+            Console.WriteLine("This account can open these drives:");
+            for (int i = 0; i < found.Count; i++)
+                Console.WriteLine($"  {i + 1}. {found[i].Name}{(found[i].Owned ? "" : " (you are an admin)")}");
+            Console.WriteLine("Run again with --pick <number>, or --pick 0 for a new drive (--name <name>).");
+            throw new OperationCanceledException("no drive chosen");
+        }
+        if (pick >= 1 && pick <= found.Count)
+        {
+            state.Config.Channels = found[pick - 1].Channels;
+            state.Config.DriveId = found[pick - 1].DriveId ?? "";
+            state.Config.VolumeLabel = found[pick - 1].Name;
+        }
+        else
+        {
+            var name = nameArg ?? "DriveGram";
+            var id = Guid.NewGuid().ToString("N");
+            state.Config.Channels = await DriveGram.Remote.TelegramRemote.CreateChannelsAsync(client, name, id);
+            state.Config.DriveId = id;
+            state.Config.VolumeLabel = name;
+            newIdentity = new(id, name, state.Config.Channels.DataId);
+        }
+        state.Save();
+    }
+    return await DriveGram.Remote.TelegramRemote.OpenAsync(client, state.Config.Channels!);
+}
+
 int Unmount()
 {
     var targets = driveSel is not null || folder is not null ? [state] : AppState.All();

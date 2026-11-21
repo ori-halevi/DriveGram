@@ -305,15 +305,6 @@ sealed class LoginPage : WizardPage
         _accountText.Text = L.T($"✓  מחובר כ־{name}{handle}{phone}", $"✓  Signed in as {name}{handle}{phone}");
         _account.Visible = true;
 
-        // one drive per account: this account must not already hold another drive on this PC
-        var other = AppState.All().FirstOrDefault(a => a.Dir != Ctx.State.Dir && a.Config.AccountId == user.id);
-        if (other is not null)
-        {
-            _error.Text = L.T($"החשבון הזה כבר משמש את הכונן {other.DisplayName} במחשב הזה. התחבר עם חשבון אחר.",
-                              $"This account already holds the drive {other.DisplayName} on this PC. Use a different account.");
-            Changed(false);
-            return;
-        }
         Ctx.State.Config.AccountId = user.id;
         Ctx.State.Config.AccountName = string.IsNullOrEmpty(user.username) ? name : "@" + user.username;
         Changed(true);
@@ -530,17 +521,25 @@ sealed class LoginPage : WizardPage
     }
 }
 
-// ── 4. The drive ────────────────────────────────────────────────────────────
+// ── 4. The drive ──────────────────────────────────────────────────────────────
+/// <summary>
+/// Which drive this profile is: one of the drives the account can open (its own, or ones it is a
+/// backup admin of), or a new one. Several drives may live on one account; they are told apart by the
+/// identity in each drive's control record, not by channel names.
+/// </summary>
 sealed class DrivePage : WizardPage
 {
     enum Mode { Checking, Connected, Connect, Create }
 
-    readonly Label _checking = Theme.Label(L.T("בודק אם כבר יש כונן DriveGram בחשבון…", "Checking whether the account already has a DriveGram drive…"), Theme.Body, Theme.Muted);
+    readonly Label _checking = Theme.Label(L.T("מחפש כונני DriveGram בחשבון…", "Looking for DriveGram drives on the account…"), Theme.Body, Theme.Muted);
     readonly FlowLayoutPanel _connected = Theme.Column();
+    readonly FlowLayoutPanel _choices = Theme.Column();
     readonly FlowLayoutPanel _form = Theme.Column();
     readonly Panel _vanished = Theme.Card(Color.FromArgb(0xFD, 0xEC, 0xEA), Color.FromArgb(0xE5, 0x9A, 0x92));
-    readonly CheckBox _vanishedOk = new() { AutoSize = true, Text = L.T("הבנתי. צור כונן חדש וריק בחשבון הזה.", "I understand. Create a new, empty drive on this account.") };
+    readonly CheckBox _vanishedOk = new() { AutoSize = true, Text = L.T("הבנתי. אפשר להמשיך.", "I understand. Continue.") };
     readonly Label _intro = Theme.Label("", Theme.Body, Theme.Text, 640);
+    readonly Label _nameLabel = Theme.Label(L.T("שם הכונן:", "Drive name:"), Theme.Small, Theme.Muted);
+    readonly TextBox _name = Theme.Input(290);
     readonly TextBox _pw = Theme.Input(290, password: true);
     readonly Label _pwLabel = Theme.Label(L.T("סיסמה:", "Password:"), Theme.Small, Theme.Muted);
     readonly Label _confirmLabel = Theme.Label(L.T("הקלד שוב:", "Repeat it:"), Theme.Small, Theme.Muted);
@@ -560,6 +559,7 @@ sealed class DrivePage : WizardPage
     readonly Label _error = Theme.Label("", Theme.Small, Theme.Error);
     Mode _mode = Mode.Checking;
     bool _wasVanished;
+    DriveCandidate? _selected;   // null while "a new drive" is chosen
     ControlState? _ctrl;
     IRemote? _remote;
 
@@ -567,12 +567,12 @@ sealed class DrivePage : WizardPage
     public override string Subtitle => _mode switch
     {
         Mode.Create when _wasVanished => L.T("הכונן הקודם נמחק מטלגרם.", "The previous drive was deleted from Telegram."),
-        Mode.Create => L.T("יצירת כונן חדש וסיסמה שמצפינה אותו.", "Create a new drive, and the password that encrypts it."),
-        Mode.Connect => L.T("בחשבון כבר יש כונן. חבר אליו את המחשב הזה.", "This account already has a drive. Connect this PC to it."),
+        Mode.Create => L.T("כונן חדש, וסיסמה שמצפינה אותו.", "A new drive, and the password that encrypts it."),
+        Mode.Connect => L.T("חבר את המחשב הזה לכונן קיים.", "Connect this PC to an existing drive."),
         Mode.Connected => L.T("הכל מוכן כאן.", "All set here."),
         _ => L.T("רגע אחד…", "One moment…"),
     };
-    public override int DemoVariants => 3;
+    public override int DemoVariants => 4;
 
     public DrivePage(SetupContext ctx) : base(ctx)
     {
@@ -583,12 +583,13 @@ sealed class DrivePage : WizardPage
 
         var vcol = Theme.Column();
         vcol.Controls.Add(Theme.Label(L.T(
-            "⚠  הערוצים של הכונן שהיה בחשבון הזה נמחקו מטלגרם, ואיתם הקבצים שהיו בו. אי אפשר לשחזר אותם מכאן.",
-            "⚠  The channels of the drive that was on this account were deleted from Telegram, together with its files. They cannot be recovered from here."),
+            "⚠  הערוצים של הכונן שהיה מחובר כאן נמחקו מטלגרם (או שהחשבון יצא מהם), ואיתם הקבצים. אפשר לבחור כונן אחר או ליצור כונן חדש וריק.",
+            "⚠  The channels of the drive connected here were deleted from Telegram (or the account left them), with its files. You can choose another drive or create a new, empty one."),
             Theme.Small, Theme.Text, 620));
         vcol.Controls.Add(_vanishedOk);
         _vanished.Controls.Add(vcol);
         _vanished.Visible = false;
+        _choices.Visible = false;
 
         _meter.Controls.Add(_meterFill);
         var grid = new TableLayoutPanel { ColumnCount = 2, RowCount = 2, AutoSize = true, Margin = new Padding(0) };
@@ -605,47 +606,50 @@ sealed class DrivePage : WizardPage
             "⚠  אי אפשר לשחזר את הסיסמה. בלעדיה אף אחד, כולל אתה, לא יוכל לקרוא את הקבצים, גם עם גישה מלאה לחשבון הטלגרם. שמור אותה במנהל סיסמאות או רשום אותה.",
             "⚠  The password cannot be recovered. Without it nobody, including you, can read the files, even with full access to the Telegram account. Keep it in a password manager or write it down."),
             Theme.Small, Theme.Text, 640));
-        _form.Controls.AddRange([_vanished, _intro, grid, _strength, _show, _warning, _saved, _remember, _error]);
+        _name.RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No;
+        _name.Font = Theme.Body;
+        _form.Controls.AddRange([_intro, _nameLabel, _name, grid, _strength, _show, _warning, _saved, _remember, _error]);
         _form.Visible = false;
 
-        col.Controls.AddRange([_checking, _connected, _form]);
+        col.Controls.AddRange([_checking, _connected, _vanished, _choices, _form]);
         SetContent(col);
 
         _show.CheckedChanged += (_, _) => _pw.UseSystemPasswordChar = _pw2.UseSystemPasswordChar = !_show.Checked;
         _pw.TextChanged += (_, _) => UpdateState();
         _pw2.TextChanged += (_, _) => UpdateState();
+        _name.TextChanged += (_, _) => UpdateState();
         _saved.CheckedChanged += (_, _) => UpdateState();
         _vanishedOk.CheckedChanged += (_, _) => UpdateState();
         Changed(false);
     }
 
+    // ── discovery ────────────────────────────────────────────────────────────
     public override async Task EnterAsync()
     {
         _error.Text = "";
         _wasVanished = false;
+        _selected = null;
         SetMode(Mode.Checking);
         try
         {
-            if (Ctx.UsesTelegram)
-            {
-                var client = Ctx.GetClient();
-                var known = Ctx.State.Config.Channels;
-                bool exists = Ctx.Remote is not null ||
-                              await Task.Run(() => TelegramRemote.DriveExistsAsync(client, known));
-                if (!exists && known is not null) _wasVanished = true; // this PC knew a drive here, and it is gone
-                if (exists && Ctx.Remote is null) Ctx.Remote = await Task.Run(() => OpenRemoteAsync(create: false));
-                _remote = Ctx.Remote;
-            }
-            else _remote = new FolderRemote(Ctx.State.Folder!);
+            if (!Ctx.UsesTelegram) { await EnterFolderAsync(); return; }
+            var client = Ctx.GetClient();
 
-            _ctrl = _remote is null ? null : await SyncService.ReadControlAsync(_remote, default);
-            if (_ctrl is null) { SetMode(Mode.Create); return; }
-            if (Ctx.State.RememberedMaster() is { } master)
+            // a profile that already knows its drive: reopen exactly that one
+            if (Ctx.State.Config.Channels is { } known)
             {
-                try { Keys.FromMaster(_ctrl.Vault, master); SetMode(Mode.Connected); return; }
-                catch (WrongPasswordException) { Ctx.State.ForgetMaster(); }
+                try
+                {
+                    await UseRemoteAsync(await Task.Run(() => TelegramRemote.OpenAsync(client, known, ownsClient: false)));
+                    _ctrl = await SyncService.ReadControlAsync(_remote!, default);
+                    if (_ctrl is not null && RememberedKeyWorks()) { SetMode(Mode.Connected); return; }
+                    if (_ctrl is not null) { SetMode(Mode.Connect); return; }
+                }
+                catch (DriveVanishedException) { _wasVanished = true; }
             }
-            SetMode(Mode.Connect);
+
+            var candidates = await Task.Run(() => TelegramRemote.DiscoverAsync(client));
+            ShowChoices(candidates);
         }
         catch (Exception ex)
         {
@@ -654,20 +658,96 @@ sealed class DrivePage : WizardPage
         }
     }
 
-    async Task<TelegramRemote> OpenRemoteAsync(bool create)
+    async Task EnterFolderAsync()
     {
-        var remote = await TelegramRemote.OpenAsync(Ctx.GetClient(), Ctx.State.Config.Channels, create);
-        Ctx.State.Config.Channels = remote.Channels;
-        return remote;
+        _remote = new FolderRemote(Ctx.State.Folder!);
+        _ctrl = await SyncService.ReadControlAsync(_remote, default);
+        if (_ctrl is null) { SetMode(Mode.Create); return; }
+        SetMode(RememberedKeyWorks() ? Mode.Connected : Mode.Connect);
     }
 
+    bool RememberedKeyWorks()
+    {
+        if (Ctx.State.RememberedMaster() is not { } master || _ctrl is null) return false;
+        try { Keys.FromMaster(_ctrl.Vault, master); return true; }
+        catch (WrongPasswordException) { Ctx.State.ForgetMaster(); return false; }
+    }
+
+    async Task UseRemoteAsync(TelegramRemote remote)
+    {
+        if (Ctx.Remote is { } old && !ReferenceEquals(old, remote)) await old.DisposeAsync();
+        Ctx.Remote = remote;
+        _remote = remote;
+    }
+
+    /// <summary>One radio button per drive found, plus "a new drive".</summary>
+    void ShowChoices(List<DriveCandidate> candidates)
+    {
+        _choices.Controls.Clear();
+        var onThisPc = AppState.All().Where(a => a.Dir != Ctx.State.Dir && a.Config.Channels is not null)
+            .ToDictionary(a => a.Config.Channels!.JournalId, a => a.Config.MountPoint);
+        RadioButton? first = null;
+        if (candidates.Count > 0)
+            _choices.Controls.Add(Theme.Label(L.T("כוננים שהחשבון הזה יכול לפתוח:", "Drives this account can open:"), Theme.Heading));
+        foreach (var c in candidates)
+        {
+            string? why = c.Channels is null ? L.T("ערוץ הקבצים שלו חסר", "its data channel is missing")
+                : !c.HasVault ? L.T("היצירה שלו לא הושלמה", "it was never finished")
+                : onThisPc.TryGetValue(c.Channels.JournalId, out var letter) ? L.T($"כבר מחובר במחשב הזה כ־{letter}", $"already on this PC as {letter}")
+                : null;
+            var owner = c.Owned ? L.T("שלך", "yours") : L.T("אתה מנהל בו (גיבוי)", "you are an admin (backup)");
+            var rb = Choice($"{c.Name}  ·  {owner}{(why is null ? "" : $"  —  {why}")}", c, enabled: why is null);
+            if (why is null) first ??= rb;
+        }
+        var create = Choice(L.T("כונן חדש בחשבון הזה", "A new drive on this account"), null, enabled: true);
+        create.Font = new Font(Theme.Body, FontStyle.Bold);
+        _choices.Visible = true;
+        (first ?? create).Checked = true;
+        if (_wasVanished) _vanished.Visible = true;
+    }
+
+    RadioButton Choice(string text, DriveCandidate? candidate, bool enabled)
+    {
+        var rb = new RadioButton { Text = text, AutoSize = true, Enabled = enabled, Tag = candidate, Margin = new Padding(0, 2, 0, 4) };
+        rb.CheckedChanged += (_, _) => { if (rb.Checked) Select((DriveCandidate?)rb.Tag); };
+        _choices.Controls.Add(rb);
+        return rb;
+    }
+
+    void Select(DriveCandidate? c)
+    {
+        _selected = c;
+        _ctrl = null;
+        _error.Text = "";
+        if (c is null)
+        {
+            var taken = AppState.All().Select(a => a.Config.VolumeLabel).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            _name.Text = Enumerable.Range(1, 99).Select(i => i == 1 ? "DriveGram" : $"DriveGram {i}").First(n => !taken.Contains(n));
+            SetMode(Mode.Create);
+        }
+        else SetMode(Mode.Connect);
+    }
+
+    // ── form ─────────────────────────────────────────────────────────────────
     public override void Demo(int variant)
     {
-        _wasVanished = variant == 2;
-        SetMode(variant == 1 ? Mode.Connect : Mode.Create);
-        _pw.Text = variant == 1 ? "secret" : "Correct-Horse-7";
-        _pw2.Text = variant == 1 ? "" : "Correct-Horse-7";
-        if (variant == 1) _error.Text = L.T("הסיסמה שגויה.", "Wrong password.");
+        _wasVanished = variant == 3;
+        if (variant == 0)
+        {
+            ShowChoices([
+                new DriveCandidate("a", "DriveGram", new TelegramChannels(1, 1, 2, 2), true, true, true),
+                new DriveCandidate("b", "Photos", new TelegramChannels(3, 3, 4, 4), true, true, true),
+                new DriveCandidate("c", "DriveGram", new TelegramChannels(5, 5, 6, 6), false, true, false)]);
+            _pw.Text = "secret";
+            return;
+        }
+        _choices.Visible = false;
+        SetMode(variant == 2 ? Mode.Connect : Mode.Create);
+        _name.Text = "DriveGram";
+        _pw.Text = variant == 2 ? "secret" : "Correct-Horse-7";
+        _pw2.Text = variant == 2 ? "" : "Correct-Horse-7";
+        if (variant == 2) _error.Text = L.T("הסיסמה שגויה.", "Wrong password.");
+        _vanished.Visible = _wasVanished;
     }
 
     void SetMode(Mode mode)
@@ -675,17 +755,17 @@ sealed class DrivePage : WizardPage
         _mode = mode;
         _checking.Visible = mode == Mode.Checking;
         _checking.ForeColor = Theme.Muted;
+        if (mode == Mode.Checking) _checking.Text = L.T("מחפש כונני DriveGram בחשבון…", "Looking for DriveGram drives on the account…");
         _connected.Visible = mode == Mode.Connected;
         _form.Visible = mode is Mode.Connect or Mode.Create;
         bool create = mode == Mode.Create;
-        _vanished.Visible = create && _wasVanished;
+        _nameLabel.Visible = _name.Visible = create && Ctx.UsesTelegram;
         _confirmLabel.Visible = _pw2.Visible = _strength.Visible = _warning.Visible = _saved.Visible = create;
         _intro.Text = create
             ? L.T("בחר סיסמה לכונן, לפחות 10 תווים. היא מצפינה כל קובץ לפני שהוא עולה לטלגרם.",
                   "Choose a drive password, at least 10 characters. It encrypts every file before it goes to Telegram.")
-            : L.T("נמצא כונן DriveGram בחשבון. הקלד את הסיסמה שלו כדי לחבר את המחשב הזה.",
-                  "This account has a DriveGram drive. Enter its password to connect this PC.");
-        if (_form.Visible) _pw.Focus();
+            : L.T("הקלד את הסיסמה של הכונן כדי לחבר אליו את המחשב הזה.", "Enter the drive's password to connect this PC to it.");
+        if (_form.Visible) (create && _name.Visible ? _name : _pw).Focus();
         UpdateState();
     }
 
@@ -707,8 +787,9 @@ sealed class DrivePage : WizardPage
     void UpdateState()
     {
         bool ok;
+        bool vanishedOk = !_wasVanished || _vanishedOk.Checked;
         if (_mode == Mode.Connected) ok = true;
-        else if (_mode == Mode.Connect) ok = _pw.Text.Length > 0;
+        else if (_mode == Mode.Connect) ok = _pw.Text.Length > 0 && vanishedOk;
         else if (_mode == Mode.Create)
         {
             var (score, text, color) = Strength(_pw.Text);
@@ -718,37 +799,60 @@ sealed class DrivePage : WizardPage
             _meterText.ForeColor = color;
             bool match = _pw2.Text.Length == 0 || _pw2.Text == _pw.Text;
             _error.Text = match ? "" : L.T("הסיסמאות לא זהות.", "The passwords do not match.");
-            ok = _pw.Text.Length >= 10 && _pw2.Text == _pw.Text && _saved.Checked && (!_wasVanished || _vanishedOk.Checked);
+            ok = _pw.Text.Length >= 10 && _pw2.Text == _pw.Text && _saved.Checked && vanishedOk &&
+                 (!_name.Visible || _name.Text.Trim().Length > 0);
         }
         else ok = false;
         Changed(ok);
     }
 
+    // ── next ─────────────────────────────────────────────────────────────────
     public override async Task<bool> NextAsync()
     {
         if (_mode == Mode.Connected) return true;
         _error.Text = "";
         var pw = _pw.Text;
+        var cfg = Ctx.State.Config;
+        if (_wasVanished)
+        {
+            // the old local index points at chunks that no longer exist: start this profile clean
+            Ctx.State.ResetLocalData();
+            cfg.Channels = null;
+            cfg.DriveId = "";
+            _wasVanished = false;
+        }
+
         Keys keys;
         if (_mode == Mode.Create)
         {
-            if (_wasVanished)
+            DriveIdentity? identity = null;
+            if (Ctx.UsesTelegram)
             {
-                // start clean: the old local index points at chunks that no longer exist
-                Ctx.State.ResetLocalData();
-                Ctx.State.Config.Channels = null;
+                var name = _name.Text.Trim();
+                var driveId = Guid.NewGuid().ToString("N");
+                var client = Ctx.GetClient();
+                var channels = await Task.Run(() => TelegramRemote.CreateChannelsAsync(client, name, driveId));
+                await UseRemoteAsync(await Task.Run(() => TelegramRemote.OpenAsync(client, channels, ownsClient: false)));
+                identity = new DriveIdentity(driveId, name, channels.DataId);
+                cfg.Channels = channels;
+                cfg.DriveId = driveId;
+                cfg.VolumeLabel = name;
             }
-            if (Ctx.UsesTelegram && Ctx.Remote is null)
-            {
-                Ctx.Remote = await Task.Run(() => OpenRemoteAsync(create: true));
-                _remote = Ctx.Remote;
-            }
-            keys = await Task.Run(() => SyncService.CreateDriveAsync(_remote!, pw, default));
-            Log.Info($"setup: created a new drive ({Ctx.State.Id})");
-            Ctx.State.Save();
+            var remote = _remote!;
+            keys = await Task.Run(() => SyncService.CreateDriveAsync(remote, pw, default, identity: identity));
+            Log.Info($"setup: created drive '{cfg.VolumeLabel}' ({Ctx.State.Id})");
         }
         else
         {
+            if (_selected is { Channels: { } chosen } c)
+            {
+                await UseRemoteAsync(await Task.Run(() => TelegramRemote.OpenAsync(Ctx.GetClient(), chosen, ownsClient: false)));
+                _ctrl = await SyncService.ReadControlAsync(_remote!, default);
+                if (_ctrl is null) { _error.Text = L.T("לכונן הזה אין רשומת בקרה.", "This drive has no control record."); return false; }
+                cfg.Channels = chosen;
+                cfg.DriveId = c.DriveId ?? "";
+                if (cfg.VolumeLabel is "" or "DriveGram") cfg.VolumeLabel = c.Name;
+            }
             try { keys = await Task.Run(() => Keys.Unlock(_ctrl!.Vault, pw)); }
             catch (WrongPasswordException)
             {
@@ -758,6 +862,7 @@ sealed class DrivePage : WizardPage
                 return false;
             }
         }
+        Ctx.State.Save();
         if (_remember.Checked) Ctx.State.RememberMaster(keys.ExportMaster());
         else Ctx.State.ForgetMaster();
         return true;
