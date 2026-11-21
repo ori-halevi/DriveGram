@@ -77,6 +77,7 @@ public sealed class IndexDb : IDisposable
             CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
             CREATE TABLE IF NOT EXISTS pending_gc(msg INTEGER PRIMARY KEY, since INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS own_appends(msg INTEGER PRIMARY KEY);
+            CREATE INDEX IF NOT EXISTS ix_dirty_kind ON dirty(kind, staged);
             CREATE TABLE IF NOT EXISTS seen_entries(nonce TEXT PRIMARY KEY);
             """);
         // migration (0.5 → 0.6): which chunk rows this PC uploaded itself
@@ -306,7 +307,6 @@ public sealed class IndexDb : IDisposable
 
     void Apply(Op op, bool remote)
     {
-        _usedCache = -1;
         switch (op)
         {
             case UpsertOp u:
@@ -446,7 +446,6 @@ public sealed class IndexDb : IDisposable
     /// <summary>Local-only size/mtime while a file has uncommitted changes (the ContentOp carries them later).</summary>
     public void SetLocalSize(string id, long size, long mtime)
     {
-        _usedCache = -1;
         Exec("UPDATE nodes SET size=@s, mtime=@m WHERE id=@id", ("@id", id), ("@s", size), ("@m", mtime));
     }
 
@@ -558,6 +557,9 @@ public sealed class IndexDb : IDisposable
     public List<DirtyRow> DirtyRows(string node) =>
         Query($"SELECT {DirtyCols} FROM dirty WHERE node=@n ORDER BY idx", MapDirty, ("@n", node));
 
+    /// <summary>Dirty rows matching a fixed condition (internal callers only; no user input).</summary>
+    public List<DirtyRow> DirtyWhere(string condition) => Query($"SELECT {DirtyCols} FROM dirty WHERE {condition}", MapDirty);
+
     public List<DirtyRow> AllDirty() => Query($"SELECT {DirtyCols} FROM dirty", MapDirty);
 
     public void PutDirty(DirtyRow d) => Exec($"""
@@ -649,7 +651,6 @@ public sealed class IndexDb : IDisposable
             foreach (var f in snap.FileChunks)
                 Exec("INSERT INTO file_chunks(node,idx,chunk) VALUES(@n,@i,@c)", ("@n", f[0]), ("@i", int.Parse(f[1])), ("@c", f[2]));
         });
-        _usedCache = -1;
         return snap.Upto > 0 ? snap.Upto : null;
     }
 }

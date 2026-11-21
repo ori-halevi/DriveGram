@@ -290,6 +290,7 @@ public sealed class DriveSession : IAsyncDisposable
         lock (_notifyGate) { wasMounted = _mounted; _mounted = false; }
         if (wasMounted)
         {
+            Engine.CancelWaits();
             _host.Unmount();
             Log.Info($"unmounted {MountPoint}");
         }
@@ -383,21 +384,21 @@ public sealed class DriveSession : IAsyncDisposable
             // Explorer deletes a folder bottom-up: its content was trashed item by item just before it.
             // Bring back what went with it (not what was deleted separately, long before).
             long window = TimeSpan.FromMinutes(10).Ticks;
-            var stack = new Stack<string>([n.Id]);
+            var stack = new Stack<(string Id, long Deleted)>([(n.Id, n.Trashed)]);
             while (stack.Count > 0)
             {
-                var folder = stack.Pop();
+                var (folder, folderDeleted) = stack.Pop();
                 var taken = Db.Children(folder).Select(x => IndexDb.NameKey(x.Name)).ToHashSet();
                 // newest-trashed first: an older version replaced shortly before must not take the name
                 foreach (var c in Db.ChildrenAll(folder).OrderByDescending(x => x.Trashed))
                 {
                     if (c.Trashed != 0)
                     {
-                        if (c.Trashed > n.Trashed || n.Trashed - c.Trashed > window) continue; // deleted on its own
+                        if (c.Trashed > folderDeleted || folderDeleted - c.Trashed > window) continue; // deleted on its own
                         if (!taken.Add(IndexDb.NameKey(c.Name))) continue; // an older version of a restored file
                         ops.Add(new RestoreOp(c.Id, c.Parent!, c.Name));
                     }
-                    if (c.Dir) stack.Push(c.Id);
+                    if (c.Dir) stack.Push((c.Id, c.Trashed != 0 ? c.Trashed : folderDeleted));
                 }
             }
         }

@@ -340,7 +340,7 @@ public sealed class ContentEngine : IAsyncDisposable
                 case RemoteSeg r:
                 {
                     var buf = new byte[r.Len];
-                    using var cts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+                    using var cts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, _waits.Token);
                     cts.CancelAfter(ReadBudget);
                     Remote(() => _reader.ReadAsync(r.Loc, r.InOff, buf, sequential, cts.Token).GetAwaiter().GetResult());
                     buf.CopyTo(target);
@@ -506,7 +506,7 @@ public sealed class ContentEngine : IAsyncDisposable
             using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             if (Convert.ToHexStringLower(SHA256.HashData(fs)) == hash) { _verifiedPlain[chunkId] = true; return path; }
         }
-        catch (IOException) { return null; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
         Log.Warn($"cached copy of chunk {chunkId[..12]} is damaged; it will be fetched again");
         _cache.RemovePlain(chunkId);
         return null;
@@ -576,10 +576,11 @@ public sealed class ContentEngine : IAsyncDisposable
         while (Interlocked.Read(ref _stagingBytes) + incoming > StagingLimit())
         {
             EvictUploadedPieces();
+            if (StagingLimit() < _o.StagingQuota) FitCacheToDisk(incoming); // the disk is the limit: free cache
             if (Interlocked.Read(ref _stagingBytes) + incoming <= StagingLimit()) return;
-            if (DateTime.UtcNow > deadline || _cts.IsCancellationRequested)
+            if (DateTime.UtcNow > deadline || _cts.IsCancellationRequested || _waits.IsCancellationRequested)
                 throw new IOException("DriveGram: local staging area is full (uploads are not keeping up).");
-            WaitHandle.WaitAny([_roomSignal, _cts.Token.WaitHandle], 500);
+            WaitHandle.WaitAny([_roomSignal, _cts.Token.WaitHandle, _waits.Token.WaitHandle], 500);
         }
     }
 
@@ -598,6 +599,15 @@ public sealed class ContentEngine : IAsyncDisposable
         return Interlocked.Read(ref _freeBytes);
     }
 
+    /// <summary>The cache is only a copy: when the local disk runs low it shrinks (below its current size
+    /// if needed) to keep MinFreeDisk free, plus `needed` bytes for a write that is waiting.</summary>
+    void FitCacheToDisk(long needed)
+    {
+        long room = _cache.Bytes + FreeDisk() - _o.MinFreeDisk - needed;
+        _cache.SetQuota(Math.Clamp(room, 0, _o.CacheQuota));
+        Interlocked.Exchange(ref _freeAt, 0); // re-measure right away
+    }
+
     /// <summary>The staging quota, but never so much that the local disk would drop below MinFreeDisk.</summary>
     long StagingLimit() =>
         Math.Min(_o.StagingQuota, Interlocked.Read(ref _stagingBytes) + Math.Max(0, FreeDisk() - _o.MinFreeDisk));
@@ -605,10 +615,28 @@ public sealed class ContentEngine : IAsyncDisposable
     /// <summary>Windows session ends: release every thread waiting in here, right now.</summary>
     public void Abort() => _cts.Cancel();
 
+    readonly CancellationTokenSource _waits = new();
+
+    /// <summary>Unmounting: file-system requests waiting for room or for a download give up now (uploads
+    /// and commits go on), so the unmount does not hang behind them.</summary>
+    public void CancelWaits() => _waits.Cancel();
+
+    /// <summary>Is every byte of this file on this PC (staged or in the cache)?</summary>
+    public bool IsFullyLocal(string id)
+    {
+        var st = State(id);
+        lock (st.Lock)
+        {
+            var node = _db.Get(id);
+            if (node is null || node.Size == 0) return true;
+            return Plan(id, 0, (int)Math.Min(node.Size, int.MaxValue)).OfType<RemoteSeg>().All(r => _cache.TryGetPlain(r.Loc.ChunkId) is not null);
+        }
+    }
+
     /// <summary>Free disk by dropping local copies of pieces already safely uploaded.</summary>
     void EvictUploadedPieces()
     {
-        foreach (var row in _db.AllDirty().Where(r => r is { Kind: 'U', Staged: true }))
+        foreach (var row in _db.DirtyWhere("kind='U' AND staged=1"))
         {
             var st = State(row.Node);
             lock (st.Lock)
@@ -832,15 +860,10 @@ public sealed class ContentEngine : IAsyncDisposable
             {
                 await Task.Delay(1000, ct);
                 if (++_ticks % 60 == 0) ReconcileStaging(adjustCount: true);
-                if (_ticks % 10 == 0)
-                {
-                    // the cache gives way when the local disk runs low (it is only a copy)
-                    long room = _cache.Bytes + Math.Max(0, FreeDisk() - _o.MinFreeDisk);
-                    _cache.SetQuota(Math.Max(256L << 20, Math.Min(_o.CacheQuota, room)));
-                }
+                if (_ticks % 10 == 0) FitCacheToDisk(0);
                 long now = Environment.TickCount64;
                 var due = new List<(string, int)>();
-                foreach (var row in _db.AllDirty().Where(r => r.Kind == 'S' && r.Size == CS))
+                foreach (var row in _db.DirtyWhere($"kind='S' AND size={CS}"))
                 {
                     var st = State(row.Node);
                     lock (st.Lock)

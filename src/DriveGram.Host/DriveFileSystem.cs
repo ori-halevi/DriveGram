@@ -166,7 +166,8 @@ public sealed class DriveFileSystem : FileSystemBase
 
     // Antivirus full scans and the search indexer read EVERY file of every fixed drive. Here that would
     // download the whole drive from Telegram (rate limits, a thrashing cache): they get only what is
-    // already on this PC. People's apps (Explorer thumbnails included) are not affected.
+    // already on this PC. People's apps (Explorer thumbnails included) are not affected. Decided at Open:
+    // WinFsp names the requesting process only for Create/Open/Rename.
     static readonly HashSet<string> Scanners = new(StringComparer.OrdinalIgnoreCase)
     {
         "MsMpEng", "MpDefenderCoreService", "NisSrv", "MpCopyAccelerator",
@@ -217,6 +218,12 @@ public sealed class DriveFileSystem : FileSystemBase
         finally { CloseHandle(h); }
     }
 
+    readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _createdAt = new();
+
+    static bool LooksTemporary(string name) =>
+        name.StartsWith("~") || name.StartsWith(".~lock") ||
+        Path.GetExtension(name).ToLowerInvariant() is ".tmp" or ".temp" or ".crdownload" or ".part" or ".partial" or ".download";
+
     static bool InGitDir(string path) =>
         path.Contains("\\.git\\", StringComparison.OrdinalIgnoreCase);
 
@@ -249,7 +256,7 @@ public sealed class DriveFileSystem : FileSystemBase
     }
 
     public override int SetSecurity(object fileNode, object fileDesc, AccessControlSections sections, byte[] securityDescriptor) =>
-        STATUS_SUCCESS; // ACLs are not stored: everyone on this PC who can see the drive can use it
+        STATUS_SUCCESS; // ACLs are not stored: the drive belongs to the Windows user who mounted it
 
     // ── create / open / close ────────────────────────────────────────────────
     public override int Create(string fileName, uint createOptions, uint grantedAccess, uint fileAttributes,
@@ -271,6 +278,7 @@ public sealed class DriveFileSystem : FileSystemBase
         var id = Guid.NewGuid().ToString("N");
         long now = Now;
         _db.ApplyLocal(new UpsertOp(id, parent.Id, name, dir, attrs, now, now));
+        if (!dir) _createdAt[id] = Environment.TickCount64;
         bool writer = !dir && (grantedAccess & WriteAccess) != 0;
         _engine.Opened(id, writer);
         fileNode = new Handle(id, dir, writer, writer);
@@ -285,6 +293,7 @@ public sealed class DriveFileSystem : FileSystemBase
         fileNode = default!; fileDesc = default!; fileInfo = default; normalizedName = default!;
         var n = _db.Resolve(fileName);
         if (n is null) return STATUS_OBJECT_NAME_NOT_FOUND;
+        if (!n.Dir && n.Size > 0 && IsBackgroundScanner() && !_engine.IsFullyLocal(n.Id)) return StatusFileIsOffline;
         if (ReadOnly && !n.Dir && (grantedAccess & WriteAccess) != 0) return STATUS_ACCESS_DENIED;
         bool canWrite = !n.Dir && !ReadOnly && (grantedAccess & WriteAccess) != 0;
         fileNode = new Handle(n.Id, n.Dir, false, canWrite); // a writer only once it changes something
@@ -316,7 +325,10 @@ public sealed class DriveFileSystem : FileSystemBase
             var n = _db.Get(h.Id);
             if (n is null || n.IsRoot) return;
             bool neverStored = !n.Dir && _db.IsPending(n.Id) && _db.CommittedChunks(n.Id).Count == 0;
-            if (!n.Dir && (n.Name.StartsWith("~$") || neverStored || InGitDir(fileName)))
+            // never uploaded AND (a temp file, or created minutes ago by this session — a cancelled copy or a
+            // download that failed); an offline-saved file deleted by mistake later still goes to the trash
+            bool justMade = _createdAt.TryGetValue(n.Id, out var made) && Environment.TickCount64 - made < 30 * 60_000;
+            if (!n.Dir && (n.Name.StartsWith("~$") || InGitDir(fileName) || (neverStored && (LooksTemporary(n.Name) || justMade))))
             {
                 _engine.Discard(n.Id); // first: the purge removes the rows Discard uses to find the pieces
                 _db.ApplyLocal(new PurgeOp(n.Id));
@@ -349,7 +361,7 @@ public sealed class DriveFileSystem : FileSystemBase
         var n = _db.Get(h.Id) ?? throw new FileNotFoundException();
         if (offset >= (ulong)n.Size) return STATUS_END_OF_FILE;
         var span = new Span<byte>((void*)buffer, (int)length);
-        bytesTransferred = (uint)_engine.Read(h.Id, (long)offset, span, allowRemote: !IsBackgroundScanner());
+        bytesTransferred = (uint)_engine.Read(h.Id, (long)offset, span);
         return STATUS_SUCCESS;
     }
 
@@ -396,8 +408,9 @@ public sealed class DriveFileSystem : FileSystemBase
         var n = NodeOf(fileNode);
         if (n.IsRoot) { fileInfo = Info(n); return STATUS_SUCCESS; }
         uint attrs = fileAttributes != unchecked((uint)-1) ? CleanAttrs(fileAttributes, n.Dir) : n.Attrs;
-        long ctime = creationTime != 0 ? (long)creationTime : n.Ctime;
-        long mtime = lastWriteTime != 0 ? (long)lastWriteTime : n.Mtime;
+        static bool Real(ulong t) => t != 0 && t < 0xFFFFFFFFFFFFFFFE;
+        long ctime = Real(creationTime) ? (long)creationTime : n.Ctime;
+        long mtime = Real(lastWriteTime) ? (long)lastWriteTime : n.Mtime;
         if (attrs != n.Attrs || ctime != n.Ctime || mtime != n.Mtime)
             _db.ApplyLocal(new UpsertOp(n.Id, n.Parent!, n.Name, n.Dir, attrs, ctime, mtime));
         fileInfo = Info(_db.Get(n.Id)!);
@@ -438,18 +451,20 @@ public sealed class DriveFileSystem : FileSystemBase
         if (n.Dir && _db.IsSelfOrAncestor(n.Id, newParent.Id)) return STATUS_INVALID_PARAMETER;
 
         var ops = new List<Op>();
+        bool dropExisting = false;
         var existing = _db.Child(newParent.Id, newName);
         if (existing is not null && existing.Id != n.Id)
         {
             if (!replaceIfExists) return STATUS_OBJECT_NAME_COLLISION;
             if (existing.Dir) return STATUS_ACCESS_DENIED;
             // replaced file goes to the trash (= old version kept 30 days); git rewrites its own files constantly
-            ops.Add(InGitDir(newFileName) ? new PurgeOp(existing.Id) : new TrashOp(existing.Id, Now));
+            dropExisting = InGitDir(newFileName) || (_db.IsPending(existing.Id) && _db.CommittedChunks(existing.Id).Count == 0);
+            ops.Add(dropExisting ? new PurgeOp(existing.Id) : new TrashOp(existing.Id, Now));
         }
         // a save via "temp file + rename over the original" keeps the document's creation date
         long ctime = existing is not null && existing.Id != n.Id && !existing.Dir ? existing.Ctime : n.Ctime;
         ops.Add(new UpsertOp(n.Id, newParent.Id, newName, n.Dir, n.Attrs, ctime, n.Mtime));
-        if (existing is not null && existing.Id != n.Id && InGitDir(newFileName)) _engine.Discard(existing.Id);
+        if (dropExisting) _engine.Discard(existing!.Id);
         _db.ApplyLocal(ops); // a trashed replaced file keeps its content (an unfinished upload still completes)
         return STATUS_SUCCESS;
     }
