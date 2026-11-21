@@ -42,6 +42,7 @@ public static class TelegramAccounts
         public required DpapiSessionStream Stream;
         public required Governor Up, Down;
         public required ClientHealer Healer;
+        public Semaphore? ProcessLock;
         public int Refs;
     }
 
@@ -59,12 +60,25 @@ public static class TelegramAccounts
         {
             if (!Entries.TryGetValue(path, out var e))
             {
-                var client = DriveSession.NewTelegramClient(state, askPassword, out var stream);
+                // the same sign-in used by two programs at once makes Telegram reset it (AUTH_KEY_DUPLICATED)
+                var processLock = new Semaphore(1, 1, @"Local\DriveGram-account-" + Convert.ToHexString(
+                    System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(path.ToUpperInvariant())))[..16]);
+                if (!processLock.WaitOne(0))
+                {
+                    processLock.Dispose();
+                    throw new InvalidOperationException(L.T("החשבון הזה כבר בשימוש בתוכנת DriveGram אחרת שפתוחה במחשב (למשל שורת הפקודה). סגור אותה ונסה שוב.",
+                        "This account is already in use by another DriveGram program on this PC (e.g. the command line). Close it and try again."));
+                }
+                WTelegram.Client client;
+                DpapiSessionStream stream;
+                try { client = DriveSession.NewTelegramClient(state, askPassword, out stream); }
+                catch { processLock.Release(); processLock.Dispose(); throw; }
                 e = new Entry
                 {
                     Path = path, Client = client, Stream = stream,
                     Up = new Governor("upload", 8), Down = new Governor("download", 8),
                     Healer = new ClientHealer(client, System.IO.Path.GetFileName(System.IO.Path.GetDirectoryName(path)) ?? "account"),
+                    ProcessLock = processLock,
                 };
                 // A 401 can also come from a secondary data center's connection (files stored elsewhere):
                 // only a 401 confirmed on the main connection means "signed out".
@@ -85,6 +99,7 @@ public static class TelegramAccounts
         }
         e.Healer.Dispose();
         try { e.Client.Dispose(); } catch (Exception ex) { Log.Warn($"closing a Telegram connection: {ex.Message}"); }
+        if (e.ProcessLock is { } pl) { try { pl.Release(); } catch { } pl.Dispose(); }
     }
 
     static async Task<bool> StillSignedOutAsync(WTelegram.Client client)
@@ -301,7 +316,12 @@ public static class TelegramAccounts
                 probe.Config.ApiId = info.ApiId;
                 probe.Config.ApiHash = info.ApiHash;
                 using var client = DriveSession.NewTelegramClient(probe, null, out _);
-                try { await TL.SchemaExtensions.Auth_LogOut(client); } catch { }
+                try { await TL.SchemaExtensions.Auth_LogOut(client).WaitAsync(TimeSpan.FromSeconds(15)); }
+                catch (Exception ex)
+                {
+                    Log.Warn($"sign out of {key} did not reach Telegram ({ex.Message}); the sign-in is kept and tried again later");
+                    return;
+                }
             }
             Directory.Delete(dir, true);
         }

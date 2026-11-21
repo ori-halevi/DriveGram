@@ -147,9 +147,24 @@ begin
     exit;
   end;
   { exit code 4: something exists only on this PC }
-  if Exec(Exe, 'uninstall-cleanup --check', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 4) then
+  { anything but "nothing only here" (0) warns: also a check that could not run }
+  if (not Exec(Exe, 'uninstall-cleanup --check', '', SW_HIDE, ewWaitUntilTerminated, Code)) or (Code <> 0) then
     if MsgBox(CustomMessage('CleanupLocalOnly'), mbError, MB_YESNO or MB_DEFBUTTON2) <> IDYES then exit;
   Exec(Exe, 'uninstall-cleanup', '', SW_HIDE, ewWaitUntilTerminated, Code);
+end;
+
+{ drive letters still wearing DriveGram's icon/name would show any USB stick on that letter as "DriveGram" }
+procedure RemoveDriveIcons;
+var Letters: TArrayOfString;
+    I: Integer;
+    Icon, Key: String;
+begin
+  Key := 'Software\Classes\Applications\Explorer.exe\Drives';
+  if not RegGetSubkeyNames(HKEY_CURRENT_USER, Key, Letters) then exit;
+  for I := 0 to GetArrayLength(Letters) - 1 do
+    if RegQueryStringValue(HKEY_CURRENT_USER, Key + '\' + Letters[I] + '\DefaultIcon', '', Icon) then
+      if Pos('drivegram', Lowercase(Icon)) > 0 then
+        RegDeleteKeyIncludingSubkeys(HKEY_CURRENT_USER, Key + '\' + Letters[I]);
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -170,7 +185,10 @@ begin
   end;
   { "Start with Windows" is set by the app, so the uninstaller removes it explicitly }
   if CurUninstallStep = usPostUninstall then
+  begin
     RegDeleteValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Run', 'DriveGram');
+    RemoveDriveIcons;
+  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

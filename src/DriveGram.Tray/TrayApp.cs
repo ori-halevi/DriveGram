@@ -626,6 +626,19 @@ sealed class TrayApp : ApplicationContext
         UpdateIcon();
     }
 
+    async Task ConfirmRecordAsync(DriveController d, DriveSession s)
+    {
+        if (Ui.Ask(L.T(
+                "רשומת הכונן בטלגרם שונתה על ידי מישהו בלי סיסמת הכונן (או נערכה ידנית). לכן DriveGram לא סומך על מה שכתוב בה, והכונן לקריאה בלבד.\n\n" +
+                "אם אתה יודע שזה בסדר (למשל אתה ערכת אותה), אפשר לאשר: הסיסמה תאמת אותה מחדש, ופרטים שעלולים להטעות (מי מחזיק את הכונן, בקשות העברה, תמונת המצב) יאופסו. הקבצים לא מושפעים.\n\nאם לא – בדוק מי מנהל את הערוצים (\"גיבוי בחשבון נוסף…\").\n\nלאשר?",
+                "The drive's record in Telegram was changed by someone without the drive's password (or edited by hand). So DriveGram does not trust what it says, and the drive is read-only.\n\n" +
+                "If you know this is fine (e.g. you edited it), you can confirm: the password re-validates it, and details that could mislead (who holds the drive, handover requests, the snapshot) are reset. Files are not affected.\n\nIf not, check who administers the channels (\"Backup on another account…\").\n\nConfirm?"),
+                icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+        try { await Task.Run(() => s.Sync.RepairControlAsync(default)); }
+        catch (Exception ex) { Ui.Error(Setup.TelegramErrors.Text(ex)); }
+        UpdateIcon();
+    }
+
     bool _deleting;
 
     sealed class PasswordNotGivenException() : Exception("no password entered");
@@ -763,6 +776,7 @@ sealed class TrayApp : ApplicationContext
         if (d.Stopping) return L.T("מתנתק…", "disconnecting…");
         if (d.Session is not { } s) return d.Problem is null ? L.T("לא מחובר", "not connected") : d.Problem;
         var st = s.Status;
+        if (!s.Sync.ControlTrusted) return L.T("⚠ רשומת הכונן שונתה מחוץ ל־DriveGram: קריאה בלבד", "⚠ the drive's record was changed outside DriveGram: read-only");
         if (s.Sync.NeedsUpdate) return L.T("קריאה בלבד: צריך לעדכן את DriveGram", "read-only: DriveGram needs an update");
         if (s.Sync.HandingOver)
             return L.T("מעביר את הכונן למחשב אחר", "handing the drive to another PC") + " (" + L.N(st.PendingFiles, "נשאר קובץ אחד להעלות", "נשארו {0} קבצים להעלות", "1 upload left", "{0} uploads left") + ")";
@@ -811,6 +825,8 @@ sealed class TrayApp : ApplicationContext
                 item.DropDownItems.Add(Item(L.T("חבר", "Connect"), async () => { if (d.NeedsSetup) await SetupAsync(d); else await MountAsync(d); },
                     !d.Starting));
             else item.DropDownItems.Add(Item(L.T("נתק", "Disconnect"), async () => await StopAsync(d), !d.Stopping));
+            if (d.Session is { Sync.ControlTrusted: false } tampered)
+                item.DropDownItems.Add(Item(L.T("אשר את רשומת הכונן…", "Confirm the drive's record…"), async () => await ConfirmRecordAsync(d, tampered), !d.Stopping, bold: true));
             if (d.Session is { Writable: false, Sync: { LeaseHolder: { } holder, NeedsUpdate: false } })
                 item.DropDownItems.Add(Item(L.T($"בקש את הכונן מ־{holder}…", $"Ask {holder} for the drive…"), () => AskForDrive(d), !d.Stopping, bold: true));
             item.DropDownItems.Add(Item(L.T("הגדרות והתחברות…", "Settings and sign-in…"), async () => await SetupAsync(d), !d.Starting && !d.Stopping));
@@ -819,7 +835,9 @@ sealed class TrayApp : ApplicationContext
                 item.DropDownItems.Add(Item(L.T("גיבוי בחשבון נוסף…", "Backup on another account…"), () => ShowBackup(d)));
             item.DropDownItems.Add(new ToolStripSeparator());
             item.DropDownItems.Add(Item(L.T("הסר מהמחשב הזה…", "Remove from this PC…"), async () => await RemoveAsync(d), !d.Starting && !d.Stopping));
-            var delete = Item(L.T("מחק את הכונן לצמיתות…", "Delete the drive permanently…"), async () => await DeleteForeverAsync(d), !d.Starting && !d.Stopping);
+            // never offered while the drive's pairing is in doubt (it could name another drive's data)
+            var delete = Item(L.T("מחק את הכונן לצמיתות…", "Delete the drive permanently…"), async () => await DeleteForeverAsync(d),
+                !d.Starting && !d.Stopping && !d.MustChooseDrive);
             delete.ForeColor = Color.FromArgb(0xC6, 0x28, 0x28);
             item.DropDownItems.Add(delete);
             item.Click += (_, _) => { if (on) OpenDrive(d); };

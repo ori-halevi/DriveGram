@@ -108,6 +108,9 @@ public sealed partial class SyncService : IAsyncDisposable
         DriveIdentity? identity = null)
     {
         if (await ReadControlAsync(remote, ct) is not null) throw new InvalidOperationException("This remote already holds a drive.");
+        // an unpinned record is not an empty journal: a new vault there would hide the old drive's data
+        if ((await remote.ListJournalAsync(0, ct)).Count > 0)
+            throw new InvalidOperationException("This journal already holds entries of a drive (its record may have been unpinned); nothing was created.");
         var (header, keys) = Keys.Create(password, chunkSize, frameSize, iterations);
         // signed from the first moment; only versions that sign may write it
         await remote.WriteControlAsync(new ControlState(1, header, null, null, identity, MinWriter: StorageFormat.Current)

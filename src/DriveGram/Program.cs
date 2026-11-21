@@ -108,12 +108,30 @@ async Task<int> UninstallCleanup(bool check)
     if (check) return localOnly > 0 ? 4 : 0;
     await TelegramAccounts.SignOutAllAsync();
     Log.Close(); // the log file lives in the folder being deleted
-    for (int attempt = 0; attempt < 5 && Directory.Exists(AppState.Root); attempt++)
+    // Only what DriveGram itself keeps there (profiles with a config.json, accounts, logs and its own files),
+    // then the folder if that left it empty: a root pointed elsewhere (DRIVEGRAM_ROOT) is never wiped.
+    var root = AppState.Root;
+    bool Ours(string dir)
     {
-        try { Directory.Delete(AppState.Root, recursive: true); }
+        var name = Path.GetFileName(dir);
+        return name is "accounts" or "logs" || name.StartsWith("__") || File.Exists(Path.Combine(dir, "config.json"));
+    }
+    for (int attempt = 0; attempt < 5; attempt++)
+    {
+        try
+        {
+            if (Directory.Exists(root))
+            {
+                foreach (var dir in Directory.GetDirectories(root).Where(Ours)) Directory.Delete(dir, recursive: true);
+                foreach (var file in Directory.GetFiles(root))
+                    if (Path.GetFileName(file) is "settings.json" or "former-devices.txt" or "autostart.reinstall") File.Delete(file);
+                if (!Directory.EnumerateFileSystemEntries(root).Any()) Directory.Delete(root);
+            }
+            break;
+        }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { await Task.Delay(1000); }
     }
-    return Directory.Exists(AppState.Root) ? 1 : 0;
+    return Directory.Exists(root) && Directory.GetDirectories(root).Any(Ours) ? 1 : 0;
 }
 
 int Help()

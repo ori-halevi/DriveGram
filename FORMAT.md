@@ -36,6 +36,14 @@ could not finish. Without an answer within 60 s, or when `updated` stops changin
 observed by the requester's own clock), the requester takes the lease itself. Answers are tied to `id`.
 Older clients keep the field untouched and never answer. Adding it changed no minReader/minWriter.
 
+`mac` (StorageFormat 3, 1.0.3+): base64 HMAC-SHA256 of the record's JSON with `mac` set to null, under
+`HMAC(master, "drivegram/control/v1")`. Every writer signs and sets `minWriter` ≥ 3 (older versions, which
+would drop the field, may only read). A record whose mac is wrong, or missing once a PC has seen a signed one
+(or with `minWriter` ≥ 3), is not believed: nothing in it (lease, handover, snapshot, identity, format gates)
+is acted on, and the PC stays read-only until the user confirms it (the vault is kept, lease/handover/snap
+are reset, and it is signed again). A record from before signing is accepted once (first sight) and signed
+by the next writer.
+
 `minReader` / `minWriter`: the oldest StorageFormat allowed to read / write the drive. A client
 whose `StorageFormat.Current` is lower must refuse to open (reader) or open read-only (writer).
 
@@ -92,7 +100,7 @@ Apply entries in message-id order. Each op carries the full resulting state of w
 | `ct` | id, size, mtime, chunks: `[{ "c": chunk id, "m": data message id, "z": size, "h": sha256 hex }]` | new content of a file |
 | `tr` | id, at | moved to the drive's trash |
 | `rs` | id, parent, name | restored from the trash |
-| `pg` | id | deleted forever (with its subtree) |
+| `pg` | id, ids? | deleted forever: exactly `ids` (1.0.3+; anything else found under them moves to the root, and a PC's own unsent file there is kept, in the root), or the whole subtree when `ids` is absent |
 
 The root folder has id `root`. A later `ct` for the same chunk id may name a different message
 (identical bytes re-uploaded after the old copy was garbage-collected): the latest one wins.

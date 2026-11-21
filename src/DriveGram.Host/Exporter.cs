@@ -17,6 +17,17 @@ public static class Exporter
         int files = 0, skipped = 0;
         long bytes = 0;
         Directory.CreateDirectory(target);
+        // only into an empty folder, or one a previous export made (a marker says so): never replace a
+        // folder of the user's own, newer files with the drive's versions
+        var marker = Path.Combine(target, ".drivegram-export");
+        if (!File.Exists(marker))
+        {
+            if (Directory.EnumerateFileSystemEntries(target).Any())
+                throw new IOException(L.T("התיקייה לא ריקה. בחר תיקייה ריקה (או תיקייה של ייצוא קודם, כדי להמשיך אותו).",
+                    "The folder is not empty. Choose an empty folder (or the folder of an earlier export, to continue it)."));
+            File.WriteAllText(marker, "DriveGram export\r\n");
+            File.SetAttributes(marker, FileAttributes.Hidden);
+        }
         var stack = new Stack<(string Src, string Dst)>();
         stack.Push((sourceRoot, target));
         var buffer = new byte[4 << 20];

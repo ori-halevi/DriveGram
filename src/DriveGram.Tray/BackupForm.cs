@@ -189,7 +189,7 @@ sealed class BackupForm : Form
             AddLink(L.T("ערוץ היומן", "Journal channel"), links.Journal);
             AddLink(L.T("ערוץ הקבצים", "Data channel"), links.Data);
             var both = Theme.Secondary(L.T("העתק את שני הקישורים", "Copy both links"));
-            both.Click += (_, _) => Clipboard.SetText($"{links.Journal}\n\n{links.Data}");
+            both.Click += (_, _) => Ui.CopySecret($"{links.Journal}\n\n{links.Data}");
             _links.Controls.Add(both);
             _linksResult.Text = L.T("שלח את שני הקישורים לחשבון הגיבוי. אחרי שהוא הצטרף לשניהם, לחץ \"בדוק מי הצטרף\".",
                 "Send both links to the backup account. Once it has joined both, click \"Check who joined\".");
@@ -210,7 +210,7 @@ sealed class BackupForm : Form
         box.ReadOnly = true;
         box.Font = Theme.Small;
         var copy = Theme.Secondary(L.T("העתק", "Copy"));
-        copy.Click += (_, _) => Clipboard.SetText(link);
+        copy.Click += (_, _) => Ui.CopySecret(link);
         row.Controls.AddRange([Theme.Label(label + ":", Theme.Small, Theme.Muted), box, copy]);
         _links.Controls.Add(row);
     }
@@ -252,6 +252,10 @@ sealed class BackupForm : Form
 
     async Task PromoteAsync(TelegramChannels ch, ChannelAdmin user, Button button)
     {
+        // whoever opened a link first joined: make sure it is really the backup account before full rights
+        if (Ui.Ask(L.T($"להפוך את החשבון הזה למנהל מלא של שני הערוצים?\n\n{user.Name}   (מזהה {user.UserId})\n\nמנהל יכול לשנות ואף למחוק את הכונן. ודא שזה באמת החשבון שלך.",
+                       $"Make this account a full admin of both channels?\n\n{user.Name}   (id {user.UserId})\n\nAn admin can change and even delete the drive. Make sure it really is your account."),
+                icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
         button.Enabled = false;
         try
         {

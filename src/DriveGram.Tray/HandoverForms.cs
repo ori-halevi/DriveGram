@@ -40,7 +40,8 @@ sealed class HandoverAskForm : Form
 
         var col = Theme.Column();
         col.Padding = new Padding(24, 18, 24, 18);
-        col.Controls.Add(Theme.Label(L.T($"המחשב {r.Name} מבקש לקבל את הכונן {session.MountPoint}.", $"{r.Name} asks for the drive {session.MountPoint}."),
+        var asker = r.Name.Length > 40 ? r.Name[..40] + "…" : r.Name;
+        col.Controls.Add(Theme.Label(L.T($"המחשב {asker} מבקש לקבל את הכונן {L.Ltr(session.MountPoint)}.", $"{asker} asks for the drive {session.MountPoint}."),
             Theme.Heading, Theme.Text, 560));
         col.Controls.Add(Theme.Label(L.T(
             "אם תעביר, המחשב הזה יעבור לקריאה בלבד והמחשב השני יוכל לשנות קבצים. תמיד אפשר לבקש את הכונן בחזרה.",

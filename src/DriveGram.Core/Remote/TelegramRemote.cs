@@ -342,6 +342,13 @@ public sealed class TelegramRemote : IRemote
             if (ctrl?.Drive is { } identity && identity.DataChannel != ch.DataId)
                 throw new InvalidOperationException("The drive's journal names a different data channel; nothing was deleted.");
         }
+        foreach (var other in all.Where(c => IsJournal(c) && c.id != ch.JournalId && !c.flags.HasFlag(Channel.Flags.left)))
+        {
+            Sync.ControlState? oc = null;
+            try { oc = Sync.ControlState.FromJson(await ReadPinnedTextAsync(client, other)); } catch { }
+            if (oc?.Drive?.DataChannel == ch.DataId)
+                throw new InvalidOperationException($"The data channel also belongs to the drive '{other.title}'; nothing was deleted.");
+        }
         foreach (var id in new[] { ch.JournalId, ch.DataId })
         {
             if (all.FirstOrDefault(c => c.id == id) is not { } c) continue;

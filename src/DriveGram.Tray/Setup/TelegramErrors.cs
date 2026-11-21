@@ -54,6 +54,8 @@ static class TelegramErrors
             "The account is not signed in to Telegram on this PC. Open the drive's \"Settings and sign-in\"."),
         DriveGram.Remote.DriveVanishedException => L.T("הערוצים של הכונן כבר לא קיימים בטלגרם (נמחקו, או שהחשבון יצא מהם).",
             "The drive's channels no longer exist in Telegram (deleted, or the account left them)."),
+        DriveGram.ControlNotTrustedException => L.T("רשומת הכונן שונתה מחוץ ל־DriveGram. אשר אותה קודם: בתפריט, \"אשר את רשומת הכונן…\".",
+            "The drive's record was changed outside DriveGram. Confirm it first: \"Confirm the drive's record…\" in the menu."),
         DriveGram.LeaseLostException => L.T("מחשב אחר לקח את הכונן לכתיבה. אפשר לבקש אותו בחזרה מהתפריט.",
             "Another PC took the drive for writing. You can ask for it back from the menu."),
         InvalidOperationException { Message: "The drive is read-only on this PC." } =>

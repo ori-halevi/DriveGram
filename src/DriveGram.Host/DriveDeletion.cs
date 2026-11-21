@@ -91,7 +91,14 @@ public static class DriveDeletion
             bool ours = File.Exists(Path.Combine(state.Folder, "control.json"))
                         && Directory.Exists(Path.Combine(state.Folder, "journal"))
                         && Directory.Exists(Path.Combine(state.Folder, "data"));
-            if (ours) Directory.Delete(state.Folder, recursive: true);
+            if (!ours) return;
+            // only DriveGram's own entries: the folder may be the user's (Desktop, a disk root…)
+            foreach (var dir in new[] { "journal", "data" })
+                Directory.Delete(Path.Combine(state.Folder, dir), recursive: true);
+            foreach (var file in Directory.GetFiles(state.Folder))
+                if (Path.GetFileName(file) is "control.json" or "next-id" || file.EndsWith(".tmp"))
+                    File.Delete(file);
+            try { if (!Directory.EnumerateFileSystemEntries(state.Folder).Any()) Directory.Delete(state.Folder); } catch (IOException) { }
             return;
         }
         if (state.Config.Channels is not { } ch) return;
