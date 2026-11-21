@@ -273,7 +273,7 @@ sealed class BackupForm : Form
 
     async Task AddAsync()
     {
-        if (_state.Config.Channels is not { } ch || _username.Text.Trim().Length == 0) return;
+        if (_state.Config.Channels is not { } ch || _username.Text.Trim().TrimStart('@').Length == 0) return;
         _add.Enabled = false;
         _addResult.ForeColor = Theme.Muted;
         _addResult.Text = L.T("מוסיף…", "Adding…");

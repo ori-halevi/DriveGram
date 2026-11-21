@@ -136,7 +136,14 @@ begin
   Exe := ExpandConstant('{app}\drivegram.exe');
   if UninstallSilent or not FileExists(Exe) then exit;
   if not DirExists(ExpandConstant('{localappdata}\DriveGram')) then exit;
-  if MsgBox(CustomMessage('CleanupAsk'), mbConfirmation, MB_YESNO or MB_DEFBUTTON2) <> IDYES then exit;
+  if CheckForMutexes('DriveGramTrayRunning') then exit; { still finishing uploads: never delete under it }
+  if MsgBox(CustomMessage('CleanupAsk'), mbConfirmation, MB_YESNO or MB_DEFBUTTON2) <> IDYES then
+  begin
+    { kept for a reinstall: remember that DriveGram started with Windows }
+    if RegValueExists(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Run', 'DriveGram') then
+      SaveStringToFile(ExpandConstant('{localappdata}\DriveGram\autostart.reinstall'), '1', False);
+    exit;
+  end;
   { exit code 4: something exists only on this PC }
   if Exec(Exe, 'uninstall-cleanup --check', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 4) then
     if MsgBox(CustomMessage('CleanupLocalOnly'), mbError, MB_YESNO or MB_DEFBUTTON2) <> IDYES then exit;
@@ -157,7 +164,16 @@ begin
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
+var Marker: String;
 begin
+  { reinstalled after an uninstall that kept the data: "start with Windows" comes back as it was }
+  Marker := ExpandConstant('{localappdata}\DriveGram\autostart.reinstall');
+  if (CurStep = ssPostInstall) and FileExists(Marker) then
+  begin
+    RegWriteStringValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Run', 'DriveGram',
+      '"' + ExpandConstant('{app}\drivegram-tray.exe') + '"');
+    DeleteFile(Marker);
+  end;
   if (CurStep = ssPostInstall) and NeedsWinFsp then
     MsgBox(CustomMessage('WinFspFailed'), mbError, MB_OK);
 end;

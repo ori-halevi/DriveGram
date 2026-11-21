@@ -28,6 +28,8 @@ sealed class DriveController
     public ExportForm? ExportWindow;
     public HandoverWaitForm? HandoverWait;
     public HandoverAskForm? HandoverAsk;
+    /// <summary>The writable state the user was last told about (no second balloon for the same news).</summary>
+    public bool? ToldWritable;
 
     public DriveController(AppState state) => State = state;
 
@@ -68,6 +70,11 @@ sealed class TrayApp : ApplicationContext
         _timer.Start();
         SystemEvents.SessionEnding += (_, _) => OnSessionEnding();
         SystemEvents.SessionEnded += (_, _) => OnSessionEnded();
+        System.Net.NetworkInformation.NetworkChange.NetworkAvailabilityChanged += (_, e) =>
+        {
+            if (e.IsAvailable) _ui.Post(async _ => { await Task.Delay(3000); RetryWaitingDrivesNow(); }, null);
+        };
+        ShellIntegration.ClearStaleDriveIcons(_drives.Select(x => x.State.Config.MountPoint)); // left by a crash on a borrowed letter
         SystemEvents.PowerModeChanged += (_, e) => { if (e.Mode == PowerModes.Resume) _ui.Post(_ => OnResume(), null); };
 
         _activate = new EventWaitHandle(false, EventResetMode.AutoReset, Program.ActivateEvent);
@@ -93,6 +100,16 @@ sealed class TrayApp : ApplicationContext
         _quitting = true;
         var sessions = _drives.Select(x => x.Session).OfType<DriveSession>().ToList();
         Parallel.ForEach(sessions, s => s.EndForShutdown());
+    }
+
+    void RetryWaitingDrivesNow()
+    {
+        foreach (var d in _drives)
+            if (d.Session is null && d.RetryTimer is not null && !d.Starting && !_quitting)
+            {
+                d.RetryDelaySeconds = 15;
+                _ = MountAsync(d);
+            }
     }
 
     void OnResume()
@@ -142,14 +159,14 @@ sealed class TrayApp : ApplicationContext
                 Balloon(L.T("צריך לעדכן את DriveGram", "Update DriveGram"),
                     L.T($"{session.MountPoint} נכתב בגרסה חדשה יותר. הוא פתוח לקריאה בלבד עד שתתקין את הגרסה החדשה.",
                         $"{session.MountPoint} was written by a newer version. It is read-only until you install it."), ToolTipIcon.Warning);
-            bool? shown = session.Writable;
+            d.ToldWritable = session.Writable;
             session.Sync.WritableChanged += () => _ui.Post(async _ =>
             {
                 await Task.Delay(TimeSpan.FromSeconds(8));
-                if (d.Session is not { } s || s.Writable == shown) return; // flipped back meanwhile
-                shown = s.Writable;
+                if (d.Session is not { } s || s.Sync.HandingOver || s.Writable == d.ToldWritable) return; // flipped back / already told
+                d.ToldWritable = s.Writable;
                 Balloon(s.Writable ? L.T($"{d.Letter} ניתן לכתיבה", $"{d.Letter} is writable") : L.T($"{d.Letter} לקריאה בלבד", $"{d.Letter} is read-only"),
-                    s.Writable ? L.T("אפשר לשמור קבצים שוב.", "You can save files again.") : ReadOnlyWhy(s),
+                    s.Writable ? L.T("אפשר לשמור קבצים בכונן.", "Files can be saved on the drive.") : ReadOnlyWhy(s),
                     ToolTipIcon.Warning);
             }, null);
 
@@ -157,7 +174,7 @@ sealed class TrayApp : ApplicationContext
                 ? L.T($"הכונן זמין ב־{session.MountPoint}", $"The drive is available as {session.MountPoint}")
                 : $"{session.MountPoint}: {ReadOnlyWhy(session)}";
             if (session.LetterChanged is { } moved)
-                text += L.T($"\nהאות הקודמת הייתה תפוסה ({moved}).", $"\nThe usual letter was taken ({moved}).");
+                text += L.T($"\nהאות הרגילה תפוסה כרגע ({moved}); בפעם הבאה הכונן ינסה אותה שוב.", $"\nThe usual letter is taken right now ({moved}); next time the drive tries it again.");
             Balloon(L.T("DriveGram מחובר", "DriveGram connected"), text);
         }
         catch (PasswordNotGivenException) { StopRetrying(d); d.Problem = L.T("לא הוזנה סיסמה", "no password entered"); }
@@ -303,11 +320,26 @@ sealed class TrayApp : ApplicationContext
         return true;
     }
 
+    bool _askingToQuit;
+
     async Task QuitAsync(bool ask)
     {
-        if (_quitting) return;
+        if (_quitting || _askingToQuit) return;
+        _askingToQuit = true;
+        try { await QuitCoreAsync(ask); }
+        finally { _askingToQuit = false; }
+    }
+
+    async Task QuitCoreAsync(bool ask)
+    {
         if (ask)
         {
+            int open = _drives.Sum(d => d.Session?.Engine.FilesOpenForWriting ?? 0);
+            if (open > 0 && Ui.Ask(L.T(
+                    $"יש {open} קבצים פתוחים לעריכה באפליקציות. אחרי היציאה לא יהיה אפשר לשמור אותם בכונן (מה שכבר נשמר לא ילך לאיבוד).\n\nלצאת בכל זאת?",
+                    $"{open} files are open for editing in apps. After exiting they cannot be saved on the drive (what was already saved is kept).\n\nExit anyway?"),
+                    icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+                return;
             int pending = _drives.Sum(d => d.Session?.Status.PendingFiles ?? 0);
             if (pending > 0)
             {
@@ -446,14 +478,29 @@ sealed class TrayApp : ApplicationContext
 
     Task AddDriveAsync() => SetupAsync(null);
 
+    bool _removing;
+
     async Task RemoveAsync(DriveController d)
     {
+        if (_removing) return;
+        _removing = true;
+        try { await RemoveCoreAsync(d); }
+        finally { _removing = false; }
+    }
+
+    async Task RemoveCoreAsync(DriveController d)
+    {
+        bool wasMounted = d.Session is not null;
         if (Ui.Ask(L.T(
                 $"להסיר את {d.Name} מהמחשב הזה?\n\nהקבצים נשארים בטלגרם, ואפשר לחבר את הכונן שוב בכל עת (עם הסיסמה שלו).",
                 $"Remove {d.Name} from this PC?\n\nThe files stay in Telegram, and you can connect the drive again at any time (with its password)."),
                 icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
         if (!await StopAsync(d)) return;
-        if (!ConfirmLosingLocalChanges(d)) return;
+        if (!ConfirmLosingLocalChanges(d))
+        {
+            if (wasMounted) await MountAsync(d); // kept: put it back the way it was
+            return;
+        }
         await ForgetLocallyAsync(d);
     }
 
@@ -503,6 +550,7 @@ sealed class TrayApp : ApplicationContext
         d.HandoverWait = form;
         form.FormClosed += (_, _) =>
         {
+            if (form.Received) d.ToldWritable = true;
             if (form.Received)
                 Balloon(L.T($"{d.Letter} ניתן לכתיבה", $"{d.Letter} is writable"),
                     L.T("הכונן עבר למחשב הזה. אפשר לשמור קבצים.", "The drive moved to this PC. You can save files."));
@@ -534,6 +582,7 @@ sealed class TrayApp : ApplicationContext
             if (!approved) { await Task.Run(() => s.Sync.RefuseHandoverAsync(r, default)); return; }
             UpdateIcon();
             bool done = await Task.Run(() => s.HandOverAsync(r, null, default));
+            if (done) d.ToldWritable = false;
             if (done)
                 Balloon(L.T($"{d.Letter} עבר ל־{r.Name}", $"{d.Letter} moved to {r.Name}"),
                     L.T("המחשב הזה עכשיו לקריאה בלבד. אפשר לבקש את הכונן בחזרה מהתפריט.",

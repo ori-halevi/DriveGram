@@ -189,7 +189,7 @@ public sealed class DriveSession : IAsyncDisposable
         {
             if (LetterInUse(mountPoint[0]))
             {
-                // e.g. a USB stick took the letter: use the next free one, and remember it
+                // e.g. a USB stick took the letter: use the next free one, for this run only
                 var taken = AppState.All().Where(a => a.Dir != state.Dir).Select(a => char.ToUpperInvariant(a.Config.MountPoint[0])).ToHashSet();
                 var free = "TUVWXYZSRQPONMLKJIHGFED".FirstOrDefault(c => !LetterInUse(c) && !taken.Contains(c));
                 if (free == default) throw new MountFailedException(L.T("אין אות כונן פנויה.", "No free drive letter."));

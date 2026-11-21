@@ -32,7 +32,7 @@ DriveGram.Sync.DriveIdentity? newIdentity = null; // set when `init` creates a b
 var driveSel = Opt("--drive");
 Log.Open(Path.Combine(AppState.Root, "logs"));
 var command0 = argv.Count > 0 ? argv[0].ToLowerInvariant() : "help";
-if (folder is null && command0 is "setup" or "login" or "init" or "mount" or "export"
+if (folder is null && command0 is "setup" or "login" or "init" or "mount" or "status" or "uninstall-cleanup"
     && System.Threading.Mutex.TryOpenExisting("DriveGramTrayRunning", out var trayRunning))
 {
     trayRunning.Dispose();

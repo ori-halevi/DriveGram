@@ -50,10 +50,15 @@ sealed class SecurityForm : Form
         _keyPanel.Visible = false;
         var keyButtons = Theme.Row();
         var copy = Theme.Secondary(L.T("העתק", "Copy"));
-        copy.Click += (_, _) => Ui.CopySecret(_keyBox.Text);
+        var copied = Theme.Label("", Theme.Small, Theme.Muted);
+        copy.Click += (_, _) =>
+        {
+            Ui.CopySecret(_keyBox.Text);
+            copied.Text = L.T("הועתק. מטעמי אבטחה, הלוח יתרוקן בעוד דקה.", "Copied. For safety, the clipboard is cleared in a minute.");
+        };
         var save = Theme.Secondary(L.T("שמור לקובץ…", "Save to a file…"));
         save.Click += (_, _) => SaveKey();
-        keyButtons.Controls.AddRange([copy, save]);
+        keyButtons.Controls.AddRange([copy, save, copied]);
         _keyPanel.Controls.AddRange([
             Theme.Label(L.T("⚠  זו הפעם היחידה שהמפתח מוצג. שמור אותו עכשיו: הדפס, רשום, או שמור במנהל סיסמאות.",
                 "⚠  This is the only time the key is shown. Save it now: print it, write it down, or keep it in a password manager."),

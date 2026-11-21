@@ -544,6 +544,7 @@ sealed class LoginPage : WizardPage
     {
         _error.Text = "";
         button.Enabled = false;
+        _changeNumber.Enabled = false;
         UseWaitCursor = true;
         try
         {
@@ -580,6 +581,7 @@ sealed class LoginPage : WizardPage
         finally
         {
             button.Enabled = true;
+            _changeNumber.Enabled = true;
             UseWaitCursor = false;
         }
     }

@@ -40,6 +40,26 @@ public static class ShellIntegration
         Refresh();
     }
 
+    /// <summary>Remove DriveGram's icon/label from letters no drive uses (a borrowed letter left after a
+    /// crash would show any USB stick as "DriveGram").</summary>
+    public static void ClearStaleDriveIcons(IEnumerable<string> ownLetters)
+    {
+        try
+        {
+            var keep = ownLetters.Select(m => m.TrimEnd(':', '\\').ToUpperInvariant()).ToHashSet();
+            using var drives = Registry.CurrentUser.OpenSubKey(DrivesKey);
+            if (drives is null) return;
+            foreach (var letter in drives.GetSubKeyNames())
+            {
+                if (keep.Contains(letter.ToUpperInvariant())) continue;
+                using var icon = drives.OpenSubKey($@"{letter}\DefaultIcon");
+                if (icon?.GetValue("") is string path && path.Contains("drivegram", StringComparison.OrdinalIgnoreCase))
+                    Registry.CurrentUser.DeleteSubKeyTree($@"{DrivesKey}\{letter}", throwOnMissingSubKey: false);
+            }
+        }
+        catch (Exception ex) { Log.Warn($"drive icons: {ex.Message}"); }
+    }
+
     public static void ClearDriveIcon(string mountPoint)
     {
         var letter = mountPoint.TrimEnd(':', '\\').ToUpperInvariant();
