@@ -46,6 +46,9 @@ public sealed class ContentEngine : IAsyncDisposable
         public readonly object Lock = new();
         public int OpenWriters;
         public long Gen;
+        /// <summary>Last modification stamp per piece. Stamps come from one engine-wide counter that only
+        /// grows and are never cleared or reused, so a slow upload that captured an old stamp can never
+        /// match a later write (resetting per-piece counters after a commit made that possible).</summary>
         public readonly Dictionary<int, long> PieceGen = new();
         public readonly Dictionary<int, long> LastWrite = new();
         public long LastReadEnd = -1;
@@ -74,6 +77,8 @@ public sealed class ContentEngine : IAsyncDisposable
     readonly SemaphoreSlim _room = new(0);
     readonly List<Task> _loops = [];
     long _stagingBytes;
+    long _stamp;
+    long _ticks;
     long _bytesUploaded;
     int _uploadsInFlight;
 
@@ -98,8 +103,39 @@ public sealed class ContentEngine : IAsyncDisposable
         Interlocked.Read(ref _bytesUploaded), Interlocked.Read(ref _reader.BytesDownloaded), _cache.Bytes);
 
     /// <summary>Recover state left by a previous run and start the background workers.</summary>
+    /// <summary>
+    /// Delete piece files no dirty row refers to (left by a purge, a crash between commit and caching,
+    /// or a discard): they are invisible otherwise and would leak disk and inflate the staging count.
+    /// </summary>
+    void ReconcileStaging(bool adjustCount)
+    {
+        foreach (var dir in Directory.EnumerateDirectories(_staging))
+        {
+            var node = Path.GetFileName(dir);
+            var st = State(node);
+            lock (st.Lock)
+            {
+                var keep = _db.DirtyRows(node).Where(r => r.Staged).Select(r => $"{r.Idx}.piece").ToHashSet();
+                foreach (var f in Directory.EnumerateFiles(dir))
+                {
+                    if (keep.Contains(Path.GetFileName(f))) continue;
+                    try
+                    {
+                        long len = new FileInfo(f).Length;
+                        File.Delete(f);
+                        if (adjustCount) Interlocked.Add(ref _stagingBytes, -len);
+                        Log.Debug($"removed orphaned piece {node}/{Path.GetFileName(f)}");
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+                }
+            }
+            TryDeleteDir(dir);
+        }
+    }
+
     public void Start()
     {
+        ReconcileStaging(adjustCount: false); // before counting: the count starts from what is really staged
         long staged = 0;
         foreach (var row in _db.AllDirty())
         {
@@ -181,7 +217,7 @@ public sealed class ContentEngine : IAsyncDisposable
             foreach (var row in _db.DirtyRows(id).Where(r => r.Staged)) DeletePiece(id, row.Idx);
             _db.DeleteAllDirty(id);
             _db.ClearPending(id);
-            st.PieceGen.Clear();
+            foreach (var k in st.PieceGen.Keys.ToList()) st.PieceGen[k] = Interlocked.Increment(ref _stamp);
             st.LastWrite.Clear();
             st.Gen++;
         }
@@ -334,7 +370,7 @@ public sealed class ContentEngine : IAsyncDisposable
 
     void Touched(NodeState st, int idx)
     {
-        st.PieceGen[idx] = st.PieceGen.GetValueOrDefault(idx) + 1;
+        st.PieceGen[idx] = Interlocked.Increment(ref _stamp);
         st.LastWrite[idx] = Environment.TickCount64;
     }
 
@@ -356,7 +392,7 @@ public sealed class ContentEngine : IAsyncDisposable
             foreach (var row in _db.DirtyRows(id).Where(r => r.Idx >= newCount))
             {
                 if (row.Staged) DeletePiece(id, row.Idx);
-                st.PieceGen.Remove(row.Idx);
+                st.PieceGen[row.Idx] = Interlocked.Increment(ref _stamp); // invalidate any upload in flight
                 st.LastWrite.Remove(row.Idx);
             }
             _db.DeleteDirtyFrom(id, newCount);
@@ -618,8 +654,7 @@ public sealed class ContentEngine : IAsyncDisposable
                         _cache.AdoptPlain(d.ChunkId!, path);
                         Interlocked.Add(ref _stagingBytes, -len);
                     }
-                    st.PieceGen.Clear();
-                    st.LastWrite.Clear();
+                    st.LastWrite.Clear(); // PieceGen is kept: stamps must never repeat
                     TryDeleteDir(Path.Combine(_staging, id));
                     Log.Info($"committed {node.Name} ({node.Size:N0} bytes, {count} chunks)");
                     _room.Release();
@@ -663,6 +698,7 @@ public sealed class ContentEngine : IAsyncDisposable
             try
             {
                 await Task.Delay(1000, ct);
+                if (++_ticks % 60 == 0) ReconcileStaging(adjustCount: true);
                 long now = Environment.TickCount64;
                 var due = new List<(string, int)>();
                 foreach (var row in _db.AllDirty().Where(r => r.Kind is 'S' or 'Z' && r.Size == CS))
@@ -712,7 +748,7 @@ public static class Retry
         {
             try { return await action(); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not StopRetryingException)
             {
                 Log.Warn($"{what} failed (attempt {attempt}): {ex.Message}; retrying in {delay.TotalSeconds:0}s");
                 await Task.Delay(delay, ct);

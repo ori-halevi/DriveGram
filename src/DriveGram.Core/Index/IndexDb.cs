@@ -282,7 +282,18 @@ public sealed class IndexDb : IDisposable
             {
                 if (Get(c.Id) is null) { Log.Warn($"content op for unknown node {c.Id} ignored"); return; }
                 if (remote && IsPending(c.Id))
-                    Log.Warn($"conflict: remote content for {c.Id} while local changes are pending (local wins on commit)");
+                {
+                    // Both PCs changed this file. Never splice the two: the local version stays (it commits
+                    // as usual), and the other PC's version becomes a conflict copy next to it, journaled so
+                    // every PC ends up with both.
+                    var n = Get(c.Id)!;
+                    var copyName = $"{Path.GetFileNameWithoutExtension(n.Name)} (conflict {DateTime.Now:yyyy-MM-dd HH-mm}){Path.GetExtension(n.Name)}";
+                    var copyId = Guid.NewGuid().ToString("N");
+                    ApplyLocal([new UpsertOp(copyId, n.Parent ?? RootId, copyName, false, n.Attrs, n.Ctime, c.Mtime),
+                                new ContentOp(copyId, c.Size, c.Mtime, c.Chunks)]);
+                    Log.Warn($"conflict on '{n.Name}': the other PC's version was kept as '{copyName}'");
+                    return;
+                }
                 Exec("DELETE FROM file_chunks WHERE node=@n", ("@n", c.Id));
                 long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 for (int i = 0; i < c.Chunks.Length; i++)
@@ -294,7 +305,7 @@ public sealed class IndexDb : IDisposable
                     Exec("""
                         INSERT INTO chunks(id,msg,size,hash,created) VALUES(@id,@m,@z,@h,@t)
                         ON CONFLICT(id) DO UPDATE SET msg=excluded.msg, size=excluded.size, hash=excluded.hash,
-                            local = CASE WHEN chunks.msg = excluded.msg THEN chunks.local ELSE 0 END
+                            local = 0
                         """, ("@id", k.C), ("@m", k.M), ("@z", k.Z), ("@h", k.H), ("@t", now));
                     Exec("INSERT INTO file_chunks(node,idx,chunk) VALUES(@n,@i,@c)", ("@n", c.Id), ("@i", i), ("@c", k.C));
                 }
@@ -366,8 +377,10 @@ public sealed class IndexDb : IDisposable
 
     /// <summary>
     /// A stored chunk that new content may safely reuse (dedup): one a file still references (garbage
-    /// collection never deletes those), or one this PC uploaded itself (an interrupted upload resuming).
-    /// An unreferenced row learned from the journal may already have been deleted by another PC.
+    /// collection never deletes those), or one this PC uploaded and that was NEVER committed (an
+    /// interrupted upload resuming — no other PC knows it, so no other PC can delete it). Once a chunk
+    /// appears in any ContentOp its `local` flag is cleared: after the file is purged, any PC holding
+    /// the lease may garbage-collect it, and this PC is never told.
     /// </summary>
     public StoredChunk? FindReusableChunk(string chunkId) => Query("""
         SELECT id,msg,size,hash FROM chunks c WHERE id=@id AND (local=1

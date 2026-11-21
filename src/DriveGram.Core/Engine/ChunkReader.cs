@@ -76,8 +76,23 @@ public sealed class ChunkReader
 
     const int MaxShortReads = 4;
 
-    /// <summary>Read plaintext [offset, offset+dst.Length) of a chunk into dst.</summary>
+    /// <summary>Read plaintext [offset, offset+dst.Length) of a chunk into dst. A cached window whose bytes
+    /// fail authentication (disk corruption) is thrown away and fetched again, once.</summary>
     public async Task ReadAsync(ChunkLoc c, long offset, Memory<byte> dst, bool sequential, CancellationToken ct)
+    {
+        try { await ReadOnceAsync(c, offset, dst, sequential, ct); }
+        catch (CryptographicException)
+        {
+            int F = _keys.FrameSize, W = IRemote.WindowSize;
+            long start = ChunkCipher.FrameSpan((int)(offset / F), c.Size, F).Offset;
+            var (lo, ll) = ChunkCipher.FrameSpan((int)((offset + dst.Length - 1) / F), c.Size, F);
+            for (int w = (int)(start / W); w <= (int)((lo + ll - 1) / W); w++) _cache.RemoveWindow(c.Msg, w);
+            Log.Warn($"chunk {c.ChunkId[..12]}: cached bytes failed authentication; fetching again");
+            await ReadOnceAsync(c, offset, dst, sequential, ct);
+        }
+    }
+
+    async Task ReadOnceAsync(ChunkLoc c, long offset, Memory<byte> dst, bool sequential, CancellationToken ct)
     {
         int len = dst.Length;
         if (len == 0) return;

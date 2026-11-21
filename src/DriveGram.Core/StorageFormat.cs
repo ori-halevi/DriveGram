@@ -21,3 +21,9 @@ public static class StorageFormat
 /// <summary>The drive was written by a newer DriveGram whose format this version does not understand.</summary>
 public sealed class NeedsUpdateException(string? detail = null)
     : Exception("This drive was written by a newer version of DriveGram. Update DriveGram to open it." + (detail is null ? "" : $" ({detail})"));
+
+/// <summary>An error that retrying cannot fix: Retry.ForeverAsync rethrows it at once.</summary>
+public class StopRetryingException(string message) : Exception(message);
+
+/// <summary>Another PC took the drive's write lease (e.g. this one was offline longer than the lease).</summary>
+public sealed class LeaseLostException() : StopRetryingException("The write lease was taken by another PC.");

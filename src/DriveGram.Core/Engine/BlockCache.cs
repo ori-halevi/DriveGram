@@ -46,6 +46,15 @@ public sealed class BlockCache
         lock (_gate) return _map.ContainsKey(WKey(msg, win));
     }
 
+    public void RemoveWindow(int msg, int win)
+    {
+        var key = WKey(msg, win);
+        string? path;
+        lock (_gate) path = _map.TryGetValue(key, out var n) ? n.Value.Path : null;
+        Remove(key);
+        if (path is not null) TryDelete(path);
+    }
+
     public byte[]? TryGetWindow(int msg, int win)
     {
         var path = Touch(WKey(msg, win));
@@ -81,7 +90,7 @@ public sealed class BlockCache
             size = new FileInfo(sourcePath).Length;
             File.Move(sourcePath, path, overwrite: true);
         }
-        catch (IOException) { TryDelete(sourcePath); return; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { TryDelete(sourcePath); return; }
         Add(key, path, size);
     }
 

@@ -150,6 +150,7 @@ public sealed class SyncService : IAsyncDisposable
         await Task.Delay(1500, ct);
         var check = (await ReadControlAsync(_remote, ct))!.Lease;
         SetWritable(check?.Dev == _db.DeviceId, check?.Name);
+        if (Writable) _leaseConfirmedAt = DateTime.UtcNow;
     }
 
     async Task WriteLeaseAsync(CancellationToken ct)
@@ -219,6 +220,28 @@ public sealed class SyncService : IAsyncDisposable
         finally { _io.Release(); }
     }
 
+    DateTime _leaseConfirmedAt = DateTime.MinValue;
+
+    /// <summary>Do we (still) hold the write lease? Re-read from the control record when the last
+    /// confirmation is older than one heartbeat; on loss, stop writing and keep the outbox.</summary>
+    async Task<bool> StillHoldLeaseAsync(CancellationToken ct)
+    {
+        if (!Writable) return false;
+        if (DateTime.UtcNow - _leaseConfirmedAt < _o.HeartbeatInterval) return true;
+        var lease = (await ReadControlAsync(_remote, ct))?.Lease;
+        if (lease is not null && lease.Dev == _db.DeviceId && lease.Until > NowUnix)
+        {
+            _leaseConfirmedAt = DateTime.UtcNow;
+            return true;
+        }
+        SetWritable(false, lease?.Name);
+        Log.Error($"lease lost to '{lease?.Name}'; {_db.OutboxCount()} local changes are held back (not sent)");
+        return false;
+    }
+
+    /// <summary>Changes made on this PC that cannot be sent because another PC holds the drive.</summary>
+    public int HeldBackChanges => Writable ? 0 : _db.OutboxCount();
+
     /// <summary>Send queued local ops as journal entries.</summary>
     public async Task FlushAsync(CancellationToken ct)
     {
@@ -232,12 +255,18 @@ public sealed class SyncService : IAsyncDisposable
                 if (batch.Count == 0) return;
                 var entry = new JournalEntry(1, _db.DeviceId, NowUnix, batch.Select(b => b.Op).ToArray());
                 var payload = Envelope.Seal(_keys.JournalKey, OpJson.SerializeEntry(entry));
-                await Retry.ForeverAsync(() => _remote.AppendJournalAsync($"j-{_db.DeviceId[..8]}.bin", payload, ct),
-                    "journal append", ct);
+                // Checked before EVERY attempt: after a long outage another PC may have taken the lease,
+                // and appending then would put two writers' changes into the journal (diverged indexes).
+                await Retry.ForeverAsync(async () =>
+                {
+                    if (!await StillHoldLeaseAsync(ct)) throw new LeaseLostException();
+                    return await _remote.AppendJournalAsync($"j-{_db.DeviceId[..8]}.bin", payload, ct);
+                }, "journal append", ct);
                 _db.DeleteOutboxUpTo(batch[^1].Seq);
                 _opsSinceSnapshot += batch.Count;
             }
         }
+        catch (LeaseLostException) { /* outbox kept; reported via HeldBackChanges */ }
         finally { _io.Release(); }
     }
 
@@ -245,7 +274,9 @@ public sealed class SyncService : IAsyncDisposable
     {
         await FlushAsync(ct);
         await CatchUpAsync(ct);
-        if (_db.OutboxCount() > 0) return;
+        // a pending file's size/mtime in the index are local and uncommitted: a snapshot taken now would
+        // hand other PCs a size that does not match the file's chunks
+        if (_db.OutboxCount() > 0 || _db.PendingNodes().Count > 0) return;
         await _io.WaitAsync(ct);
         try
         {
@@ -316,6 +347,7 @@ public sealed class SyncService : IAsyncDisposable
                         continue;
                     }
                     await WriteLeaseAsync(ct);
+                    _leaseConfirmedAt = DateTime.UtcNow;
                     if (_opsSinceSnapshot >= _o.SnapshotEveryOps ||
                         (_opsSinceSnapshot > 0 && DateTime.UtcNow - _lastSnapshot > _o.SnapshotEvery))
                         await SnapshotAsync(ct);
