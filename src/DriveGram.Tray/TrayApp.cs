@@ -272,7 +272,7 @@ sealed class TrayApp : ApplicationContext
         if (d.State.RememberedMaster() is { } master)
         {
             try { return Task.FromResult(Keys.FromMaster(ctrl.Vault, master)); }
-            catch (WrongPasswordException) { d.State.ForgetMaster(); }
+            catch (WrongPasswordException) { Log.Warn($"{d.Name}: the remembered key does not match the drive; asking for the password (the key is kept)"); }
         }
         string? error = null;
         for (int attempt = 0; attempt < 5; attempt++)

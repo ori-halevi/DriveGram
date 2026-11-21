@@ -226,7 +226,7 @@ Task<Keys> Unlock(ControlState ctrl)
     if (state.RememberedMaster() is { } master)
     {
         try { return Task.FromResult(Keys.FromMaster(ctrl.Vault, master)); }
-        catch (WrongPasswordException) { state.ForgetMaster(); }
+        catch (WrongPasswordException) { } // keep it; ask for the password instead
     }
     for (int attempt = 1; ; attempt++)
     {
@@ -377,7 +377,7 @@ async Task<int> Export(string? target)
     using var cts = new CancellationTokenSource();
     Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
     var last = DateTime.MinValue;
-    var progress = new Progress<ExportProgress>(p =>
+    var progress = new ConsoleProgress(p =>
     {
         if ((DateTime.UtcNow - last).TotalSeconds < 1 && p.Current.Length > 0) return;
         last = DateTime.UtcNow;
@@ -478,4 +478,12 @@ async Task<int> Mount(string? mountPoint)
         st => Console.Write($"\r  {st.PendingFiles} files left, {st.StagedBytes / 1048576.0:N0} MiB staged      "));
     Console.WriteLine("\nDone. The drive can now be opened for writing on another PC.");
     return 0;
+}
+
+/// <summary>Reports synchronously on the copying thread, one line at a time (Progress&lt;T&gt; would post to the
+/// thread pool in a console app and could print after the final summary).</summary>
+sealed class ConsoleProgress(Action<ExportProgress> report) : IProgress<ExportProgress>
+{
+    readonly object _gate = new();
+    public void Report(ExportProgress value) { lock (_gate) report(value); }
 }

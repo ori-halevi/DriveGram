@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace DriveGram.Crypto;
 
@@ -19,7 +21,12 @@ public sealed record KeyWrap(string Salt, int Iter, string Nonce, string Wrapped
 /// password or adding a recovery key re-wraps it and never touches a stored file.
 /// </summary>
 public sealed record VaultHeader(int V, string Salt, int Iter, int ChunkSize, int FrameSize, string Verifier,
-    KeyWrap? Password = null, KeyWrap? Recovery = null);
+    KeyWrap? Password = null, KeyWrap? Recovery = null)
+{
+    /// <summary>Fields written by a NEWER version, kept verbatim so this version never drops them when it
+    /// rewrites the record (an older client silently deleting a recovery key was a real risk).</summary>
+    [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
+}
 
 public sealed class WrongPasswordException() : Exception("Wrong password for this drive.");
 
@@ -78,10 +85,33 @@ public sealed class Keys
         CheckVersion(h);
         byte[] master;
         if (h.Password is { } wrap)
-            master = Unwrap(wrap, Derive(password, Convert.FromBase64String(wrap.Salt), wrap.Iter));
+        {
+            CheckWrap(wrap, passwordWrap: true);
+            master = Unwrap(wrap, Derive(password, B64(wrap.Salt), wrap.Iter));
+        }
         else
-            master = Derive(password, Convert.FromBase64String(h.Salt), h.Iter);
+        {
+            // a v2 vault without its password wrap (stripped by a damaged/old writer) is unusable this way
+            if (h.V >= 2 || !IterOk(h.Iter)) throw new WrongPasswordException();
+            master = Derive(password, B64(h.Salt), h.Iter);
+        }
         return FromMaster(h, master);
+    }
+
+    // The control record is public and editable by anyone with access to the account: a malformed or
+    // hostile value must end as "wrong password", never as a crash or hours of PBKDF2.
+    static bool IterOk(int iter) => iter is >= 1_000 and <= 20_000_000;
+
+    static byte[] B64(string s)
+    {
+        try { return Convert.FromBase64String(s); }
+        catch (FormatException) { throw new WrongPasswordException(); }
+    }
+
+    static void CheckWrap(KeyWrap w, bool passwordWrap)
+    {
+        if ((passwordWrap && !IterOk(w.Iter)) || B64(w.Nonce).Length != 12 || B64(w.Wrapped).Length != 48 || B64(w.Salt).Length < 8)
+            throw new WrongPasswordException();
     }
 
     /// <summary>Open the drive with its recovery key instead of the password.</summary>
@@ -89,7 +119,8 @@ public sealed class Keys
     {
         CheckVersion(h);
         if (h.Recovery is not { } wrap || !RecoveryKey.TryParse(recoveryKey, out var raw)) throw new WrongPasswordException();
-        return FromMaster(h, Unwrap(wrap, RecoveryKek(raw, Convert.FromBase64String(wrap.Salt))));
+        CheckWrap(wrap, passwordWrap: false);
+        return FromMaster(h, Unwrap(wrap, RecoveryKek(raw, B64(wrap.Salt))));
     }
 
     /// <summary>A password or a recovery key — whichever the user typed.</summary>
@@ -139,12 +170,13 @@ public sealed class Keys
 
     static byte[] Unwrap(KeyWrap w, byte[] kek)
     {
-        var data = Convert.FromBase64String(w.Wrapped);
+        var data = B64(w.Wrapped);
+        if (data.Length != 48) throw new WrongPasswordException();
         var master = new byte[data.Length - 16];
         try
         {
             using var aes = new AesGcm(kek, 16);
-            aes.Decrypt(Convert.FromBase64String(w.Nonce), data.AsSpan(0, master.Length), data.AsSpan(master.Length), master, WrapAad);
+            aes.Decrypt(B64(w.Nonce), data.AsSpan(0, master.Length), data.AsSpan(master.Length), master, WrapAad);
         }
         catch (CryptographicException) { throw new WrongPasswordException(); }
         return master;

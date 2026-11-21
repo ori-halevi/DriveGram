@@ -40,14 +40,19 @@ public static class Exporter
                 try
                 {
                     var info = new FileInfo(f);
+                    long length = info.Length;                       // read BEFORE copying
+                    var mtime = info.LastWriteTimeUtc;
+                    var ctime = info.CreationTimeUtc;
                     progress?.Report(new ExportProgress(files, skipped, bytes, f));
+                    // FAT32 keeps times in 2 s steps, exFAT in 10 ms: compare with a small tolerance
                     if (File.Exists(to) && new FileInfo(to) is { } existing
-                        && existing.Length == info.Length && existing.LastWriteTimeUtc == info.LastWriteTimeUtc)
+                        && existing.Length == length && Math.Abs((existing.LastWriteTimeUtc - mtime).TotalSeconds) <= 2)
                     {
                         skipped++;
                         continue;
                     }
-                    var tmp = to + ".drivegram-part";
+                    var tmp = $"{to}.{Guid.NewGuid():N}.dgpart";
+                    long copied = 0;
                     await using (var input = new FileStream(f, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 20, useAsync: true))
                     await using (var output = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20, useAsync: true))
                     {
@@ -56,12 +61,19 @@ public static class Exporter
                         {
                             await output.WriteAsync(buffer.AsMemory(0, n), ct);
                             bytes += n;
+                            copied += n;
                             progress?.Report(new ExportProgress(files, skipped, bytes, f));
                         }
                     }
+                    info.Refresh();
+                    if (copied != length || info.Length != length || info.LastWriteTimeUtc != mtime)
+                    {
+                        File.Delete(tmp);
+                        throw new IOException("the file changed while it was being copied; run the export again");
+                    }
                     File.Move(tmp, to, overwrite: true);
-                    File.SetLastWriteTimeUtc(to, info.LastWriteTimeUtc);
-                    File.SetCreationTimeUtc(to, info.CreationTimeUtc);
+                    File.SetLastWriteTimeUtc(to, mtime);
+                    File.SetCreationTimeUtc(to, ctime);
                     files++;
                 }
                 catch (OperationCanceledException) { throw; }

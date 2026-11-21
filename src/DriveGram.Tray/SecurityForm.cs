@@ -65,8 +65,8 @@ sealed class SecurityForm : Form
 
         Heading(col, L.T("החלפת סיסמה", "Change the password"));
         col.Controls.Add(Theme.Label(L.T(
-            "הקבצים לא מועלים מחדש, וזה לוקח שניות. מחשבים שזוכרים את הסיסמה ימשיכו לעבוד; מחשב חדש יצטרך את הסיסמה החדשה. כל המחשבים צריכים DriveGram בגרסה 1.0 ומעלה.",
-            "No file is re-uploaded; it takes seconds. PCs that remember the password keep working; a new PC will need the new one. Every PC needs DriveGram 1.0 or later."),
+            "הקבצים לא מועלים מחדש, וזה לוקח שניות. מחשבים שזוכרים את הסיסמה ימשיכו לעבוד; מחשב חדש יצטרך את הסיסמה החדשה. חשוב לדעת: זה לא נועל בחוץ מישהו שכבר ידע את הסיסמה הקודמת וכבר פתח את הכונן. כל המחשבים צריכים DriveGram בגרסה 1.0 ומעלה (לפני השינוי, עדכן את כולם).",
+            "No file is re-uploaded; it takes seconds. PCs that remember the password keep working; a new PC will need the new one. Note: this does not lock out someone who already knew the old password and opened the drive. Every PC needs DriveGram 1.0 or later (update them all first)."),
             Theme.Small, Theme.Muted, 680));
         col.Controls.Add(Theme.Label(L.T("הסיסמה הנוכחית (או מפתח השחזור):", "Current password (or the recovery key):"), Theme.Small, Theme.Muted));
         col.Controls.Add(_current);
@@ -84,7 +84,7 @@ sealed class SecurityForm : Form
         Controls.Add(col);
         FormClosing += (_, e) =>
         {
-            if (_keyPanel.Visible && !_keySaved.Checked && e.CloseReason == CloseReason.UserClosing &&
+            if (_keyPanel.Visible && !_keySaved.Checked && e.CloseReason != CloseReason.WindowsShutDown &&
                 Ui.Ask(L.T("לא סימנת ששמרת את מפתח השחזור. הוא לא יוצג שוב. לסגור בכל זאת?",
                     "You did not confirm you saved the recovery key. It will not be shown again. Close anyway?"),
                     icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes)
@@ -133,7 +133,11 @@ sealed class SecurityForm : Form
             _close.Enabled = false;
             await RefreshAsync();
         }
-        catch (Exception ex) { Ui.Error(TelegramErrors.Text(ex)); }
+        catch (Exception ex)
+        {
+            Ui.Error(TelegramErrors.Text(ex));
+            await RefreshAsync(); // show what the drive really has now
+        }
         finally { _makeKey.Enabled = _session.Writable; }
     }
 
@@ -145,10 +149,20 @@ sealed class SecurityForm : Form
             Filter = "*.txt|*.txt",
         };
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
-        File.WriteAllText(dlg.FileName,
+        if (dlg.FileName.StartsWith(_session.MountPoint, StringComparison.OrdinalIgnoreCase))
+        {
+            Ui.Error(L.T("אל תשמור את מפתח השחזור על הכונן עצמו: בדיוק כשתצטרך אותו, הכונן לא ייפתח.",
+                "Do not save the recovery key on the drive itself: exactly when you need it, the drive will not open."));
+            return;
+        }
+        try
+        {
+            File.WriteAllText(dlg.FileName,
             $"DriveGram recovery key\r\nDrive: {_session.State.Config.VolumeLabel} ({_session.State.Config.AccountName})\r\n" +
             $"Created: {DateTime.Now:yyyy-MM-dd HH:mm}\r\n\r\n{_keyBox.Text}\r\n\r\n" +
             "Type this key wherever DriveGram asks for the drive password. Keep it away from this PC.\r\n");
+        }
+        catch (Exception ex) { Ui.Error(ex.Message); }
     }
 
     async Task ChangeAsync()

@@ -22,6 +22,9 @@ public sealed record DriveIdentity(string Id, string Name, long DataChannel);
 public sealed record ControlState(int V, VaultHeader Vault, LeaseInfo? Lease, SnapInfo? Snap, DriveIdentity? Drive = null,
     int MinReader = 1, int MinWriter = 1)
 {
+    /// <summary>Fields written by a newer version, kept verbatim on every rewrite.</summary>
+    [System.Text.Json.Serialization.JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
+
     public string ToJson() => JsonSerializer.Serialize(this, OpJson.Options);
     public static ControlState? FromJson(string? json) =>
         string.IsNullOrWhiteSpace(json) ? null : JsonSerializer.Deserialize<ControlState>(json, OpJson.Options);
@@ -119,14 +122,34 @@ public sealed class SyncService : IAsyncDisposable
     public async Task<string> CreateRecoveryKeyAsync(Keys keys, CancellationToken ct)
     {
         if (!Writable) throw new InvalidOperationException("The drive is read-only on this PC.");
-        string text = "";
-        await UpdateControlAsync(c =>
-        {
-            (var vault, text) = keys.WithNewRecoveryKey(c.Vault);
-            return c with { Vault = vault };
-        }, ct);
+        var (proposed, text) = keys.WithNewRecoveryKey((await ReadControlAsync(_remote, ct))!.Vault);
+        var wrap = proposed.Recovery!;
+        await ChangeVaultAsync(v => v with { Recovery = wrap }, v => v.Recovery?.Wrapped == wrap.Wrapped, ct);
         Log.Info("recovery key created (a previous one, if any, no longer works)");
         return text;
+    }
+
+    /// <summary>
+    /// Change the vault safely: only while this PC really holds the lease (checked inside the locked
+    /// read-modify-write), raising minWriter to 2 so no older version can rewrite the record and drop the
+    /// new fields, and then READ BACK: success only if the change is really stored. If the write itself
+    /// failed with an unknown outcome (e.g. a timeout after the server applied it), the read-back decides.
+    /// </summary>
+    async Task ChangeVaultAsync(Func<VaultHeader, VaultHeader> change, Func<VaultHeader, bool> applied, CancellationToken ct)
+    {
+        try
+        {
+            await UpdateControlAsync(c =>
+            {
+                if (c.Lease?.Dev != _db.DeviceId) throw new LeaseLostException();
+                return c with { Vault = change(c.Vault), MinWriter = Math.Max(c.MinWriter, 2) };
+            }, ct);
+        }
+        catch (LeaseLostException) { SetWritable(false, null); throw; }
+        catch (Exception ex) { Log.Warn($"vault change: write reported {ex.Message}; checking what was stored"); }
+        var stored = await ReadControlAsync(_remote, ct);
+        if (stored is null || !applied(stored.Vault))
+            throw new IOException("The change could not be saved to the drive. Nothing was changed; try again.");
     }
 
     /// <summary>Change the drive's password: the same master key, re-wrapped — no file is touched. PCs
@@ -135,11 +158,9 @@ public sealed class SyncService : IAsyncDisposable
     public async Task ChangePasswordAsync(Keys keys, string newPassword, CancellationToken ct)
     {
         if (!Writable) throw new InvalidOperationException("The drive is read-only on this PC.");
-        await UpdateControlAsync(c => c with
-        {
-            Vault = keys.WithNewPassword(c.Vault, newPassword),
-            MinReader = Math.Max(c.MinReader, 2),
-        }, ct);
+        var wrap = keys.WithNewPassword((await ReadControlAsync(_remote, ct))!.Vault, newPassword).Password!;
+        await ChangeVaultAsync(v => v with { V = 2, Salt = "", Iter = 0, Password = wrap }, v => v.Password?.Wrapped == wrap.Wrapped, ct);
+        await UpdateControlAsync(c => c with { MinReader = Math.Max(c.MinReader, 2) }, ct);
         Log.Info("drive password changed");
     }
 

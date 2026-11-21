@@ -701,7 +701,7 @@ sealed class DrivePage : WizardPage
     {
         if (Ctx.State.RememberedMaster() is not { } master || _ctrl is null) return false;
         try { Keys.FromMaster(_ctrl.Vault, master); return true; }
-        catch (WrongPasswordException) { Ctx.State.ForgetMaster(); return false; }
+        catch (WrongPasswordException) { return false; } // kept: only a correct new password replaces it
     }
 
     async Task UseRemoteAsync(TelegramRemote remote)
