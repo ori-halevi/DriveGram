@@ -54,6 +54,29 @@ static class Program
             return;
         }
 
+        int snapBak = Array.IndexOf(args, "--snapshot-backup");
+        if (snapBak >= 0 && snapBak + 1 < args.Length) // developer aid: render the backup window (fake drive, offline)
+        {
+            if (args.Contains("--en")) L.Override("en");
+            if (args.Contains("--he")) L.Override("he");
+            var fake = AppState.CreateNew();
+            fake.Config.Channels = new DriveGram.Remote.TelegramChannels(1, 1, 2, 2);
+            fake.Config.VolumeLabel = "Photos";
+            var form = new BackupForm(fake) { StartPosition = FormStartPosition.Manual, Location = new Point(-4000, -4000), ShowInTaskbar = false, Size = new Size(780, 1500) };
+            form.Shown += async (_, _) =>
+            {
+                await Task.Delay(1500);
+                using var bmp = new Bitmap(form.Width, form.Height);
+                form.DrawToBitmap(bmp, new Rectangle(0, 0, form.Width, form.Height));
+                Directory.CreateDirectory(args[snapBak + 1]);
+                bmp.Save(Path.Combine(args[snapBak + 1], "backup.png"));
+                form.Close();
+                fake.Delete();
+            };
+            Application.Run(form);
+            return;
+        }
+
         using var running = new Mutex(true, RunningMutex, out bool first);
         if (!first)
         {

@@ -7,6 +7,12 @@ namespace DriveGram.Remote;
 /// <summary>Ids of the two private channels a drive lives in (saved locally after first lookup).</summary>
 public sealed record TelegramChannels(long DataId, long DataHash, long JournalId, long JournalHash);
 
+/// <summary>Someone who administers one of a drive's channels.</summary>
+public sealed record ChannelAdmin(long UserId, string Name, bool IsOwner);
+
+/// <summary>The administrators of one of a drive's channels.</summary>
+public sealed record ChannelAdmins(string Title, bool IsJournal, List<ChannelAdmin> Admins);
+
 /// <summary>A drive found on an account. Channels is null when its data channel could not be found.</summary>
 public sealed record DriveCandidate(string? DriveId, string Name, TelegramChannels? Channels, bool Owned, bool HasVault, bool Bound);
 
@@ -161,6 +167,121 @@ public sealed class TelegramRemote : IRemote
             throw;
         }
         return new TelegramChannels(data.id, data.access_hash, journal.id, journal.access_hash);
+    }
+
+    static string NameOf(User u) =>
+        string.IsNullOrEmpty(u.username) ? $"{u.first_name} {u.last_name}".Trim() : "@" + u.username;
+
+    /// <summary>Who administers each of the drive's channels (so the user can see a backup really exists).</summary>
+    public static async Task<List<ChannelAdmins>> ListAdminsAsync(Client client, TelegramChannels ch)
+    {
+        await ResumeAsync(client);
+        var all = (await Patiently(() => client.Messages_GetAllChats())).chats.Values.OfType<Channel>().ToList();
+        var result = new List<ChannelAdmins>();
+        foreach (var (id, isJournal) in new[] { (ch.JournalId, true), (ch.DataId, false) })
+        {
+            if (all.FirstOrDefault(c => c.id == id) is not { } c) continue;
+            var r = await Patiently(() => client.Channels_GetParticipants(c, new ChannelParticipantsAdmins(), 0, 100, 0));
+            var admins = r.participants.Select(x =>
+            {
+                long uid = x.UserId;
+                var name = r.users.TryGetValue(uid, out var ub) && ub is User u ? NameOf(u) : uid.ToString();
+                return new ChannelAdmin(uid, name, x is ChannelParticipantCreator);
+            }).OrderByDescending(a => a.IsOwner).ToList();
+            result.Add(new ChannelAdmins(c.title, isJournal, admins));
+        }
+        return result;
+    }
+
+    static readonly ChatAdminRights BackupRights = new()
+    {
+        flags = ChatAdminRights.Flags.change_info | ChatAdminRights.Flags.post_messages | ChatAdminRights.Flags.edit_messages
+              | ChatAdminRights.Flags.delete_messages | ChatAdminRights.Flags.invite_users | ChatAdminRights.Flags.pin_messages
+              | ChatAdminRights.Flags.add_admins | ChatAdminRights.Flags.manage_call | ChatAdminRights.Flags.other,
+    };
+
+    static async Task<(Channel Journal, Channel Data)> DriveChannelsAsync(Client client, TelegramChannels ch)
+    {
+        var all = (await Patiently(() => client.Messages_GetAllChats())).chats.Values.OfType<Channel>().ToList();
+        var journal = all.FirstOrDefault(c => c.id == ch.JournalId);
+        var data = all.FirstOrDefault(c => c.id == ch.DataId);
+        if (journal is null || data is null) throw new DriveVanishedException();
+        return (journal, data);
+    }
+
+    static async Task<string> PromoteAsync(Client client, TelegramChannels ch, User u)
+    {
+        if (u.id == client.UserId) throw new RpcException(400, "BACKUP_IS_SELF");
+        if (u.IsBot) throw new RpcException(400, "BACKUP_IS_BOT");
+        var (journal, data) = await DriveChannelsAsync(client, ch);
+        foreach (var c in new[] { journal, data })
+        {
+            await Patiently(() => client.Channels_EditAdmin(c, u, BackupRights, "DriveGram backup"));
+            Log.Info($"made {NameOf(u)} an admin of '{c.title}'");
+        }
+        return NameOf(u);
+    }
+
+    /// <summary>
+    /// Make another account (found by its @username) a full admin of BOTH of the drive's channels, so it
+    /// keeps access if this account is blocked or deleted (Telegram keeps a channel whose creator is
+    /// gone; its admins keep their rights). The files stay encrypted: it still needs the drive password.
+    /// </summary>
+    public static async Task<string> AddBackupAdminAsync(Client client, TelegramChannels ch, string username)
+    {
+        await ResumeAsync(client);
+        username = username.Trim().TrimStart('@');
+        if (username.Length == 0) throw new ArgumentException("empty username");
+        var resolved = await Patiently(() => client.Contacts_ResolveUsername(username));
+        if (resolved.User is not User u) throw new RpcException(400, "USERNAME_NOT_OCCUPIED");
+        return await PromoteAsync(client, ch, u);
+    }
+
+    /// <summary>
+    /// For a backup account with no username (and not a contact): one invite link per channel. Each link
+    /// works ONCE and expires after 24 hours, so a leaked link is worthless. Once that account has joined
+    /// both channels, PromoteJoinedAsync makes it an admin.
+    /// </summary>
+    public static async Task<(string Journal, string Data)> CreateInviteLinksAsync(Client client, TelegramChannels ch)
+    {
+        await ResumeAsync(client);
+        var (journal, data) = await DriveChannelsAsync(client, ch);
+        async Task<string> Link(Channel c)
+        {
+            var inv = await Patiently(() => client.Messages_ExportChatInvite(c, DateTime.UtcNow.AddHours(24), 1, "DriveGram backup"));
+            return inv is ChatInviteExported e ? e.link : throw new IOException("Telegram did not return an invite link.");
+        }
+        return (await Link(journal), await Link(data));
+    }
+
+    /// <summary>Accounts that joined BOTH channels but are not admins yet (candidates for the backup).</summary>
+    public static async Task<List<ChannelAdmin>> JoinedNotAdminAsync(Client client, TelegramChannels ch)
+    {
+        await ResumeAsync(client);
+        var (journal, data) = await DriveChannelsAsync(client, ch);
+        async Task<Dictionary<long, User>> Members(Channel c)
+        {
+            var r = await Patiently(() => client.Channels_GetParticipants(c, new ChannelParticipantsRecent(), 0, 200, 0));
+            return r.participants
+                .Where(p => p is not ChannelParticipantAdmin and not ChannelParticipantCreator)
+                .Select(p => r.users.TryGetValue(p.UserId, out var ub) ? ub as User : null)
+                .Where(u => u is not null && u.id != client.UserId && !u.IsBot)
+                .ToDictionary(u => u!.id, u => u!);
+        }
+        var inJournal = await Members(journal);
+        var inData = await Members(data);
+        _joined = inJournal.Where(kv => inData.ContainsKey(kv.Key)).ToDictionary(kv => kv.Key, kv => kv.Value);
+        return _joined.Values.Select(u => new ChannelAdmin(u.id, NameOf(u), false)).ToList();
+    }
+    static Dictionary<long, User> _joined = new();
+
+    /// <summary>Make an account that joined through the links an admin of both channels.</summary>
+    public static async Task<string> PromoteJoinedAsync(Client client, TelegramChannels ch, long userId)
+    {
+        await ResumeAsync(client);
+        if (!_joined.TryGetValue(userId, out var u)) { await JoinedNotAdminAsync(client, ch); u = _joined.GetValueOrDefault(userId); }
+        if (u is null) throw new RpcException(400, "USER_NOT_PARTICIPANT");
+        return await PromoteAsync(client, ch, u);
     }
 
     /// <summary>Do the drive's channels still exist for this account, and does it own them (may delete them)?</summary>

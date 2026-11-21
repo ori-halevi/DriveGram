@@ -21,6 +21,7 @@ sealed class DriveController
     public int RetryDelaySeconds = 15;
     public System.Windows.Forms.Timer? RetryTimer;
     public TrashForm? Trash;
+    public BackupForm? Backup;
 
     public DriveController(AppState state) => State = state;
 
@@ -418,6 +419,13 @@ sealed class TrayApp : ApplicationContext
         Process.Start(new ProcessStartInfo(d.Session.MountPoint + "\\") { UseShellExecute = true });
     }
 
+    static void ShowBackup(DriveController d)
+    {
+        if (d.Backup is { IsDisposed: false }) { d.Backup.Activate(); return; }
+        d.Backup = new BackupForm(d.State);
+        d.Backup.Show();
+    }
+
     static void ShowTrash(DriveController d)
     {
         if (d.Session is null) return;
@@ -465,6 +473,8 @@ sealed class TrayApp : ApplicationContext
                     !d.Starting));
             else item.DropDownItems.Add(Item(L.T("נתק", "Disconnect"), async () => await StopAsync(d), !d.Stopping));
             item.DropDownItems.Add(Item(L.T("הגדרות והתחברות…", "Settings and sign-in…"), async () => await SetupAsync(d), !d.Starting && !d.Stopping));
+            if (d.State.Folder is null && d.State.Config.Channels is not null)
+                item.DropDownItems.Add(Item(L.T("גיבוי בחשבון נוסף…", "Backup on another account…"), () => ShowBackup(d)));
             item.DropDownItems.Add(new ToolStripSeparator());
             item.DropDownItems.Add(Item(L.T("הסר מהמחשב הזה…", "Remove from this PC…"), async () => await RemoveAsync(d), !d.Starting && !d.Stopping));
             var delete = Item(L.T("מחק את הכונן לצמיתות…", "Delete the drive permanently…"), async () => await DeleteForeverAsync(d), !d.Starting && !d.Stopping);
