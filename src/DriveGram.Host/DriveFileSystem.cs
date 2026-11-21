@@ -6,7 +6,7 @@ using Fsp;
 using FileInfo = Fsp.Interop.FileInfo;
 using VolumeInfo = Fsp.Interop.VolumeInfo;
 
-namespace DriveGram.App;
+namespace DriveGram.Host;
 
 /// <summary>
 /// The Windows side: WinFsp calls these for every Explorer / application file operation, and

@@ -56,6 +56,8 @@ public sealed class SyncService : IAsyncDisposable
     public bool Writable { get; private set; }
     public string? LeaseHolder { get; private set; }
     public event Action? WritableChanged;
+    /// <summary>Ops from another PC were applied to the local index (so open folder views can refresh).</summary>
+    public event Action<IReadOnlyList<Op>>? RemoteOpsApplied;
 
     public SyncService(IndexDb db, IRemote remote, Keys keys, SyncOptions? options = null)
     {
@@ -152,6 +154,8 @@ public sealed class SyncService : IAsyncDisposable
                             _db.Applied = item.Id;
                         });
                         applied += entry.Ops.Length;
+                        try { RemoteOpsApplied?.Invoke(entry.Ops); }
+                        catch (Exception ex) { Log.Warn($"remote-ops listener failed: {ex.Message}"); }
                         continue;
                     }
                 }

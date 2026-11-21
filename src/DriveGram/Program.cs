@@ -1,11 +1,8 @@
 ﻿using DriveGram;
-using DriveGram.App;
 using DriveGram.Crypto;
-using DriveGram.Engine;
+using DriveGram.Host;
 using DriveGram.Index;
-using DriveGram.Remote;
 using DriveGram.Sync;
-using Fsp;
 
 Console.OutputEncoding = System.Text.Encoding.UTF8;
 var argv = args.ToList();
@@ -21,8 +18,13 @@ string? Opt(string name)
 
 bool Flag(string name) => argv.Remove(name);
 
+// options first, so positional arguments are what is left
 var folder = Opt("--folder");
+var envFile = Opt("--env");
 bool verbose = Flag("--verbose");
+bool takeOver = Flag("--take-over");
+bool usePhone = Flag("--phone");
+
 var state = new AppState(folder);
 Log.Open(state.LogDir);
 Log.Console = true;
@@ -30,15 +32,17 @@ Log.Verbose = verbose;
 WTelegram.Helpers.Log = (level, msg) => { if (level >= 3) Log.Warn("[tg] " + msg); else Log.Debug("[tg] " + msg); };
 
 var command = argv.Count > 0 ? argv[0].ToLowerInvariant() : "help";
+string? arg1 = argv.Count > 1 ? argv[1] : null;
 try
 {
     return command switch
     {
         "login" => await Login(),
         "init" => await Init(),
-        "mount" => await Mount(argv.Count > 1 ? argv[1] : null, Flag("--take-over")),
-        "status" => await Status(),
+        "mount" => await Mount(arg1),
         "unmount" => Unmount(),
+        "status" => await Status(),
+        "autostart" => Autostart(arg1),
         "forget-password" => ForgetPassword(),
         _ => Help(),
     };
@@ -62,13 +66,15 @@ int Help()
                                            --env reads API_ID / API_HASH from a .env file.
           drivegram init                   Create the drive (new password), or connect this PC
                                            to an existing drive (its password).
+          drivegram-tray                   Run the drive from the notification area (normal use).
+          drivegram autostart on|off       Start drivegram-tray with Windows.
           drivegram mount [T:] [--take-over]
-                                           Mount the drive. Ctrl+C unmounts after uploads finish.
-          drivegram unmount                Ask a running `mount` to finish uploads and unmount.
+                                           Mount in this console (Ctrl+C unmounts after uploads finish).
+          drivegram unmount                Ask the running drive (console or tray) to unmount.
           drivegram status                 Show what is stored and what is waiting to upload.
           drivegram forget-password        Stop remembering the drive password on this PC.
 
-        Try it without Telegram: add --folder <path> to init / mount / status.
+        Try it without Telegram: add --folder <path> to init / mount / status / unmount.
         """);
     return 0;
 }
@@ -94,46 +100,20 @@ static string Ask(string prompt, bool secret = false)
     return new string(chars.ToArray());
 }
 
-WTelegram.Client NewClient()
+static string? TelegramAsk(string what) => what switch
 {
-    var cfg = state.Config;
-    if (cfg.ApiId == 0 || string.IsNullOrEmpty(cfg.ApiHash))
-        throw new InvalidOperationException("Telegram API credentials are missing. Run `drivegram login` first.");
-    string? Config(string what) => what switch
-    {
-        "api_id" => cfg.ApiId.ToString(),
-        "api_hash" => cfg.ApiHash,
-        "phone_number" => Ask("Phone number (international format, e.g. +972...): "),
-        "verification_code" => Ask("Login code Telegram just sent you: "),
-        "password" => Ask("Telegram two-step verification password: ", secret: true),
-        "first_name" or "last_name" => throw new InvalidOperationException("This phone number has no Telegram account."),
-        "device_model" => "DriveGram on " + Environment.MachineName,
-        "app_version" => "DriveGram 0.1",
-        _ => null,
-    };
-    return new WTelegram.Client(Config, new DpapiSessionStream(state.SessionPath));
-}
-
-async Task<IRemote> OpenRemote(bool create)
-{
-    if (state.Folder is not null) return new FolderRemote(state.Folder);
-    var remote = await TelegramRemote.OpenAsync(NewClient(), state.Config.Channels, create);
-    if (state.Config.Channels != remote.Channels)
-    {
-        state.Config.Channels = remote.Channels;
-        state.Save();
-    }
-    return remote;
-}
+    "phone_number" => Ask("Phone number (international format, e.g. +972...): "),
+    "verification_code" => Ask("Login code Telegram just sent you: "),
+    "password" => Ask("Telegram two-step verification password: ", secret: true),
+    _ => throw new InvalidOperationException("This phone number has no Telegram account."),
+};
 
 async Task<int> Login()
 {
     if (state.Folder is not null) { Console.WriteLine("--folder needs no login."); return 0; }
-    bool usePhone = Flag("--phone");
-    var env = Opt("--env");
-    if (env is not null)
+    if (envFile is not null)
     {
-        foreach (var line in File.ReadAllLines(env))
+        foreach (var line in File.ReadAllLines(envFile))
         {
             var kv = line.Split('=', 2, StringSplitOptions.TrimEntries);
             if (kv.Length != 2) continue;
@@ -149,7 +129,7 @@ async Task<int> Login()
     }
     state.Save();
     Console.WriteLine("Tip: use a dedicated Telegram account for DriveGram, not your personal one.");
-    using var client = NewClient();
+    using var client = DriveSession.NewTelegramClient(state, TelegramAsk);
     TL.User user;
     if (usePhone)
     {
@@ -184,11 +164,11 @@ void ShowQr(string url)
     catch (Exception ex) { Log.Debug($"could not open {png}: {ex.Message}"); }
 }
 
-async Task<Keys> Unlock(ControlState ctrl, bool offerRemember)
+Task<Keys> Unlock(ControlState ctrl)
 {
     if (state.RememberedMaster() is { } master)
     {
-        try { return Keys.FromMaster(ctrl.Vault, master); }
+        try { return Task.FromResult(Keys.FromMaster(ctrl.Vault, master)); }
         catch (WrongPasswordException) { state.ForgetMaster(); }
     }
     for (int attempt = 1; ; attempt++)
@@ -197,18 +177,23 @@ async Task<Keys> Unlock(ControlState ctrl, bool offerRemember)
         try
         {
             var keys = Keys.Unlock(ctrl.Vault, pw);
-            if (offerRemember && Ask("Remember the password on this PC (so the drive can mount without asking)? [y/N] ")
-                    .StartsWith("y", StringComparison.OrdinalIgnoreCase))
-                state.RememberMaster(keys.ExportMaster());
-            return keys;
+            OfferRemember(keys);
+            return Task.FromResult(keys);
         }
         catch (WrongPasswordException) when (attempt < 3) { Console.WriteLine("Wrong password, try again."); }
     }
 }
 
+void OfferRemember(Keys keys)
+{
+    if (Ask("Remember the password on this PC (needed for starting with Windows)? [y/N] ")
+            .StartsWith("y", StringComparison.OrdinalIgnoreCase))
+        state.RememberMaster(keys.ExportMaster());
+}
+
 async Task<int> Init()
 {
-    await using var remote = await OpenRemote(create: true);
+    await using var remote = await DriveSession.OpenRemoteAsync(state, TelegramAsk, create: true);
     var ctrl = await SyncService.ReadControlAsync(remote, default);
     if (ctrl is null)
     {
@@ -225,23 +210,21 @@ async Task<int> Init()
             Console.WriteLine("They do not match.");
         }
         var keys = await SyncService.CreateDriveAsync(remote, pw, default);
-        if (Ask("Remember the password on this PC (so the drive can mount without asking)? [y/N] ")
-                .StartsWith("y", StringComparison.OrdinalIgnoreCase))
-            state.RememberMaster(keys.ExportMaster());
-        Console.WriteLine("Drive created. Next: drivegram mount" + (state.Folder is null ? "" : $" --folder \"{state.Folder}\""));
+        OfferRemember(keys);
+        Console.WriteLine("Drive created. Next: drivegram-tray (or: drivegram mount)");
     }
     else
     {
         Console.WriteLine("This account already has a DriveGram drive. Enter its password to connect this PC.");
-        await Unlock(ctrl, offerRemember: true);
-        Console.WriteLine("Connected. Next: drivegram mount");
+        await Unlock(ctrl);
+        Console.WriteLine("Connected. Next: drivegram-tray (or: drivegram mount)");
     }
     return 0;
 }
 
 async Task<int> Status()
 {
-    await using var remote = await OpenRemote(create: false);
+    await using var remote = await DriveSession.OpenRemoteAsync(state, TelegramAsk, create: false);
     var ctrl = await SyncService.ReadControlAsync(remote, default) ?? throw new InvalidOperationException("No drive yet. Run `drivegram init`.");
     using var db = IndexDb.Open(state.IndexPath);
     var (files, dirs) = db.Counts();
@@ -252,20 +235,28 @@ async Task<int> Status()
     Console.WriteLine(lease is null || lease.Until < DateTimeOffset.UtcNow.ToUnixTimeSeconds()
         ? "Not open for writing on any PC."
         : $"Open for writing on: {lease.Name}{(lease.Dev == db.DeviceId ? " (this PC)" : "")}");
+    Console.WriteLine($"Start with Windows: {(ShellIntegration.AutostartEnabled ? "on" : "off")}");
     return 0;
 }
 
-string StopEventName() => @"Local\DriveGram-stop-" + Path.GetFileName(state.Dir);
-
 int Unmount()
 {
-    if (!EventWaitHandle.TryOpenExisting(StopEventName(), out var ev))
+    if (!EventWaitHandle.TryOpenExisting(DriveSession.StopEventName(state), out var ev))
     {
         Console.WriteLine("DriveGram is not mounted.");
         return 0;
     }
     ev.Set();
     Console.WriteLine("Asked the running DriveGram to unmount (it finishes pending uploads first).");
+    return 0;
+}
+
+int Autostart(string? onOff)
+{
+    if (onOff is "on" or "off") ShellIntegration.SetAutostart(onOff == "on");
+    Console.WriteLine($"Start with Windows: {(ShellIntegration.AutostartEnabled ? "on" : "off")}");
+    if (ShellIntegration.AutostartEnabled && state.RememberedMaster() is null)
+        Console.WriteLine("Note: the drive password is not remembered on this PC, so the tray will ask for it at sign-in.");
     return 0;
 }
 
@@ -276,51 +267,21 @@ int ForgetPassword()
     return 0;
 }
 
-async Task<int> Mount(string? mountPoint, bool takeOver)
+async Task<int> Mount(string? mountPoint)
 {
-    try { _ = FileSystemHost.Version(); }
-    catch (Exception)
+    if (!DriveSession.WinFspInstalled())
     {
         Console.Error.WriteLine("WinFsp is not installed. Install it from https://winfsp.dev/rel/ (version 2.1) and try again.");
         return 3;
     }
-    mountPoint ??= state.Config.MountPoint;
-    if (!mountPoint.EndsWith(':')) mountPoint += ":";
-
-    await using var remote = await OpenRemote(create: false);
-    var ctrl = await SyncService.ReadControlAsync(remote, default) ?? throw new InvalidOperationException("No drive yet. Run `drivegram init`.");
-    var keys = await Unlock(ctrl, offerRemember: true);
-
-    using var db = IndexDb.Open(state.IndexPath);
-    var cfg = state.Config;
-    await using var engine = new ContentEngine(db, remote, keys, state.Dir, new EngineOptions
-    {
-        StagingQuota = (long)(cfg.StagingQuotaGb * (1L << 30)),
-        CacheQuota = (long)(cfg.CacheQuotaGb * (1L << 30)),
-        UploadConcurrency = cfg.UploadConcurrency,
-    });
-    var sync = new SyncService(db, remote, keys);
-    sync.WritableChanged += () => Log.Warn(sync.Writable ? "the drive is now writable" : $"the drive is now READ-ONLY (open on {sync.LeaseHolder})");
-
     Console.WriteLine("Syncing the folder tree...");
-    await sync.StartAsync(takeOver, default);
-    engine.Start();
-    if (!sync.Writable)
-        Console.WriteLine($"Read-only: the drive is open for writing on '{sync.LeaseHolder}'. Close it there (or use --take-over if that PC is gone).");
-
-    var fs = new DriveFileSystem(db, engine, sync, cfg.VolumeLabel);
-    var host = new FileSystemHost(fs);
-    int status = host.Mount(mountPoint, null, false, 0);
-    if (status < 0)
-    {
-        await sync.StopAsync(releaseLease: true, default);
-        throw new IOException($"Could not mount {mountPoint} (NTSTATUS 0x{status:X8}). Is the drive letter already in use?");
-    }
-    Console.WriteLine($"DriveGram is mounted at {mountPoint}  — press Ctrl+C to unmount.");
+    await using var session = await DriveSession.StartAsync(state, TelegramAsk, Unlock, mountPoint, takeOver);
+    if (!session.Writable)
+        Console.WriteLine($"Read-only: the drive is open for writing on '{session.Sync.LeaseHolder}'. Close it there (or use --take-over if that PC is gone).");
+    Console.WriteLine($"DriveGram is mounted at {session.MountPoint}  — press Ctrl+C to unmount.");
 
     var stop = new TaskCompletionSource();
-    using var stopEvent = new EventWaitHandle(false, EventResetMode.AutoReset, StopEventName());
-    _ = Task.Run(() => { stopEvent.WaitOne(); stop.TrySetResult(); });
+    session.StopRequested += () => stop.TrySetResult();
     int ctrlC = 0;
     Console.CancelKeyPress += (_, e) =>
     {
@@ -337,22 +298,17 @@ async Task<int> Mount(string? mountPoint, bool takeOver)
     while (!stop.Task.IsCompleted)
     {
         await Task.WhenAny(stop.Task, Task.Delay(2000));
-        var s = engine.Status;
+        var s = session.Status;
         var line = $"pending {s.PendingFiles} files | uploading {s.UploadsInFlight} | staged {s.StagedBytes / 1048576.0:N0} MiB | " +
                    $"up {s.BytesUploaded / 1048576.0:N0} MiB | down {s.BytesDownloaded / 1048576.0:N0} MiB | cache {s.CacheBytes / 1048576.0:N0} MiB" +
-                   (sync.Writable ? "" : " | READ-ONLY");
+                   (session.Writable ? "" : " | READ-ONLY");
         if (line != lastLine) { Console.WriteLine(line); lastLine = line; }
     }
 
     Console.WriteLine("Unmounting...");
-    host.Unmount();
-    if (db.PendingNodes().Count > 0)
-    {
-        Console.WriteLine("Finishing uploads before releasing the drive (Ctrl+C again to quit now)...");
-        await engine.DrainAsync(st => Console.Write($"\r  {st.PendingFiles} files left, {st.StagedBytes / 1048576.0:N0} MiB staged      "), default);
-        Console.WriteLine();
-    }
-    await sync.StopAsync(releaseLease: true, default);
-    Console.WriteLine("Done. The drive can now be opened for writing on another PC.");
+    if (session.Db.PendingNodes().Count > 0) Console.WriteLine("Finishing uploads before releasing the drive (Ctrl+C again to quit now)...");
+    await session.StopAsync(waitForUploads: true,
+        st => Console.Write($"\r  {st.PendingFiles} files left, {st.StagedBytes / 1048576.0:N0} MiB staged      "));
+    Console.WriteLine("\nDone. The drive can now be opened for writing on another PC.");
     return 0;
 }

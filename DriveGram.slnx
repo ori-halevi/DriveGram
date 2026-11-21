@@ -1,6 +1,8 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/DriveGram.Core/DriveGram.Core.csproj" />
+    <Project Path="src/DriveGram.Host/DriveGram.Host.csproj" />
+    <Project Path="src/DriveGram.Tray/DriveGram.Tray.csproj" />
     <Project Path="src/DriveGram/DriveGram.csproj" />
   </Folder>
   <Folder Name="/tests/">

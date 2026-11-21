@@ -3,7 +3,7 @@ using System.Text;
 using System.Text.Json;
 using DriveGram.Remote;
 
-namespace DriveGram.App;
+namespace DriveGram.Host;
 
 /// <summary>Settings of this PC, in %LOCALAPPDATA%\DriveGram\&lt;profile&gt;\config.json.</summary>
 public sealed class AppConfig

@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>drivegram-tray</AssemblyName>
+    <RootNamespace>DriveGram.Tray</RootNamespace>
+    <Version>0.2.0</Version>
+    <ApplicationIcon>..\..\assets\drivegram.ico</ApplicationIcon>
+    <OutputPath>..\..\bin\$(Configuration)\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DriveGram.Host\DriveGram.Host.csproj" />
+  </ItemGroup>
+
+</Project>

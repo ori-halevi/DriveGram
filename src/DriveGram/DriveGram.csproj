@@ -5,20 +5,21 @@
     <TargetFramework>net10.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>drivegram</AssemblyName>
     <RootNamespace>DriveGram.App</RootNamespace>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
+    <ApplicationIcon>..\..\assets\drivegram.ico</ApplicationIcon>
+    <!-- the tray app lands in the same folder, so autostart / the drive icon have one place to point at -->
+    <OutputPath>..\..\bin\$(Configuration)\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="QRCoder" Version="1.8.0" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.13" />
-    <PackageReference Include="winfsp.net" Version="2.1.25156" />
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\DriveGram.Core\DriveGram.Core.csproj" />
+    <ProjectReference Include="..\DriveGram.Host\DriveGram.Host.csproj" />
   </ItemGroup>
 
 </Project>
