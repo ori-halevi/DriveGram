@@ -359,12 +359,21 @@ public sealed class DriveSession : IAsyncDisposable
             long window = TimeSpan.FromMinutes(10).Ticks;
             var stack = new Stack<string>([n.Id]);
             while (stack.Count > 0)
-                foreach (var c in Db.ChildrenAll(stack.Pop()))
+            {
+                var folder = stack.Pop();
+                var taken = Db.Children(folder).Select(x => IndexDb.NameKey(x.Name)).ToHashSet();
+                // newest-trashed first: an older version replaced shortly before must not take the name
+                foreach (var c in Db.ChildrenAll(folder).OrderByDescending(x => x.Trashed))
                 {
-                    if (c.Trashed != 0 && Math.Abs(c.Trashed - n.Trashed) > window) continue;
-                    if (c.Trashed != 0) ops.Add(new RestoreOp(c.Id, c.Parent!, c.Name));
+                    if (c.Trashed != 0)
+                    {
+                        if (c.Trashed > n.Trashed || n.Trashed - c.Trashed > window) continue; // deleted on its own
+                        if (!taken.Add(IndexDb.NameKey(c.Name))) continue; // an older version of a restored file
+                        ops.Add(new RestoreOp(c.Id, c.Parent!, c.Name));
+                    }
                     if (c.Dir) stack.Push(c.Id);
                 }
+            }
         }
         Db.ApplyLocal(ops);
         var path = PathOf(n.Id);

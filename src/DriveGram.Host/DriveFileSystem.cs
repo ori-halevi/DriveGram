@@ -16,11 +16,34 @@ namespace DriveGram.Host;
 /// </summary>
 public sealed class DriveFileSystem : FileSystemBase
 {
-    sealed class Handle(string id, bool dir, bool writer)
+    sealed class Handle(string id, bool dir, bool writer, bool canWrite)
     {
         public string Id { get; } = id;
         public bool Dir { get; } = dir;
-        public bool Writer { get; } = writer;
+        public bool Writer { get; set; } = writer;
+        public bool CanWrite { get; } = canWrite;
+    }
+
+    /// <summary>The first change through a handle opened for writing makes it a writer (holds the commit
+    /// until it closes). Office keeps a document open read/write for hours: counting it as a writer from
+    /// the open on meant a SAVED document did not upload until Word was closed.</summary>
+    void BecomeWriter(object fileNode)
+    {
+        if (fileNode is Handle { Dir: false, Writer: false, CanWrite: true } h)
+        {
+            h.Writer = true;
+            _engine.Opened(h.Id, true);
+        }
+    }
+
+    /// <summary>The stored (case-correct) full path, e.g. \Projects\Report.docx.</summary>
+    string FullPath(Node n)
+    {
+        var parts = new List<string>();
+        for (var x = n; x is not null && !x.IsRoot && parts.Count < 4096; x = x.Parent is null ? null : _db.Get(x.Parent))
+            parts.Add(x.Name);
+        parts.Reverse();
+        return "\\" + string.Join("\\", parts);
     }
 
     sealed class DirEnum(List<(string Name, FileInfo Info)> entries, int index)
@@ -51,7 +74,8 @@ public sealed class DriveFileSystem : FileSystemBase
         _engine = engine;
         _sync = sync;
         _label = label;
-        var sd = new RawSecurityDescriptor("O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;WD)");
+        var me = System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value ?? "BA";
+        var sd = new RawSecurityDescriptor($"O:{me}G:{me}D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{me})(A;;FA;;;WD)");
         _sd = new byte[sd.BinaryLength];
         sd.GetBinaryForm(_sd, 0);
     }
@@ -136,6 +160,9 @@ public sealed class DriveFileSystem : FileSystemBase
         return STATUS_SUCCESS;
     }
 
+    static bool InGitDir(string path) =>
+        path.Contains("\\.git\\", StringComparison.OrdinalIgnoreCase);
+
     public override int SetVolumeLabel(string volumeLabel, out VolumeInfo volumeInfo)
     {
         GetVolumeInfo(out volumeInfo);
@@ -189,8 +216,9 @@ public sealed class DriveFileSystem : FileSystemBase
         _db.ApplyLocal(new UpsertOp(id, parent.Id, name, dir, attrs, now, now));
         bool writer = !dir && (grantedAccess & WriteAccess) != 0;
         _engine.Opened(id, writer);
-        fileNode = new Handle(id, dir, writer);
+        fileNode = new Handle(id, dir, writer, writer);
         fileInfo = Info(_db.Get(id)!);
+        normalizedName = FullPath(_db.Get(id)!);
         return STATUS_SUCCESS;
     }
 
@@ -200,11 +228,11 @@ public sealed class DriveFileSystem : FileSystemBase
         fileNode = default!; fileDesc = default!; fileInfo = default; normalizedName = default!;
         var n = _db.Resolve(fileName);
         if (n is null) return STATUS_OBJECT_NAME_NOT_FOUND;
-        if (ReadOnly && !n.Dir && (grantedAccess & WriteAccess) != 0) return StatusWriteProtected;
-        bool writer = !n.Dir && !ReadOnly && (grantedAccess & WriteAccess) != 0;
-        _engine.Opened(n.Id, writer);
-        fileNode = new Handle(n.Id, n.Dir, writer);
+        if (ReadOnly && !n.Dir && (grantedAccess & WriteAccess) != 0) return STATUS_ACCESS_DENIED;
+        bool canWrite = !n.Dir && !ReadOnly && (grantedAccess & WriteAccess) != 0;
+        fileNode = new Handle(n.Id, n.Dir, false, canWrite); // a writer only once it changes something
         fileInfo = Info(n);
+        normalizedName = FullPath(n);
         return STATUS_SUCCESS;
     }
 
@@ -214,6 +242,7 @@ public sealed class DriveFileSystem : FileSystemBase
         fileInfo = default;
         if (ReadOnly) return StatusWriteProtected;
         var n = NodeOf(fileNode);
+        BecomeWriter(fileNode);
         _engine.SetSize(n.Id, 0);
         uint attrs = CleanAttrs(replaceFileAttributes ? fileAttributes | AttrArchive : n.Attrs | fileAttributes | AttrArchive, false);
         long now = Now;
@@ -229,10 +258,12 @@ public sealed class DriveFileSystem : FileSystemBase
         {
             var n = _db.Get(h.Id);
             if (n is null || n.IsRoot) return;
-            if (!n.Dir && n.Name.StartsWith("~$"))
+            bool neverStored = !n.Dir && _db.IsPending(n.Id) && _db.CommittedChunks(n.Id).Count == 0;
+            if (!n.Dir && (n.Name.StartsWith("~$") || neverStored || InGitDir(fileName)))
             {
-                _db.ApplyLocal(new PurgeOp(n.Id)); // an Office lock file: nothing worth keeping
-                _engine.Discard(n.Id);
+                _engine.Discard(n.Id); // first: the purge removes the rows Discard uses to find the pieces
+                _db.ApplyLocal(new PurgeOp(n.Id));
+                Log.Debug($"deleted for good (never uploaded / lock / git file) {fileName}");
                 return;
             }
             _db.ApplyLocal(new TrashOp(n.Id, Now));
@@ -281,6 +312,7 @@ public sealed class DriveFileSystem : FileSystemBase
         }
         else if (writeToEndOfFile) offset = size;
 
+        BecomeWriter(fileNode);
         _engine.Write(h.Id, (long)offset, new ReadOnlySpan<byte>((void*)buffer, (int)length));
         bytesTransferred = length;
         fileInfo = Info(_db.Get(h.Id)!);
@@ -321,7 +353,11 @@ public sealed class DriveFileSystem : FileSystemBase
         if (ReadOnly) return StatusWriteProtected;
         var n = NodeOf(fileNode);
         // An allocation-size request only matters when it cuts the file; we never preallocate.
-        if (!setAllocationSize || (ulong)n.Size > newSize) _engine.SetSize(n.Id, (long)newSize);
+        if (!setAllocationSize || (ulong)n.Size > newSize)
+        {
+            if ((ulong)n.Size != newSize) BecomeWriter(fileNode);
+            _engine.SetSize(n.Id, (long)newSize);
+        }
         fileInfo = Info(_db.Get(n.Id)!);
         return STATUS_SUCCESS;
     }
@@ -350,10 +386,14 @@ public sealed class DriveFileSystem : FileSystemBase
         {
             if (!replaceIfExists) return STATUS_OBJECT_NAME_COLLISION;
             if (existing.Dir) return STATUS_ACCESS_DENIED;
-            ops.Add(new TrashOp(existing.Id, Now)); // replaced file goes to the trash (= old version kept 30 days)
+            // replaced file goes to the trash (= old version kept 30 days); git rewrites its own files constantly
+            ops.Add(InGitDir(newFileName) ? new PurgeOp(existing.Id) : new TrashOp(existing.Id, Now));
         }
-        ops.Add(new UpsertOp(n.Id, newParent.Id, newName, n.Dir, n.Attrs, n.Ctime, n.Mtime));
-        _db.ApplyLocal(ops); // the replaced file keeps its content (an unfinished upload still completes)
+        // a save via "temp file + rename over the original" keeps the document's creation date
+        long ctime = existing is not null && existing.Id != n.Id && !existing.Dir ? existing.Ctime : n.Ctime;
+        ops.Add(new UpsertOp(n.Id, newParent.Id, newName, n.Dir, n.Attrs, ctime, n.Mtime));
+        if (existing is not null && existing.Id != n.Id && InGitDir(newFileName)) _engine.Discard(existing.Id);
+        _db.ApplyLocal(ops); // a trashed replaced file keeps its content (an unfinished upload still completes)
         return STATUS_SUCCESS;
     }
 

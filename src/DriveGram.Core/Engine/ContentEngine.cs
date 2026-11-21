@@ -53,6 +53,8 @@ public sealed class ContentEngine : IAsyncDisposable
         public readonly Dictionary<int, long> LastWrite = new();
         public long LastReadEnd = -1;
         public int Committing;
+        /// <summary>A commit is already scheduled for a write that came with no writer handle open.</summary>
+        public int OrphanCommit;
     }
 
     abstract record Seg(int Idx, int InOff, int DstOff, int Len);
@@ -252,6 +254,10 @@ public sealed class ContentEngine : IAsyncDisposable
             {
                 // a piece moved to the cache / was evicted between planning and reading: plan again
             }
+            catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+            {
+                throw new IOException($"could not read the file's data: {ex.Message}", ex); // not "no such file"
+            }
         }
     }
 
@@ -353,6 +359,9 @@ public sealed class ContentEngine : IAsyncDisposable
             _db.SetLocalSize(id, size, node.Mtime); // "modified" is set when the handle closes
             _db.SetPending(id);
             st.Gen++;
+            // Windows may deliver cached data through a handle that never counted as a writer (e.g. the
+            // one that first read the file): no close of a writer will come, so make sure it commits.
+            if (st.OpenWriters == 0 && Interlocked.Exchange(ref st.OrphanCommit, 1) == 0) ScheduleCommit(id);
         }
     }
 
@@ -451,7 +460,7 @@ public sealed class ContentEngine : IAsyncDisposable
             try { return File.ReadAllBytes(plain); } catch (IOException) { }
         }
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
-        cts.CancelAfter(ReadBudget);
+        cts.CancelAfter(_o.ReadTimeout); // a whole chunk (copy-on-write): always the full time
         byte[] whole = [];
         Remote(() => whole = _reader.ReadWholeAsync(loc, cts.Token).GetAwaiter().GetResult());
         return whole;
@@ -472,8 +481,14 @@ public sealed class ContentEngine : IAsyncDisposable
             read();
             Interlocked.Exchange(ref _lastReadFailure, 0);
         }
-        catch (Exception ex) when (ex is not CryptographicException)
+        catch (FileNotFoundException ex)
         {
+            throw new IOException($"a piece of this file is missing in Telegram ({ex.Message})", ex);
+        }
+        catch (Exception ex) when (ex is TimeoutException or OperationCanceledException or IOException
+                                   or System.Net.Sockets.SocketException)
+        {
+            // only "cannot reach Telegram" makes the next reads give up early, not one bad message
             Interlocked.Exchange(ref _lastReadFailure, Environment.TickCount64);
             throw;
         }
@@ -629,6 +644,7 @@ public sealed class ContentEngine : IAsyncDisposable
     async Task CommitAsync(string id, CancellationToken ct)
     {
         var st = State(id);
+        Interlocked.Exchange(ref st.OrphanCommit, 0);
         if (Interlocked.Exchange(ref st.Committing, 1) == 1)
         {
             ScheduleCommit(id); // one is running; look again shortly so this request is not lost

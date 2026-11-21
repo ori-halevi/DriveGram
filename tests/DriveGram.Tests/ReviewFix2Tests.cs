@@ -137,4 +137,28 @@ public class ReviewFix2Tests
         Assert.Contains("\"futureField\":[1,2]", rewritten);
         Assert.Contains("\"futureWrap\":{\"k\":1}", rewritten);
     }
+
+    [Fact]
+    public async Task ANewFileReachesOtherPcsTogetherWithItsContent()
+    {
+        await using var kit = await TestKit.CreateAsync();
+        var a = new Pc(Path.Combine(kit.Root, "a"), kit.Remote, kit.Keys, so: Fast(), startEngine: false); // uploads held
+        await a.Sync.StartAsync(false, default);
+        var folder = a.NewDir("Docs");
+        var f = a.NewFile("video.bin", folder);
+        a.WriteFile(f, TestKit.RandomBytes(5000, 3));
+        await a.Sync.FlushAsync(default);                       // the folder goes out, the half-uploaded file waits
+
+        var b = kit.Pc("b", so: Fast());
+        await b.Sync.StartAsync(false, default);
+        Assert.NotNull(b.Db.Get(folder));
+        Assert.Null(b.Db.Get(f));
+
+        a.Engine.Start();
+        await a.SettleAsync();                                  // committed: name + content go out together
+        await b.Sync.CatchUpAsync(default);
+        Assert.Equal(5000, b.Db.Get(f)!.Size);
+        await a.DisposeAsync();
+        await b.DisposeAsync();
+    }
 }
