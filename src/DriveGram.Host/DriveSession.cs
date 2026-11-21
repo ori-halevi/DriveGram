@@ -322,7 +322,7 @@ public sealed class DriveSession : IAsyncDisposable
         return false;
     }
 
-    public List<TrashItem> Trash() => Db.Trashed().Select(n =>
+    public List<TrashItem> Trash() => Db.Trashed().Where(n => n.Parent is null || Db.Get(n.Parent)?.Trashed is null or 0).Select(n =>
     {
         var folder = n.Parent is null ? @"\" : PathOf(n.Parent);
         return new TrashItem(n.Id, n.Name, MountPoint + folder, n.Dir, n.Size, DateTime.FromFileTimeUtc(n.Trashed).ToLocalTime());
@@ -334,7 +334,22 @@ public sealed class DriveSession : IAsyncDisposable
         if (!Writable) throw new InvalidOperationException(L.T("הכונן במצב קריאה בלבד במחשב הזה כרגע.", "The drive is read-only on this PC right now."));
         var n = Db.Get(id) ?? throw new FileNotFoundException(id);
         var parent = n.Parent is not null && IsLive(n.Parent) ? n.Parent : IndexDb.RootId;
-        Db.ApplyLocal(new RestoreOp(n.Id, parent, n.Name));
+        var ops = new List<Op> { new RestoreOp(n.Id, parent, n.Name) };
+        if (n.Dir)
+        {
+            // Explorer deletes a folder bottom-up: its content was trashed item by item just before it.
+            // Bring back what went with it (not what was deleted separately, long before).
+            long window = TimeSpan.FromMinutes(10).Ticks;
+            var stack = new Stack<string>([n.Id]);
+            while (stack.Count > 0)
+                foreach (var c in Db.ChildrenAll(stack.Pop()))
+                {
+                    if (c.Trashed != 0 && Math.Abs(c.Trashed - n.Trashed) > window) continue;
+                    if (c.Trashed != 0) ops.Add(new RestoreOp(c.Id, c.Parent!, c.Name));
+                    if (c.Dir) stack.Push(c.Id);
+                }
+        }
+        Db.ApplyLocal(ops);
         var path = PathOf(n.Id);
         Notify(path, NotifyAction.Added, n.Dir);
         return MountPoint + path;

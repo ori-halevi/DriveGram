@@ -188,6 +188,10 @@ public sealed class IndexDb : IDisposable
     public List<Node> Children(string parentId) =>
         Query($"SELECT {NodeCols} FROM nodes WHERE parent=@p AND trashed=0", MapNode, ("@p", parentId));
 
+    /// <summary>Children including trashed ones.</summary>
+    public List<Node> ChildrenAll(string parentId) =>
+        Query($"SELECT {NodeCols} FROM nodes WHERE parent=@p", MapNode, ("@p", parentId));
+
     public bool HasChildren(string id) =>
         Scalar("SELECT 1 FROM nodes WHERE parent=@p AND trashed=0 LIMIT 1", ("@p", id)) is not null;
 

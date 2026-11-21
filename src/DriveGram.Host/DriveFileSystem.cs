@@ -72,7 +72,7 @@ public sealed class DriveFileSystem : FileSystemBase
         host.PersistentAcls = true;
         host.PostCleanupWhenModifiedOnly = true;
         host.PassQueryDirectoryPattern = false;
-        host.FlushAndPurgeOnCleanup = false;
+        host.FlushAndPurgeOnCleanup = true; // else Windows may hold the file (and its upload) for minutes
         host.VolumeCreationTime = (ulong)new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc).ToFileTimeUtc();
         host.VolumeSerialNumber = 0x0D17E6A4;
         host.FileSystemName = "DriveGram";
@@ -89,6 +89,9 @@ public sealed class DriveFileSystem : FileSystemBase
                 return StatusIoTimeout;
             case IOException io when io.Message.Contains("staging area is full"):
                 Log.Warn(io.Message);
+                return StatusDiskFull;
+            case IOException io when (io.HResult & 0xFFFF) is 112 or 39: // ERROR_DISK_FULL / ERROR_HANDLE_DISK_FULL
+                Log.Warn($"fs: the local disk is full ({io.Message})");
                 return StatusDiskFull;
             default:
                 Log.Error("fs: unexpected error", ex);
@@ -133,7 +136,11 @@ public sealed class DriveFileSystem : FileSystemBase
         return STATUS_SUCCESS;
     }
 
-    public override int SetVolumeLabel(string volumeLabel, out VolumeInfo volumeInfo) => GetVolumeInfo(out volumeInfo);
+    public override int SetVolumeLabel(string volumeLabel, out VolumeInfo volumeInfo)
+    {
+        GetVolumeInfo(out volumeInfo);
+        return STATUS_ACCESS_DENIED; // the name is set in DriveGram's settings; never pretend it changed
+    }
 
     // ── lookup / security ────────────────────────────────────────────────────
     public override int GetSecurityByName(string fileName, out uint fileAttributes, ref byte[] securityDescriptor)
@@ -171,6 +178,9 @@ public sealed class DriveFileSystem : FileSystemBase
         if (parent is null) return STATUS_OBJECT_PATH_NOT_FOUND;
         if (name.Length > 255) return STATUS_OBJECT_NAME_INVALID;
         if (_db.Child(parent.Id, name) is not null) return STATUS_OBJECT_NAME_COLLISION;
+        if (parent.IsRoot && (name.Equals("$RECYCLE.BIN", StringComparison.OrdinalIgnoreCase)
+                              || name.Equals("System Volume Information", StringComparison.OrdinalIgnoreCase)))
+            return STATUS_ACCESS_DENIED;
 
         bool dir = (createOptions & FILE_DIRECTORY_FILE) != 0;
         uint attrs = CleanAttrs(dir ? fileAttributes : fileAttributes | AttrArchive, dir);
@@ -190,6 +200,7 @@ public sealed class DriveFileSystem : FileSystemBase
         fileNode = default!; fileDesc = default!; fileInfo = default; normalizedName = default!;
         var n = _db.Resolve(fileName);
         if (n is null) return STATUS_OBJECT_NAME_NOT_FOUND;
+        if (ReadOnly && !n.Dir && (grantedAccess & WriteAccess) != 0) return StatusWriteProtected;
         bool writer = !n.Dir && !ReadOnly && (grantedAccess & WriteAccess) != 0;
         _engine.Opened(n.Id, writer);
         fileNode = new Handle(n.Id, n.Dir, writer);
@@ -218,9 +229,21 @@ public sealed class DriveFileSystem : FileSystemBase
         {
             var n = _db.Get(h.Id);
             if (n is null || n.IsRoot) return;
+            if (!n.Dir && n.Name.StartsWith("~$"))
+            {
+                _db.ApplyLocal(new PurgeOp(n.Id)); // an Office lock file: nothing worth keeping
+                _engine.Discard(n.Id);
+                return;
+            }
             _db.ApplyLocal(new TrashOp(n.Id, Now));
-            if (!n.Dir) _engine.Discard(n.Id);
             Log.Debug($"deleted (to trash) {fileName}");
+        }
+        else if ((flags & CleanupSetLastWriteTime) != 0 && !ReadOnly && _db.Get(h.Id) is { Dir: false } w)
+        {
+            // Written through this handle and the app did not set the time itself: "modified now". Done
+            // here, not on every write: Windows delivers cached data AFTER a copy has set the original time.
+            if (_db.IsPending(w.Id)) _db.SetLocalSize(w.Id, w.Size, Now);
+            else _db.ApplyLocal(new UpsertOp(w.Id, w.Parent!, w.Name, false, w.Attrs, w.Ctime, Now));
         }
     }
 
@@ -330,8 +353,7 @@ public sealed class DriveFileSystem : FileSystemBase
             ops.Add(new TrashOp(existing.Id, Now)); // replaced file goes to the trash (= old version kept 30 days)
         }
         ops.Add(new UpsertOp(n.Id, newParent.Id, newName, n.Dir, n.Attrs, n.Ctime, n.Mtime));
-        _db.ApplyLocal(ops);
-        if (existing is not null && existing.Id != n.Id) _engine.Discard(existing.Id);
+        _db.ApplyLocal(ops); // the replaced file keeps its content (an unfinished upload still completes)
         return STATUS_SUCCESS;
     }
 

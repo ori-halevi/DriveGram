@@ -17,7 +17,7 @@ public sealed class EngineOptions
     public TimeSpan SealIdle { get; init; } = TimeSpan.FromSeconds(2);
     /// <summary>Delay between the last close of a file and its commit (lets save-via-rename settle).</summary>
     public TimeSpan CommitDelay { get; init; } = TimeSpan.FromSeconds(1);
-    public TimeSpan ReadTimeout { get; init; } = TimeSpan.FromMinutes(2);
+    public TimeSpan ReadTimeout { get; init; } = TimeSpan.FromSeconds(45);
     /// <summary>How long a writer waits for staging room before the write fails with "disk full".</summary>
     public TimeSpan BackpressureTimeout { get; init; } = TimeSpan.FromMinutes(30);
 }
@@ -72,6 +72,8 @@ public sealed class ContentEngine : IAsyncDisposable
     readonly ConcurrentDictionary<string, NodeState> _nodes = new();
     readonly ConcurrentDictionary<string, SemaphoreSlim> _chunkLocks = new();
     readonly SemaphoreSlim _uploadSlots;
+    readonly SemaphoreSlim _pieceSlots; // pieces held in memory (read, hashed, encrypted, uploading)
+    readonly ConcurrentDictionary<string, int> _commitFailures = new();
     readonly Channel<string> _commitQueue = Channel.CreateUnbounded<string>();
     readonly CancellationTokenSource _cts = new();
     readonly SemaphoreSlim _room = new(0);
@@ -94,6 +96,7 @@ public sealed class ContentEngine : IAsyncDisposable
         _cache = new BlockCache(Path.Combine(stateDir, "cache"), _o.CacheQuota);
         _reader = new ChunkReader(remote, _cache, keys);
         _uploadSlots = new SemaphoreSlim(Math.Max(1, _o.UploadConcurrency));
+        _pieceSlots = new SemaphoreSlim(Math.Max(1, _o.UploadConcurrency) + 2);
     }
 
     /// <summary>Nothing is waiting to upload or uploading (garbage collection may run).</summary>
@@ -314,8 +317,8 @@ public sealed class ContentEngine : IAsyncDisposable
                 {
                     var buf = new byte[r.Len];
                     using var cts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
-                    cts.CancelAfter(_o.ReadTimeout);
-                    _reader.ReadAsync(r.Loc, r.InOff, buf, sequential, cts.Token).GetAwaiter().GetResult();
+                    cts.CancelAfter(ReadBudget);
+                    Remote(() => _reader.ReadAsync(r.Loc, r.InOff, buf, sequential, cts.Token).GetAwaiter().GetResult());
                     buf.CopyTo(target);
                     break;
                 }
@@ -347,7 +350,7 @@ public sealed class ContentEngine : IAsyncDisposable
                 Touched(st, idx);
                 done += len;
             }
-            _db.SetLocalSize(id, size, Now);
+            _db.SetLocalSize(id, size, node.Mtime); // "modified" is set when the handle closes
             _db.SetPending(id);
             st.Gen++;
         }
@@ -448,8 +451,32 @@ public sealed class ContentEngine : IAsyncDisposable
             try { return File.ReadAllBytes(plain); } catch (IOException) { }
         }
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
-        cts.CancelAfter(_o.ReadTimeout);
-        return _reader.ReadWholeAsync(loc, cts.Token).GetAwaiter().GetResult();
+        cts.CancelAfter(ReadBudget);
+        byte[] whole = [];
+        Remote(() => whole = _reader.ReadWholeAsync(loc, cts.Token).GetAwaiter().GetResult());
+        return whole;
+    }
+
+    long _lastReadFailure; // Environment.TickCount64; 0 = reads are working
+
+    /// <summary>After a recent failed read (offline), give up within seconds: every read holds one of
+    /// the file system's few threads, and a folder of thumbnails would otherwise freeze Explorer.</summary>
+    TimeSpan ReadBudget =>
+        _lastReadFailure != 0 && Environment.TickCount64 - Interlocked.Read(ref _lastReadFailure) < 30_000
+            ? TimeSpan.FromSeconds(5) : _o.ReadTimeout;
+
+    void Remote(Action read)
+    {
+        try
+        {
+            read();
+            Interlocked.Exchange(ref _lastReadFailure, 0);
+        }
+        catch (Exception ex) when (ex is not CryptographicException)
+        {
+            Interlocked.Exchange(ref _lastReadFailure, Environment.TickCount64);
+            throw;
+        }
     }
 
     void SetPieceLength(string path, int len)
@@ -561,6 +588,15 @@ public sealed class ContentEngine : IAsyncDisposable
             if (row is null || row.Kind == 'U') return true;
             gen = st.PieceGen.GetValueOrDefault(idx);
         }
+        // At most a few pieces in memory at once (read + encrypted copy are 2 x 32 MiB each): without this
+        // a folder of hundreds of closed files read them ALL in before waiting for an upload slot.
+        await _pieceSlots.WaitAsync(ct);
+        try { return await UploadPieceLockedAsync(id, idx, st, gen, row, ct); }
+        finally { _pieceSlots.Release(); }
+    }
+
+    async Task<bool> UploadPieceLockedAsync(string id, int idx, NodeState st, long gen, DirtyRow row, CancellationToken ct)
+    {
         byte[] data;
         if (row.Kind == 'Z') data = new byte[row.Size];
         else
@@ -674,12 +710,19 @@ public sealed class ContentEngine : IAsyncDisposable
             {
                 _ = Task.Run(async () =>
                 {
-                    try { await CommitAsync(id, ct); }
+                    try
+                    {
+                        await CommitAsync(id, ct);
+                        _commitFailures.TryRemove(id, out _);
+                    }
                     catch (OperationCanceledException) { }
                     catch (Exception ex)
                     {
-                        Log.Error($"commit {id} failed, retrying in 30s", ex);
-                        await Task.Delay(TimeSpan.FromSeconds(30), ct).ContinueWith(_ => { });
+                        int n = _commitFailures.AddOrUpdate(id, 1, (_, v) => v + 1);
+                        var wait = TimeSpan.FromSeconds(Math.Min(600, 30 * Math.Pow(2, Math.Min(n - 1, 5))));
+                        if (n == 1) Log.Error($"commit {id} failed, retrying in {wait.TotalSeconds:0}s", ex);
+                        else if (n % 10 == 0) Log.Warn($"commit {id} still failing ({n} tries): {ex.Message}");
+                        await Task.Delay(wait, ct).ContinueWith(_ => { });
                         _commitQueue.Writer.TryWrite(id);
                     }
                 }, ct);
@@ -701,7 +744,7 @@ public sealed class ContentEngine : IAsyncDisposable
                 if (++_ticks % 60 == 0) ReconcileStaging(adjustCount: true);
                 long now = Environment.TickCount64;
                 var due = new List<(string, int)>();
-                foreach (var row in _db.AllDirty().Where(r => r.Kind is 'S' or 'Z' && r.Size == CS))
+                foreach (var row in _db.AllDirty().Where(r => r.Kind == 'S' && r.Size == CS))
                 {
                     var st = State(row.Node);
                     lock (st.Lock)
@@ -763,7 +806,9 @@ public static class Retry
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex) when (ex is not StopRetryingException)
             {
-                Log.Warn($"{what} failed (attempt {attempt}): {ex.Message}; retrying in {delay.TotalSeconds:0}s");
+                // offline for hours means thousands of attempts: the first few, then one in 20
+                if (attempt <= 3 || attempt % 20 == 0)
+                    Log.Warn($"{what} failed (attempt {attempt}): {ex.Message}; retrying in {delay.TotalSeconds:0}s");
                 await Task.Delay(delay, ct);
                 delay = TimeSpan.FromSeconds(Math.Min(60, delay.TotalSeconds * 2));
             }

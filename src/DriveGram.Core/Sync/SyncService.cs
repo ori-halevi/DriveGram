@@ -259,6 +259,7 @@ public sealed class SyncService : IAsyncDisposable
             int applied = 0;
             foreach (var item in await _remote.ListJournalAsync(_db.Applied, ct))
             {
+                if (_ownAppends.Contains(item.Id)) { _db.Applied = item.Id; continue; } // ours, already applied
                 if (!item.Name.StartsWith("j-"))
                 {
                     if (!item.Name.StartsWith("s-") && OurNaming.IsMatch(item.Name))
@@ -316,6 +317,11 @@ public sealed class SyncService : IAsyncDisposable
     static readonly System.Text.RegularExpressions.Regex OurNaming = new(@"^[a-z]{1,8}-[^\\/]*\.bin$");
 
     DateTime _leaseConfirmedAt = DateTime.MinValue;
+    readonly HashSet<int> _ownAppends = []; // journal messages this session appended (touched under _io)
+    volatile bool _beatNow;
+
+    /// <summary>The PC woke up: renew the lease / catch up now rather than at the next heartbeat.</summary>
+    public void Wake() => _beatNow = true;
 
     /// <summary>Do we (still) hold the write lease? Re-read from the control record when the last
     /// confirmation is older than one heartbeat; on loss, stop writing and keep the outbox.</summary>
@@ -328,6 +334,14 @@ public sealed class SyncService : IAsyncDisposable
         {
             _leaseConfirmedAt = DateTime.UtcNow;
             return true;
+        }
+        if (lease is not null && lease.Dev == _db.DeviceId)
+        {
+            // Still ours, but it expired (the PC slept / was offline): nobody took it. Do not append on an
+            // expired lease; re-take it properly (catch-up, write, confirm) on the loop's next turn. The
+            // drive stays writable meanwhile: changes simply wait in the outbox for a few seconds.
+            _beatNow = true;
+            return false;
         }
         SetWritable(false, lease?.Name);
         Log.Error($"lease lost to '{lease?.Name}'; {_db.OutboxCount()} local changes are held back (not sent)");
@@ -352,11 +366,12 @@ public sealed class SyncService : IAsyncDisposable
                 var payload = Envelope.Seal(_keys.JournalKey, OpJson.SerializeEntry(entry));
                 // Checked before EVERY attempt: after a long outage another PC may have taken the lease,
                 // and appending then would put two writers' changes into the journal (diverged indexes).
-                await Retry.ForeverAsync(async () =>
+                int msgId = await Retry.ForeverAsync(async () =>
                 {
                     if (!await StillHoldLeaseAsync(ct)) throw new LeaseLostException();
                     return await _remote.AppendJournalAsync($"j-{_db.DeviceId[..8]}.bin", payload, ct);
                 }, "journal append", ct);
+                _ownAppends.Add(msgId);
                 _db.DeleteOutboxUpTo(batch[^1].Seq);
                 _opsSinceSnapshot += batch.Count;
             }
@@ -426,7 +441,8 @@ public sealed class SyncService : IAsyncDisposable
             {
                 await Task.Delay(_o.FlushInterval, ct);
                 if (Writable) await FlushAsync(ct);
-                if (DateTime.UtcNow < nextBeat) continue;
+                if (DateTime.UtcNow < nextBeat && !_beatNow) continue;
+                _beatNow = false;
                 nextBeat = DateTime.UtcNow + _o.HeartbeatInterval;
 
                 if (Writable)
@@ -440,6 +456,12 @@ public sealed class SyncService : IAsyncDisposable
                         SetWritable(false, lease?.Name);
                         Log.Error($"lease lost{(lease is null ? "" : $" to '{lease.Name}'")}; {_db.OutboxCount()} local changes are held back");
                         if (lease is null) await TryAcquireLeaseAsync(false, ct);
+                        continue;
+                    }
+                    if (lease.Until <= NowUnix)
+                    {
+                        Log.Info("the write lease expired while this PC slept or was offline; taking it again");
+                        await TryAcquireLeaseAsync(false, ct);
                         continue;
                     }
                     await WriteLeaseAsync(ct);
@@ -479,7 +501,14 @@ public sealed class SyncService : IAsyncDisposable
         if (_loop is not null) { try { await _loop; } catch (OperationCanceledException) { } }
         if (!Writable) return;
         await FlushAsync(ct);
-        if (_opsSinceSnapshot > 0) await SnapshotAsync(ct);
+        if (_opsSinceSnapshot > 0)
+        {
+            // a snapshot only speeds up the next start: never let it keep the drive locked for other PCs
+            using var snapCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            snapCts.CancelAfter(TimeSpan.FromSeconds(15));
+            try { await SnapshotAsync(snapCts.Token); }
+            catch (Exception ex) when (!ct.IsCancellationRequested) { Log.Warn($"snapshot at stop skipped: {ex.Message}"); }
+        }
         if (releaseLease && _db.OutboxCount() == 0 && _db.PendingNodes().Count == 0)
         {
             await UpdateControlAsync(c => c.Lease?.Dev == _db.DeviceId ? c with { Lease = null } : c, ct);

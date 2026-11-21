@@ -37,6 +37,20 @@ public sealed class Governor
     /// <summary>Raised when Telegram says the session is no longer valid (revoked from the phone, etc.).</summary>
     public event Action? SignedOut;
 
+    /// <summary>Asked on a 401: true only if the account's MAIN connection confirms the sign-out.</summary>
+    public Func<Task<bool>>? ConfirmSignedOut { get; set; }
+
+    /// <summary>When Telegram asked this account to wait, until when (null: no wait).</summary>
+    public DateTime? WaitingUntil
+    {
+        get
+        {
+            long left;
+            lock (_gate) left = _resumeAt - Environment.TickCount64;
+            return left > 5000 ? DateTime.Now.AddMilliseconds(left) : null;
+        }
+    }
+
     async Task AcquireAsync(CancellationToken ct)
     {
         while (true)
@@ -71,6 +85,7 @@ public sealed class Governor
                     {
                         _ = task.ContinueWith(x => _ = x.Exception, TaskContinuationOptions.OnlyOnFaulted);
                         ct.ThrowIfCancellationRequested();
+                        OnTimeout(); // a slow line: fewer requests at once, so each one finishes in time
                         if (++timeouts >= 5) throw new TimeoutException($"{_name}: request timed out {timeouts} times");
                         Log.Warn($"{_name}: request timed out after {t.TotalSeconds:0}s, retrying");
                         continue;
@@ -82,13 +97,18 @@ public sealed class Governor
             }
             catch (RpcException e) when (e.Code == 401)
             {
+                if (ConfirmSignedOut is { } confirm && !await confirm())
+                    throw new IOException($"Telegram refused a secondary connection ({e.Message}); retrying");
                 SignedOut?.Invoke();
                 throw new NotSignedInException();
             }
             catch (RpcException e) when (e.Code == 420)
             {
                 int seconds = Math.Max(1, e.X);
-                if (seconds > MaxWait.TotalSeconds) throw;
+                // even a very long wait is honoured by everyone on the account: hammering on only
+                // extends the ban. Waiting requests stop on unmount (ct).
+                if (seconds > MaxWait.TotalSeconds)
+                    Log.Warn($"telegram {_name}: asked to wait {TimeSpan.FromSeconds(seconds):h\\:mm\\:ss}; pausing this account until then");
                 OnFlood(seconds);
             }
             finally { Release(); }
@@ -101,6 +121,21 @@ public sealed class Governor
         {
             if (_limit < _cap && ++_ok >= _limit) { _limit++; _ok = 0; }
             Report();
+        }
+    }
+
+    long _timeoutEpisodeEnd;
+
+    void OnTimeout()
+    {
+        lock (_gate)
+        {
+            long now = Environment.TickCount64;
+            if (now < _timeoutEpisodeEnd) return; // once per episode, like flood waits
+            _limit = Math.Max(1, _limit / 2);
+            _ok = 0;
+            _timeoutEpisodeEnd = now + 30_000;
+            Log.Warn($"telegram {_name}: requests are timing out (slow connection?); in-flight cap now {_limit}/{_cap}");
         }
     }
 

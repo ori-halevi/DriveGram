@@ -418,7 +418,8 @@ public sealed class TelegramRemote : IRemote
     }
 
     async Task<Client> DcClient(int dcId) =>
-        dcId == 0 || dcId == _client.TLConfig?.this_dc ? _client : await _client.GetClientForDC(-dcId, true);
+        dcId == 0 || dcId == _client.TLConfig?.this_dc ? _client
+            : await _client.GetClientForDC(-dcId, true).WaitAsync(ReadTimeout);
 
     long _bytesSent;
     public long BytesSent => Interlocked.Read(ref _bytesSent);

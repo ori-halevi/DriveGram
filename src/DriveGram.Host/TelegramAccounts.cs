@@ -41,6 +41,7 @@ public static class TelegramAccounts
         public required WTelegram.Client Client;
         public required DpapiSessionStream Stream;
         public required Governor Up, Down;
+        public required ClientHealer Healer;
         public int Refs;
     }
 
@@ -63,7 +64,11 @@ public static class TelegramAccounts
                 {
                     Path = path, Client = client, Stream = stream,
                     Up = new Governor("upload", 8), Down = new Governor("download", 8),
+                    Healer = new ClientHealer(client, System.IO.Path.GetFileName(System.IO.Path.GetDirectoryName(path)) ?? "account"),
                 };
+                // A 401 can also come from a secondary data center's connection (files stored elsewhere):
+                // only a 401 confirmed on the main connection means "signed out".
+                e.Up.ConfirmSignedOut = e.Down.ConfirmSignedOut = () => StillSignedOutAsync(client);
                 Entries[path] = e;
             }
             e.Refs++;
@@ -78,7 +83,25 @@ public static class TelegramAccounts
             if (--e.Refs > 0) return;
             Entries.Remove(e.Path);
         }
+        e.Healer.Dispose();
         try { e.Client.Dispose(); } catch (Exception ex) { Log.Warn($"closing a Telegram connection: {ex.Message}"); }
+    }
+
+    static async Task<bool> StillSignedOutAsync(WTelegram.Client client)
+    {
+        try
+        {
+            await TL.SchemaExtensions.Users_GetUsers(client, TL.InputUser.Self).WaitAsync(TimeSpan.FromSeconds(20));
+            return false;
+        }
+        catch (TL.RpcException e) when (e.Code == 401) { return true; }
+        catch (Exception) { return false; } // offline / timeout: never sign anyone out on a guess
+    }
+
+    /// <summary>The PC woke up from sleep: check every connection now instead of in a minute.</summary>
+    public static void WakeUp()
+    {
+        lock (Gate) foreach (var e in Entries.Values) e.Healer.Poke();
     }
 
     /// <summary>Is any drive (or the wizard) in this process using this account right now?</summary>
