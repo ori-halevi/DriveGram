@@ -96,7 +96,10 @@ public sealed class DriveSession : IAsyncDisposable
     /// is always null, so resuming accepts the saved account without asking (the bug that made the
     /// tray think it was signed out). `askPassword` answers a 2FA prompt during a QR sign-in.
     /// </summary>
-    public static WTelegram.Client NewTelegramClient(AppState state, Func<string?>? askPassword = null)
+    public static WTelegram.Client NewTelegramClient(AppState state, Func<string?>? askPassword = null) =>
+        NewTelegramClient(state, askPassword, out _);
+
+    public static WTelegram.Client NewTelegramClient(AppState state, Func<string?>? askPassword, out DpapiSessionStream stream)
     {
         var cfg = state.Config;
         if (cfg.ApiId == 0 || string.IsNullOrEmpty(cfg.ApiHash)) throw new NotSignedInException();
@@ -106,13 +109,14 @@ public sealed class DriveSession : IAsyncDisposable
             "api_hash" => cfg.ApiHash,
             "device_model" => "DriveGram on " + Environment.MachineName,
             "system_version" => Environment.OSVersion.VersionString,
-            "app_version" => "DriveGram 0.7",
+            "app_version" => "DriveGram 0.8",
             "password" => askPassword is null ? throw new NotSignedInException() : askPassword(),
             "verification_code" or "first_name" or "last_name" or "email" or "email_verification_code" =>
                 throw new NotSignedInException(),
             _ => null, // includes "phone_number": accept the account the session belongs to
         };
-        return new WTelegram.Client(Config, new DpapiSessionStream(state.SessionPath));
+        stream = new DpapiSessionStream(state.SessionPath);
+        return new WTelegram.Client(Config, stream);
     }
 
     /// <summary>Open the drive this profile is bound to (its channels are saved in the profile).</summary>
@@ -120,10 +124,12 @@ public sealed class DriveSession : IAsyncDisposable
     {
         if (state.Folder is not null) return new FolderRemote(state.Folder);
         if (state.Config.Channels is not { } known) throw new NoDriveException();
-        var client = NewTelegramClient(state);
+        // the account's shared connection: one sign-in, one rate-limit governor for all its drives
+        TelegramAccounts.MigrateLegacy(state);
+        var lease = TelegramAccounts.Acquire(state);
         TelegramRemote remote;
-        try { remote = await TelegramRemote.OpenAsync(client, known); }
-        catch { client.Dispose(); throw; }
+        try { remote = await TelegramRemote.OpenAsync(lease.Client, known, lease.Up, lease.Down, ownsClient: false, release: lease); }
+        catch { lease.Dispose(); throw; }
         bool changed = state.Config.Channels != remote.Channels;
         state.Config.Channels = remote.Channels;
         if (remote.Account is { } u)

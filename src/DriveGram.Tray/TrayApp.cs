@@ -51,6 +51,7 @@ sealed class TrayApp : ApplicationContext
         var dir = AppContext.BaseDirectory;
         _idle = new Icon(Path.Combine(dir, "drivegram.ico"), SystemInformation.SmallIconSize);
         _busy = new Icon(Path.Combine(dir, "drivegram-busy.ico"), SystemInformation.SmallIconSize);
+        foreach (var s in AppState.All()) TelegramAccounts.MigrateLegacy(s); // 0.8: one shared sign-in per account
         _drives = AppState.All().Select(s => new DriveController(s)).ToList();
 
         _menu.Opening += (_, e) => { BuildMenu(); e.Cancel = false; };
@@ -329,8 +330,11 @@ sealed class TrayApp : ApplicationContext
         if (!await StopAsync(d)) return;
         if (d.Session is not null) return;
         try { ShellIntegration.ClearDriveIcon(d.Letter); } catch { }
+        var accountKey = d.State.Config.AccountKey;
         d.State.Delete();
         _drives.Remove(d);
+        // the account's last drive on this PC: sign it out too, so no stray "device" stays behind
+        if (!string.IsNullOrEmpty(accountKey)) await TelegramAccounts.SignOutIfUnusedAsync(accountKey);
         UpdateIcon();
     }
 

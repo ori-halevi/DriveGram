@@ -173,6 +173,7 @@ sealed class LoginPage : WizardPage
     readonly Button _twoFaOk = Theme.Primary(L.T("אישור", "OK"));
 
     readonly Label _error = Theme.Label("", Theme.Small, Theme.Error, 640);
+    readonly FlowLayoutPanel _known = Theme.Column();
     readonly System.Windows.Forms.Timer _tick = new() { Interval = 1000 };
     CancellationTokenSource? _qrCts;
     Task? _qrTask;
@@ -251,7 +252,8 @@ sealed class LoginPage : WizardPage
         _twoFaOk.Click += async (_, _) => await SubmitTwoFaAsync();
 
         _signIn.Controls.AddRange([methods, _qr, _phone]);
-        col.Controls.AddRange([_account, _signIn, _twoFa, _error]);
+        _known.Visible = false;
+        col.Controls.AddRange([_account, _known, _signIn, _twoFa, _error]);
         SetContent(col);
 
         _tick.Tick += (_, _) =>
@@ -278,8 +280,34 @@ sealed class LoginPage : WizardPage
         {
             _account.Visible = false;
             _signIn.Visible = true;
+            ShowKnownAccounts();
             await ModeChangedAsync();
         }
+    }
+
+    /// <summary>Accounts already signed in on this PC: one click instead of a new sign-in.</summary>
+    void ShowKnownAccounts()
+    {
+        _known.Controls.Clear();
+        var accounts = TelegramAccounts.Known().Where(a => a.Key != Ctx.State.Config.AccountKey).ToList();
+        _known.Visible = accounts.Count > 0;
+        if (accounts.Count == 0) return;
+        _known.Controls.Add(Theme.Label(L.T("חשבון שכבר מחובר במחשב הזה (בלי התחברות נוספת):", "An account already signed in on this PC (no new sign-in):"), Theme.Heading));
+        var row = Theme.Row();
+        foreach (var a in accounts)
+        {
+            var b = Theme.Secondary(a.Name);
+            b.Click += async (_, _) =>
+            {
+                LeavePage();
+                if (_qrTask is not null) { try { await _qrTask; } catch { } }
+                Ctx.UseAccount(a);
+                await EnterAsync();
+            };
+            row.Controls.Add(b);
+        }
+        _known.Controls.Add(row);
+        _known.Controls.Add(Theme.Label(L.T("או התחבר לחשבון אחר:", "Or sign in to another account:"), Theme.Small, Theme.Muted));
     }
 
     public override void LeavePage()
@@ -304,6 +332,7 @@ sealed class LoginPage : WizardPage
         var phone = string.IsNullOrEmpty(user.phone) ? "" : $"  ·  ‎+{user.phone}‎";
         _accountText.Text = L.T($"✓  מחובר כ־{name}{handle}{phone}", $"✓  Signed in as {name}{handle}{phone}");
         _account.Visible = true;
+        _known.Visible = false;
 
         Ctx.State.Config.AccountId = user.id;
         Ctx.State.Config.AccountName = string.IsNullOrEmpty(user.username) ? name : "@" + user.username;
@@ -376,6 +405,7 @@ sealed class LoginPage : WizardPage
         {
             var client = Ctx.GetClient();
             var user = await Task.Run(() => client.LoginWithQRCode(url => BeginInvoke(() => ShowQr(url)), logoutFirst: false, ct: ct), ct);
+            Ctx.AdoptSignIn(user);
             ShowSignedIn(user);
         }
         catch (OperationCanceledException) { }
@@ -480,6 +510,7 @@ sealed class LoginPage : WizardPage
             switch (next)
             {
                 case null:
+                    Ctx.AdoptSignIn(client.User!);
                     ShowSignedIn(client.User!);
                     break;
                 case "verification_code":

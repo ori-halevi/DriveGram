@@ -173,7 +173,10 @@ async Task<int> Login()
     }
     state.Save();
     Console.WriteLine("Tip: use a dedicated Telegram account for DriveGram, not your personal one.");
-    using var client = DriveSession.NewTelegramClient(state, TwoFactor);
+    DriveGram.Host.TelegramAccounts.MigrateLegacy(state);
+    var lease = DriveGram.Host.TelegramAccounts.Acquire(state, TwoFactor);
+    using var _ = lease;
+    var client = lease.Client;
     TL.User user;
     try
     {
@@ -199,6 +202,8 @@ async Task<int> Login()
         user = client.User!;
     }
     else user = await client.LoginWithQRCode(ShowQr, logoutFirst: false);
+    using (DriveGram.Host.TelegramAccounts.Adopt(state, lease, user)) { }  // the account's shared sign-in
+    state.Save();
     Console.WriteLine($"Signed in as {user.first_name} {user.last_name} (@{user.username}). The session is stored encrypted for this Windows user only.");
     return 0;
 }

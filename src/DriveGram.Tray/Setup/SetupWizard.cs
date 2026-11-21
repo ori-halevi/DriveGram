@@ -23,27 +23,61 @@ sealed class SetupContext : IDisposable
         IsNew = isNew;
     }
 
-    public WTelegram.Client GetClient() => Client ??= DriveSession.NewTelegramClient(State, () => AskPassword?.Invoke());
+    AccountLease? _lease;
 
-    /// <summary>Drop the client (new API credentials, or switching account).</summary>
+    /// <summary>The account's shared connection (the same one running drives use — never a second
+    /// client on the same sign-in file). Before sign-in it is a fresh, profile-local one.</summary>
+    public WTelegram.Client GetClient()
+    {
+        if (Client is null)
+        {
+            _lease = TelegramAccounts.Acquire(State, () => AskPassword?.Invoke());
+            Client = _lease.Client;
+        }
+        return Client;
+    }
+
+    /// <summary>A sign-in just succeeded: store it as the account's shared sign-in (or switch to the
+    /// one this PC already had for that account, logging the duplicate out).</summary>
+    public void AdoptSignIn(TL.User user)
+    {
+        if (_lease is null) return;
+        _lease = TelegramAccounts.Adopt(State, _lease, user);
+        Client = _lease.Client;
+    }
+
+    /// <summary>Use an account already signed in on this PC — no new sign-in needed.</summary>
+    public void UseAccount(AccountInfo a)
+    {
+        ResetClient(signOut: false);
+        State.Config.AccountKey = a.Key;
+        State.Config.ApiId = a.ApiId;
+        State.Config.ApiHash = a.ApiHash;
+        State.Config.AccountId = a.Id;
+        State.Config.AccountName = a.Name;
+    }
+
+    /// <summary>Drop the connection (new API credentials, switching account, or a broken sign-in).
+    /// signOut: forget this profile's sign-in; a shared account is signed out only if nothing uses it.</summary>
     public void ResetClient(bool signOut)
     {
-        var c = Client;
+        if (Remote is not null) { Remote.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5)); Remote = null; }
+        _lease?.Dispose();
+        _lease = null;
         Client = null;
         User = null;
-        if (Remote is not null) { Remote.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5)); Remote = null; }
-        if (c is not null)
-        {
-            if (signOut) { try { TL.SchemaExtensions.Auth_LogOut(c).Wait(TimeSpan.FromSeconds(10)); } catch { } }
-            c.Dispose();
-        }
-        if (signOut) try { File.Delete(State.SessionPath); } catch { }
+        if (!signOut) return;
+        var key = State.Config.AccountKey;
+        State.Config.AccountKey = "";
+        if (string.IsNullOrEmpty(key)) { try { File.Delete(State.SessionPath); } catch { } }
+        else _ = TelegramAccounts.SignOutIfUnusedAsync(key);
     }
 
     public void Dispose()
     {
-        Remote?.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5)); // the wizard's remotes do not own the client
-        Client?.Dispose();
+        Remote?.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5)); // the wizard's remotes do not own the connection
+        _lease?.Dispose();
+        _lease = null;
         Client = null;
         Remote = null;
     }

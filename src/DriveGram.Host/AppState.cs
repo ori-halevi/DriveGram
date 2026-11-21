@@ -15,6 +15,8 @@ public sealed class AppConfig
     public string DriveId { get; set; } = "";
     /// <summary>Telegram user the drive lives on (0 = not known yet), and a display name for menus.</summary>
     public long AccountId { get; set; }
+    /// <summary>Folder under accounts\ holding the account's shared sign-in ("" = the profile's own).</summary>
+    public string AccountKey { get; set; } = "";
     public string AccountName { get; set; } = "";
     /// <summary>Local folder instead of Telegram (offline trial drives).</summary>
     public string? Folder { get; set; }
@@ -45,7 +47,11 @@ public sealed class AppState
     public AppConfig Config { get; private set; } = new();
 
     public string ConfigPath => Path.Combine(Dir, "config.json");
-    public string SessionPath => Path.Combine(Dir, "telegram.session");
+    /// <summary>The Telegram sign-in this drive uses: the account's shared one (accounts\&lt;id&gt;), or —
+    /// before the account is known (a sign-in in progress) and for drives from before 0.8 — the profile's own.</summary>
+    public string SessionPath => string.IsNullOrEmpty(Config.AccountKey)
+        ? Path.Combine(Dir, "telegram.session")
+        : Path.Combine(TelegramAccounts.AccountsDir, Config.AccountKey, "telegram.session");
     public string MasterKeyPath => Path.Combine(Dir, "unlock.key");
     public string IndexPath => Path.Combine(Dir, "index.db");
     public string LogDir => Path.Combine(Dir, "logs");
@@ -134,8 +140,24 @@ public sealed class AppState
 /// </summary>
 public sealed class DpapiSessionStream : Stream
 {
-    readonly string _path;
+    string _path;
+    readonly object _gate = new();
     readonly MemoryStream _mem = new();
+
+    public string Path => _path;
+
+    /// <summary>Keep the same live sign-in but store it somewhere else (e.g. into the account folder).</summary>
+    public void Relocate(string newPath)
+    {
+        lock (_gate)
+        {
+            var old = _path;
+            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(newPath)!);
+            _path = newPath;
+            Persist();
+            try { if (!string.Equals(old, newPath, StringComparison.OrdinalIgnoreCase)) File.Delete(old); } catch (IOException) { }
+        }
+    }
 
     public DpapiSessionStream(string path)
     {
@@ -150,9 +172,13 @@ public sealed class DpapiSessionStream : Stream
 
     void Persist()
     {
-        var tmp = _path + ".tmp";
-        File.WriteAllBytes(tmp, AppState.Protect(_mem.ToArray()));
-        File.Move(tmp, _path, overwrite: true);
+        lock (_gate)
+        {
+            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(_path)!);
+            var tmp = _path + ".tmp";
+            File.WriteAllBytes(tmp, AppState.Protect(_mem.ToArray()));
+            File.Move(tmp, _path, overwrite: true);
+        }
     }
 
     public override bool CanRead => true;

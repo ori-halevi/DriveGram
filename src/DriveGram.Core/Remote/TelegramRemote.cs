@@ -43,13 +43,15 @@ public sealed class TelegramRemote : IRemote
 
     public TelegramChannels Channels => new(_data.id, _data.access_hash, _journal.id, _journal.access_hash);
 
-    TelegramRemote(Client client, Channel data, Channel journal, int uploadParallel, int downloadParallel)
+    IDisposable? _release;
+
+    TelegramRemote(Client client, Channel data, Channel journal, Governor up, Governor down)
     {
         _client = client;
         _data = data;
         _journal = journal;
-        _up = new Governor("upload", uploadParallel);
-        _down = new Governor("download", downloadParallel);
+        _up = up;
+        _down = down;
         _up.SignedOut += OnSignedOut;
         _down.SignedOut += OnSignedOut;
     }
@@ -150,8 +152,11 @@ public sealed class TelegramRemote : IRemote
     }
 
     /// <summary>Open a drive whose channels are known (from discovery or this PC's saved config).</summary>
+    /// <param name="up">/<param name="down">the account's shared governors (drives on one account share
+    /// Telegram's per-account rate limit); new ones when null.</param>
+    /// <param name="release">disposed with the remote (e.g. the lease on a shared connection).</param>
     public static async Task<TelegramRemote> OpenAsync(Client client, TelegramChannels known,
-        int uploadParallel = 8, int downloadParallel = 8, bool ownsClient = true)
+        Governor? up = null, Governor? down = null, bool ownsClient = true, IDisposable? release = null)
     {
         var account = await ResumeAsync(client);
         var all = (await client.Messages_GetAllChats()).chats.Values.OfType<Channel>().ToList();
@@ -160,7 +165,8 @@ public sealed class TelegramRemote : IRemote
         // A drive this PC knew is gone: never quietly put an empty one in its place.
         if (data is null || journal is null) throw new DriveVanishedException();
         client.FloodRetryThreshold = 0; // flood waits surface to the governor from now on
-        return new TelegramRemote(client, data, journal, uploadParallel, downloadParallel) { Account = account, _ownsClient = ownsClient };
+        return new TelegramRemote(client, data, journal, up ?? new Governor("upload", 8), down ?? new Governor("download", 8))
+            { Account = account, _ownsClient = ownsClient, _release = release };
     }
 
     /// <summary>Does stored message `msg` in the data channel hold chunk `chunkId`? (Its file name is
@@ -326,7 +332,10 @@ public sealed class TelegramRemote : IRemote
 
     public ValueTask DisposeAsync()
     {
+        _up.SignedOut -= OnSignedOut;
+        _down.SignedOut -= OnSignedOut;
         if (_ownsClient) _client.Dispose();
+        Interlocked.Exchange(ref _release, null)?.Dispose();
         return ValueTask.CompletedTask;
     }
 }
