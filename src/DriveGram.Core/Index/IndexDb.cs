@@ -627,7 +627,8 @@ public sealed class IndexDb : IDisposable
     /// older readers refuse snapshots whose content they fully understand.</summary>
     public const int SnapshotFormat = 1;
 
-    sealed record Snap(List<Node> Nodes, List<string[]> FileChunks, List<StoredChunk> Chunks, int V = SnapshotFormat, int Upto = 0);
+    sealed record Snap(List<Node> Nodes, List<string[]> FileChunks, List<StoredChunk> Chunks, int V = SnapshotFormat, int Upto = 0,
+        List<string>? Seen = null);
 
     public byte[] ExportSnapshot(int upto = 0)
     {
@@ -640,7 +641,8 @@ public sealed class IndexDb : IDisposable
                 Query($"SELECT {NodeCols} FROM nodes", MapNode),
                 FileChunks: Query("SELECT node, idx, chunk FROM file_chunks", r => new[] { r.GetString(0), r.GetInt32(1).ToString(), r.GetString(2) }),
                 Chunks: Query("SELECT id,msg,size,hash FROM chunks c WHERE EXISTS (SELECT 1 FROM file_chunks f WHERE f.chunk=c.id)",
-                    r => new StoredChunk(r.GetString(0), r.GetInt32(1), r.GetInt32(2), r.GetString(3))));
+                    r => new StoredChunk(r.GetString(0), r.GetInt32(1), r.GetInt32(2), r.GetString(3))),
+                Seen: Query("SELECT nonce FROM seen_entries", r => r.GetString(0)));
         }
         using var ms = new MemoryStream();
         using (var gz = new GZipStream(ms, CompressionLevel.SmallestSize, leaveOpen: true))
@@ -665,6 +667,8 @@ public sealed class IndexDb : IDisposable
             foreach (var c in snap.Chunks)
                 Exec("INSERT INTO chunks(id,msg,size,hash,created) VALUES(@id,@m,@z,@h,@t) ON CONFLICT(id) DO NOTHING",
                     ("@id", c.ChunkId), ("@m", c.Msg), ("@z", c.Size), ("@h", c.Hash), ("@t", now));
+            foreach (var n in snap.Seen ?? [])
+                Exec("INSERT OR IGNORE INTO seen_entries(nonce) VALUES(@n)", ("@n", n));
             foreach (var f in snap.FileChunks)
                 Exec("INSERT INTO file_chunks(node,idx,chunk) VALUES(@n,@i,@c)", ("@n", f[0]), ("@i", int.Parse(f[1])), ("@c", f[2]));
         });

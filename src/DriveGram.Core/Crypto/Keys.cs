@@ -61,6 +61,7 @@ public sealed class Keys
         _idKey = Sub("drivegram/chunk-id/v1");
         _chunkKey = Sub("drivegram/chunk-key/v1");
         _journalKey = Sub("drivegram/journal/v1");
+        ControlKey = Sub("drivegram/control/v1");
     }
 
     byte[] Sub(string label) => HMACSHA256.HashData(_master, Encoding.UTF8.GetBytes(label));
@@ -141,6 +142,8 @@ public sealed class Keys
         if (!CryptographicOperations.FixedTimeEquals(
                 Encoding.ASCII.GetBytes(Verifier(master)), Encoding.ASCII.GetBytes(h.Verifier)))
             throw new WrongPasswordException();
+        if (h.FrameSize is < 4096 or > (64 << 20) || h.ChunkSize is < 4096 or > (256 << 20) || h.ChunkSize % h.FrameSize != 0)
+            throw new InvalidDataException($"The drive's record has impossible chunk sizes ({h.ChunkSize}/{h.FrameSize}).");
         return new Keys(master, h.ChunkSize, h.FrameSize);
     }
 
@@ -205,6 +208,8 @@ public sealed class Keys
     public string ChunkId(ReadOnlySpan<byte> plainHash) => Convert.ToHexStringLower(HMACSHA256.HashData(_idKey, plainHash));
     public byte[] ChunkKey(ReadOnlySpan<byte> plainHash) => HMACSHA256.HashData(_chunkKey, plainHash);
     public byte[] JournalKey => _journalKey;
+    /// <summary>Authenticates the control record (lease, handover, snapshot pointer, identity, vault fields).</summary>
+    public byte[] ControlKey { get; }
 }
 
 /// <summary>

@@ -94,10 +94,36 @@ public class SevereFixTests
         // A's clock is 3 hours behind: its lease looks long expired to B, but A keeps renewing it
         var ctrl = (await SyncService.ReadControlAsync(kit.Remote, default))!;
         long old = DateTimeOffset.UtcNow.AddHours(-3).ToUnixTimeSeconds();
-        await kit.Remote.WriteControlAsync((ctrl with { Lease = ctrl.Lease! with { Until = old } }).ToJson(), default);
+        await kit.Remote.WriteControlAsync((ctrl with { Lease = ctrl.Lease! with { Until = old } }).Signed(kit.Keys.ControlKey).ToJson(), default); // as a PC with the password writes it
 
         var b = kit.Pc("b", so: Fast("PC-B"));
         await b.Sync.StartAsync(false, default);
         Assert.False(b.Sync.Writable);                            // first sight: never taken on the timestamp alone
+    }
+
+    [Fact]
+    public async Task ARecordChangedWithoutThePasswordIsNotBelieved()
+    {
+        await using var kit = await TestKit.CreateAsync();
+        var a = kit.Pc("a", so: Fast("PC-A"));
+        await a.Sync.StartAsync(false, default);
+        Assert.True(a.Sync.Writable);
+        await a.Sync.StopAsync(true, default);
+        await a.DisposeAsync();
+
+        // someone with access to the channel (no password) hands the lease to a fake PC and asks a minReader
+        var ctrl = (await SyncService.ReadControlAsync(kit.Remote, default))!;
+        var forged = ctrl with { Lease = new LeaseInfo("evil", "EVIL-PC", DateTimeOffset.UtcNow.AddYears(1).ToUnixTimeSeconds()),
+                                 MinReader = 99, Mac = null };
+        await kit.Remote.WriteControlAsync(forged.ToJson(), default);
+        var b = kit.Pc("b", so: Fast("PC-B"));
+        await b.Sync.StartAsync(false, default);                 // not locked out by the forged minReader
+        Assert.False(b.Sync.ControlTrusted);
+        Assert.False(b.Sync.Writable);                           // and does not act on anything in it
+
+        await b.Sync.RepairControlAsync(default);                // the user confirms: signed again, misleading parts dropped
+        Assert.True(b.Sync.ControlTrusted);
+        await b.Sync.TakeDriveAsync(force: false, default);
+        Assert.True(b.Sync.Writable);
     }
 }

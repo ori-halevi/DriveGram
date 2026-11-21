@@ -37,7 +37,8 @@ public sealed partial class SyncService
     {
         if (DateTime.UtcNow < _nextHandoverCheck || HandingOver) return;
         _nextHandoverCheck = DateTime.UtcNow.AddSeconds(10);
-        var r = (await ReadControlAsync(_remote, ct))?.Handover;
+        var r = (await ReadTrustedAsync(ct))?.Handover;
+        if (!ControlTrusted) return; // a forged request is never shown
         if (r is null || r.Dev == _db.DeviceId || r.Id == _surfacedRequest) return;
         if (!(r.State == "asked" || (r.State == "seen" && _resurface))) return;
         _resurface = false;
@@ -58,8 +59,8 @@ public sealed partial class SyncService
     /// <summary>Is this request still waiting for this PC's answer (not cancelled, not taken over)?</summary>
     public async Task<bool> RequestStillOpenAsync(HandoverRequest r, CancellationToken ct)
     {
-        var c = await ReadControlAsync(_remote, ct);
-        return c?.Lease?.Dev == _db.DeviceId && c.Handover?.Id == r.Id && c.Handover.State is "asked" or "seen";
+        var c = await ReadTrustedAsync(ct);
+        return ControlTrusted && c?.Lease?.Dev == _db.DeviceId && c.Handover?.Id == r.Id && c.Handover.State is "asked" or "seen";
     }
 
     // ── on the PC that wants the drive ───────────────────────────────────────
@@ -87,7 +88,8 @@ public sealed partial class SyncService
     /// <summary>Where a request stands (re-asserting it if the holder's heartbeat overwrote it meanwhile).</summary>
     public async Task<(HandoverRequest? Request, LeaseInfo? Lease)> HandoverStatusAsync(HandoverRequest mine, CancellationToken ct)
     {
-        var c = (await ReadControlAsync(_remote, ct))!;
+        var c = (await ReadTrustedAsync(ct))!;
+        if (!ControlTrusted) return (null, null); // nothing in it is believed
         if (c.Lease?.Dev == _db.DeviceId) return (c.Handover, c.Lease);
         if (c.Handover?.Id != mine.Id)
         {

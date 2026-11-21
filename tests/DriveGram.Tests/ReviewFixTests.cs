@@ -51,7 +51,7 @@ public class ReviewFixTests
 
         // meanwhile another PC took the lease
         var ctrl = (await SyncService.ReadControlAsync(kit.Remote, default))!;
-        await kit.Remote.WriteControlAsync((ctrl with { Lease = new LeaseInfo("other-pc", "LAPTOP-2", DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 900) }).ToJson(), default);
+        await kit.Remote.WriteControlAsync((ctrl with { Lease = new LeaseInfo("other-pc", "LAPTOP-2", DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 900) }).Signed(kit.Keys.ControlKey).ToJson(), default); // as a PC with the password writes it
         int journalBefore = (await kit.Remote.ListJournalAsync(0, default)).Count;
 
         await Task.Delay(300);                                  // A's last lease confirmation is now stale

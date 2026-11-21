@@ -570,6 +570,7 @@ public sealed class TelegramRemote : IRemote
     public async Task<byte[]> ReadJournalAsync(int id, CancellationToken ct)
     {
         var doc = await GetDocAsync(_journal, _jdocs, id, ct);
+        if (doc.size > (1L << 30)) throw new InvalidDataException($"journal message {id} is {doc.size:N0} bytes: not a DriveGram record");
         return await _down.RunAsync(async () =>
         {
             using var ms = new MemoryStream(); // fresh for every attempt

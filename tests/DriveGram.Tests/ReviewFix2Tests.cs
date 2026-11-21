@@ -103,13 +103,20 @@ public class ReviewFix2Tests
         await c.Sync.StopAsync(true, default);
         await c.DisposeAsync();
 
-        int at = await kit.Remote.AppendJournalAsync("x-future.bin", [1, 2, 3], default); // a newer version's record
+        // an unknown record kind alone proves nothing (anyone who can post could add one): skipped
+        await kit.Remote.AppendJournalAsync("x-future.bin", [1, 2, 3], default);
         var d = kit.Pc("d", so: Fast());
         await d.Sync.StartAsync(false, default);
-        Assert.True(d.Sync.NeedsUpdate);
-        Assert.False(d.Sync.Writable);
-        Assert.True(d.Db.Applied < at);
+        Assert.False(d.Sync.NeedsUpdate);
+        await d.Sync.StopAsync(true, default);
         await d.DisposeAsync();
+
+        // a real newer format says so in the SIGNED record: that stops this version
+        var ctrl = (await SyncService.ReadControlAsync(kit.Remote, default))!;
+        await kit.Remote.WriteControlAsync((ctrl with { MinReader = StorageFormat.Current + 1 }).Signed(kit.Keys.ControlKey).ToJson(), default);
+        var e = kit.Pc("e", so: Fast());
+        await Assert.ThrowsAsync<NeedsUpdateException>(() => e.Sync.StartAsync(false, default));
+        await e.DisposeAsync();
     }
 
     [Fact]

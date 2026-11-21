@@ -20,8 +20,19 @@ public sealed record DriveIdentity(string Id, string Name, long DataChannel);
 /// <summary>The one editable record of a drive (Telegram: the pinned text message of the journal channel).</summary>
 /// <param name="MinReader">/<param name="MinWriter">oldest StorageFormat that may read / write this drive (see StorageFormat).</param>
 public sealed record ControlState(int V, VaultHeader Vault, LeaseInfo? Lease, SnapInfo? Snap, DriveIdentity? Drive = null,
-    int MinReader = 1, int MinWriter = 1, HandoverRequest? Handover = null)
+    int MinReader = 1, int MinWriter = 1, HandoverRequest? Handover = null, string? Mac = null)
 {
+    /// <summary>HMAC of the whole record (without the mac itself), under the drive's control key: anyone
+    /// may READ this pinned message, only someone with the drive's password can WRITE it convincingly.</summary>
+    public ControlState Signed(byte[] key) => this with { Mac = ComputeMac(key) };
+
+    public bool MacValid(byte[] key) =>
+        Mac is not null && System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+            System.Text.Encoding.ASCII.GetBytes(Mac), System.Text.Encoding.ASCII.GetBytes(ComputeMac(key)));
+
+    string ComputeMac(byte[] key) => Convert.ToBase64String(System.Security.Cryptography.HMACSHA256.HashData(key,
+        System.Text.Encoding.UTF8.GetBytes((this with { Mac = null }).ToJson())));
+
     /// <summary>Fields written by a newer version, kept verbatim on every rewrite.</summary>
     [System.Text.Json.Serialization.JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
 
@@ -98,14 +109,16 @@ public sealed partial class SyncService : IAsyncDisposable
     {
         if (await ReadControlAsync(remote, ct) is not null) throw new InvalidOperationException("This remote already holds a drive.");
         var (header, keys) = Keys.Create(password, chunkSize, frameSize, iterations);
-        await remote.WriteControlAsync(new ControlState(1, header, null, null, identity).ToJson(), ct);
+        // signed from the first moment; only versions that sign may write it
+        await remote.WriteControlAsync(new ControlState(1, header, null, null, identity, MinWriter: StorageFormat.Current)
+            .Signed(keys.ControlKey).ToJson(), ct);
         return keys;
     }
 
     readonly SemaphoreSlim _ctrlLock = new(1, 1);
 
     /// <summary>This drive's control record, as stored now.</summary>
-    public Task<ControlState?> ReadControlAsync(CancellationToken ct) => ReadControlAsync(_remote, ct);
+    public Task<ControlState?> ReadControlAsync(CancellationToken ct) => ReadTrustedAsync(ct);
 
     /// <summary>Read-modify-write of the control record, serialized within this PC (the lease heartbeat
     /// rewrites it every minute: an unserialized edit could be overwritten by a stale copy).</summary>
@@ -114,11 +127,77 @@ public sealed partial class SyncService : IAsyncDisposable
         await _ctrlLock.WaitAsync(ct);
         try
         {
-            var next = change((await ReadControlAsync(_remote, ct))!);
+            var current = (await ReadTrustedAsync(ct))!;
+            if (!ControlTrusted)
+                throw new ControlNotTrustedException();
+            var next = change(current);
+            // signed, and from now on only versions that sign may write it (older ones would drop the mac)
+            next = (next with { MinWriter = Math.Max(next.MinWriter, StorageFormat.Current) }).Signed(_keys.ControlKey);
             await _remote.WriteControlAsync(next.ToJson(), ct);
             return next;
         }
         finally { _ctrlLock.Release(); }
+    }
+
+    /// <summary>False when the drive's record was changed by someone without the drive's password (its mac
+    /// is wrong or was removed): nothing in it is acted on, and this PC stays read-only until the user
+    /// confirms the record again (RepairControlAsync).</summary>
+    public bool ControlTrusted { get; private set; } = true;
+
+    bool Trust(ControlState c)
+    {
+        bool knownSigned = _db.GetMeta("control_mac") == "1";
+        if (c.Mac is null)
+            return !knownSigned && c.MinWriter < StorageFormat.Current; // a record from before signing (first time only)
+        bool ok = c.MacValid(_keys.ControlKey);
+        if (ok && !knownSigned) _db.SetMeta("control_mac", "1"); // never accept an unsigned one again
+        return ok;
+    }
+
+    async Task<ControlState?> ReadTrustedAsync(CancellationToken ct)
+    {
+        var c = await ReadControlAsync(_remote, ct);
+        if (c is null) return null;
+        bool trusted = Trust(c);
+        if (trusted != ControlTrusted)
+        {
+            ControlTrusted = trusted;
+            if (!trusted)
+            {
+                Log.Error("the drive's record was changed without the drive's password (bad or missing signature); read-only until confirmed");
+                SetWritable(false, null);
+            }
+            WritableChanged?.Invoke();
+        }
+        return c;
+    }
+
+    /// <summary>
+    /// The user confirmed the drive's record after it was changed from outside: keep what the password
+    /// proves (the vault) and what is checked elsewhere (identity), drop what could mislead (lease,
+    /// handover request, snapshot pointer), and sign it again.
+    /// </summary>
+    public async Task RepairControlAsync(CancellationToken ct)
+    {
+        await _ctrlLock.WaitAsync(ct);
+        try
+        {
+            var c = (await ReadControlAsync(_remote, ct))!;
+            Keys.FromMaster(c.Vault, _keys.ExportMaster()); // the vault must still be this drive's
+            var fixedUp = c with
+            {
+                Lease = null, Handover = null, Snap = null,
+                MinReader = Math.Min(c.MinReader, StorageFormat.Current),
+                MinWriter = StorageFormat.Current,
+            };
+            await _remote.WriteControlAsync(fixedUp.Signed(_keys.ControlKey).ToJson(), ct);
+            _db.SetMeta("control_mac", "1");
+            ControlTrusted = true;
+            Log.Warn("the drive's record was confirmed by the user and signed again");
+        }
+        finally { _ctrlLock.Release(); }
+        _beatNow = true;
+        WritableChanged?.Invoke();
     }
 
     /// <summary>Create (or replace) the drive's recovery key; returns its text, to show the user ONCE.
@@ -126,7 +205,7 @@ public sealed partial class SyncService : IAsyncDisposable
     public async Task<string> CreateRecoveryKeyAsync(Keys keys, CancellationToken ct)
     {
         if (!Writable) throw new InvalidOperationException("The drive is read-only on this PC.");
-        var (proposed, text) = keys.WithNewRecoveryKey((await ReadControlAsync(_remote, ct))!.Vault);
+        var (proposed, text) = keys.WithNewRecoveryKey((await ReadTrustedAsync(ct))!.Vault);
         var wrap = proposed.Recovery!;
         await ChangeVaultAsync(v => v with { Recovery = wrap }, v => v.Recovery?.Wrapped == wrap.Wrapped, ct);
         Log.Info("recovery key created (it replaces the previous one in the drive's record)");
@@ -151,7 +230,7 @@ public sealed partial class SyncService : IAsyncDisposable
         }
         catch (LeaseLostException) { SetWritable(false, null); throw; }
         catch (Exception ex) { Log.Warn($"vault change: write reported {ex.Message}; checking what was stored"); }
-        var stored = await ReadControlAsync(_remote, ct);
+        var stored = await ReadTrustedAsync(ct);
         if (stored is null || !applied(stored.Vault))
             throw new IOException("The change could not be saved to the drive. Nothing was changed; try again.");
     }
@@ -162,7 +241,7 @@ public sealed partial class SyncService : IAsyncDisposable
     public async Task ChangePasswordAsync(Keys keys, string newPassword, CancellationToken ct)
     {
         if (!Writable) throw new InvalidOperationException("The drive is read-only on this PC.");
-        var wrap = keys.WithNewPassword((await ReadControlAsync(_remote, ct))!.Vault, newPassword).Password!;
+        var wrap = keys.WithNewPassword((await ReadTrustedAsync(ct))!.Vault, newPassword).Password!;
         await ChangeVaultAsync(v => v with { V = 2, Salt = "", Iter = 0, Password = wrap }, v => v.Password?.Wrapped == wrap.Wrapped, ct);
         await UpdateControlAsync(c => c with { MinReader = Math.Max(c.MinReader, 2) }, ct);
         Log.Info("drive password changed");
@@ -171,7 +250,7 @@ public sealed partial class SyncService : IAsyncDisposable
     /// <summary>Give a pre-0.7 drive its identity (only the PC holding the lease writes the control record).</summary>
     public async Task<DriveIdentity?> EnsureIdentityAsync(Func<DriveIdentity> make, CancellationToken ct)
     {
-        var ctrl = (await ReadControlAsync(_remote, ct))!;
+        var ctrl = (await ReadTrustedAsync(ct))!;
         if (ctrl.Drive is not null || !Writable) return ctrl.Drive;
         var id = make();
         ctrl = await UpdateControlAsync(c => c.Drive is null ? c with { Drive = id } : c, ct);
@@ -184,9 +263,10 @@ public sealed partial class SyncService : IAsyncDisposable
 
     public async Task StartAsync(bool takeOver, CancellationToken ct)
     {
-        var ctrl = await ReadControlAsync(_remote, ct) ?? throw new InvalidOperationException("No drive on this remote.");
-        if (ctrl.MinReader > StorageFormat.Current) throw new NeedsUpdateException($"needs format {ctrl.MinReader}");
-        if (ctrl.MinWriter > StorageFormat.Current) MarkNeedsUpdate($"writing needs format {ctrl.MinWriter}");
+        var ctrl = await ReadTrustedAsync(ct) ?? throw new InvalidOperationException("No drive on this remote.");
+        if (ControlTrusted && ctrl.MinReader > StorageFormat.Current) throw new NeedsUpdateException($"needs format {ctrl.MinReader}");
+        if (ControlTrusted && ctrl.MinWriter > StorageFormat.Current) MarkNeedsUpdate($"writing needs format {ctrl.MinWriter}");
+        if (!ControlTrusted) ctrl = ctrl with { Snap = null }; // its snapshot pointer could be anything: replay the journal
         // A snapshot replaces the whole index: only for an index that never held anything of its own
         // (a PC that wrote but never received an entry still counted as "fresh", and loading another PC's
         // snapshot then wiped its files waiting to upload and its unsent changes).
@@ -204,8 +284,17 @@ public sealed partial class SyncService : IAsyncDisposable
             }
             if (data is not null)
             {
-                var upto = _db.ImportSnapshot(data) ?? snap.Upto; // the snapshot's own (authenticated) position wins
-                _db.Applied = upto;
+                try
+                {
+                    // the snapshot's own (authenticated) position wins; an older one without it covers at most
+                    // what was in the journal before the snapshot itself was posted
+                    var upto = _db.ImportSnapshot(data) ?? Math.Min(snap.Upto, snap.Msg);
+                    _db.Applied = upto;
+                }
+                catch (Exception ex) when (ex is not NeedsUpdateException)
+                {
+                    Log.Warn($"snapshot #{snap.Msg} could not be loaded ({ex.Message}); replaying the whole journal instead");
+                }
             }
         }
         await CatchUpAsync(ct);
@@ -216,8 +305,8 @@ public sealed partial class SyncService : IAsyncDisposable
 
     async Task TryAcquireLeaseAsync(bool force, CancellationToken ct)
     {
-        var ctrl = (await ReadControlAsync(_remote, ct))!;
-        if (NeedsUpdate || ctrl.MinWriter > StorageFormat.Current)
+        var ctrl = (await ReadTrustedAsync(ct))!;
+        if (NeedsUpdate || !ControlTrusted || ctrl.MinWriter > StorageFormat.Current)
         {
             SetWritable(false, null); // never write a format we do not fully understand
             return;
@@ -235,7 +324,7 @@ public sealed partial class SyncService : IAsyncDisposable
         await CatchUpAsync(ct);
         await WriteLeaseAsync(takeFromOthers: force, ct);
         await Task.Delay(1500, ct);
-        var check = (await ReadControlAsync(_remote, ct))!.Lease;
+        var check = (await ReadTrustedAsync(ct))!.Lease;
         if (check?.Dev == _db.DeviceId) await CatchUpAsync(ct); // anything appended just before we took over
         SetWritable(check?.Dev == _db.DeviceId, check?.Name);
         if (Writable) _leaseConfirmedAt = DateTime.UtcNow;
@@ -324,13 +413,9 @@ public sealed partial class SyncService : IAsyncDisposable
                 }
                 if (!item.Name.StartsWith("j-"))
                 {
-                    if (!item.Name.StartsWith("s-") && OurNaming.IsMatch(item.Name))
-                    {
-                        // a record kind from a newer version: stop HERE (skip nothing, advance nothing)
-                        MarkNeedsUpdate($"journal #{item.Id}: unknown record '{item.Name}'");
-                        break;
-                    }
-                    if (!item.Name.StartsWith("s-")) Log.Warn($"journal #{item.Id}: '{item.Name}' is not a DriveGram record; ignored");
+                    // a newer version that adds record kinds also raises minReader in the (signed) record, which
+                    // stops this version at start; an unknown name alone (anyone can post one) is just skipped
+                    if (!item.Name.StartsWith("s-")) Log.Warn($"journal #{item.Id}: '{item.Name}' is not a record this version reads; ignored");
                 }
                 else
                 {
@@ -414,7 +499,10 @@ public sealed partial class SyncService : IAsyncDisposable
         {
             var raw = await _remote.ReadJournalAsync(item.Id, ct);
             if (raw.Length >= 4 && raw[0] == 'D' && raw[1] == 'G' && raw[2] == 'E' && raw[3] != '1')
-                throw new NewerRecordException($"envelope version {(char)raw[3]}");
+            {
+                Log.Warn($"journal #{item.Id}: envelope version {(char)raw[3]} is unknown here; ignored");
+                return null; // a real newer format raises minReader in the signed record
+            }
             try
             {
                 var entry = OpJson.DeserializeEntry(Envelope.Open(_keys.JournalKey, raw));
@@ -443,7 +531,7 @@ public sealed partial class SyncService : IAsyncDisposable
     {
         if (!Writable || ShutdownPause) return false; // after a shutdown release: append nothing without the lease
         if (DateTime.UtcNow - _leaseConfirmedAt < _o.HeartbeatInterval) return true;
-        var lease = (await ReadControlAsync(_remote, ct))?.Lease;
+        var lease = (await ReadTrustedAsync(ct))?.Lease;
         if (lease is not null && lease.Dev == _db.DeviceId && lease.Until > NowUnix)
         {
             _leaseConfirmedAt = DateTime.UtcNow;
@@ -574,7 +662,7 @@ public sealed partial class SyncService : IAsyncDisposable
 
                 if (Writable)
                 {
-                    var lease = (await ReadControlAsync(_remote, ct))!.Lease;
+                    var lease = (await ReadTrustedAsync(ct))!.Lease;
                     if (lease?.Dev != _db.DeviceId)
                     {
                         // Another PC took over (we were offline longer than the lease), or took over AND
@@ -595,7 +683,7 @@ public sealed partial class SyncService : IAsyncDisposable
                     if (!await WriteLeaseAsync(takeFromOthers: false, ct))
                     {
                         // another PC wrote the lease between our read and our write (a handover / take-over)
-                        var now = (await ReadControlAsync(_remote, ct))?.Lease;
+                        var now = (await ReadTrustedAsync(ct))?.Lease;
                         SetWritable(false, now?.Name);
                         Log.Warn($"lease moved to '{now?.Name}'; {_db.OutboxCount()} local changes are held back");
                         continue;

@@ -13,7 +13,7 @@ public class FormatTests
     {
         await using var kit = await TestKit.CreateAsync();
         var ctrl = (await SyncService.ReadControlAsync(kit.Remote, default))!;
-        await kit.Remote.WriteControlAsync((ctrl with { MinWriter = StorageFormat.Current + 1 }).ToJson(), default);
+        await kit.Remote.WriteControlAsync((ctrl with { MinWriter = StorageFormat.Current + 1 }).Signed(kit.Keys.ControlKey).ToJson(), default); // as a PC with the password writes it
 
         var a = kit.Pc("a");
         await a.Sync.StartAsync(false, default);
@@ -27,7 +27,7 @@ public class FormatTests
     {
         await using var kit = await TestKit.CreateAsync();
         var ctrl = (await SyncService.ReadControlAsync(kit.Remote, default))!;
-        await kit.Remote.WriteControlAsync((ctrl with { MinReader = StorageFormat.Current + 1 }).ToJson(), default);
+        await kit.Remote.WriteControlAsync((ctrl with { MinReader = StorageFormat.Current + 1 }).Signed(kit.Keys.ControlKey).ToJson(), default); // as a PC with the password writes it
         var a = kit.Pc("a");
         await Assert.ThrowsAsync<NeedsUpdateException>(() => a.Sync.StartAsync(false, default));
     }

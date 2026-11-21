@@ -83,7 +83,7 @@ public class Cr6Tests
         await a.Sync.StartAsync(false, default);
         await a.Sync.DisposeAsync();                              // A sleeps / crashed, holding the lease
         var ctrl = (await SyncService.ReadControlAsync(kit.Remote, default))!;
-        await kit.Remote.WriteControlAsync((ctrl with { Lease = ctrl.Lease! with { Until = DateTimeOffset.UtcNow.AddMinutes(-20).ToUnixTimeSeconds() } }).ToJson(), default);
+        await kit.Remote.WriteControlAsync((ctrl with { Lease = ctrl.Lease! with { Until = DateTimeOffset.UtcNow.AddMinutes(-20).ToUnixTimeSeconds() } }).Signed(kit.Keys.ControlKey).ToJson(), default); // as a PC with the password writes it
         File.SetLastWriteTimeUtc(Path.Combine(kit.Root, "remote", "control.json"), DateTime.UtcNow.AddMinutes(-35)); // untouched on the server
 
         var b = kit.Pc("b", so: Fast("PC-B"));
