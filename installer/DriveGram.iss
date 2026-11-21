@@ -48,6 +48,10 @@ hebrew.StoppingDetail=מחכה שקבצים שעוד לא עלו יסיימו ל
 english.StoppingDetail=Waiting for files not yet uploaded to finish uploading to Telegram. This can take a few minutes.
 hebrew.CmdShortcut=DriveGram – שורת פקודה
 english.CmdShortcut=DriveGram – command line
+hebrew.CleanupAsk=למחוק גם את כל מה ש־DriveGram שמר במחשב הזה (הגדרות, מטמון, יומנים) ולהתנתק מטלגרם?%n%nהקבצים שבטלגרם לא נמחקים: אפשר לחבר את הכונן שוב אחרי התקנה מחדש, עם הסיסמה שלו.%n%nבחר "לא" אם אתה מתכוון להתקין שוב בקרוב.
+english.CleanupAsk=Also delete everything DriveGram keeps on this PC (settings, cache, logs) and sign out of Telegram?%n%nThe files in Telegram are not deleted: the drive can be connected again after reinstalling, with its password.%n%nChoose "No" if you plan to reinstall soon.
+hebrew.CleanupLocalOnly=⚠ יש במחשב הזה קבצים שעוד לא עלו לטלגרם, או שינויים שעוד לא נשלחו. אם תמחק עכשיו, הם יאבדו לצמיתות.%n%nלמחוק בכל זאת?
+english.CleanupLocalOnly=⚠ This PC has files not yet uploaded to Telegram, or changes not yet sent. Deleting now loses them for good.%n%nDelete anyway?
 hebrew.WinFspFailed=התקנת WinFsp לא הושלמה. הכונן לא יעבוד בלעדיו. אפשר להתקין אותו ידנית מ-https://winfsp.dev/rel
 english.Desktop=Create a desktop shortcut
 english.Launch=Start DriveGram now
@@ -123,10 +127,30 @@ begin
     Result := '';
 end;
 
+{ Optionally remove everything DriveGram keeps on this PC and sign its accounts out of Telegram.
+  Runs while drivegram.exe still exists (before files are removed). Never in a silent uninstall. }
+procedure AskToCleanUp;
+var Code: Integer;
+    Exe: String;
+begin
+  Exe := ExpandConstant('{app}\drivegram.exe');
+  if UninstallSilent or not FileExists(Exe) then exit;
+  if not DirExists(ExpandConstant('{localappdata}\DriveGram')) then exit;
+  if MsgBox(CustomMessage('CleanupAsk'), mbConfirmation, MB_YESNO or MB_DEFBUTTON2) <> IDYES then exit;
+  { exit code 4: something exists only on this PC }
+  if Exec(Exe, 'uninstall-cleanup --check', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 4) then
+    if MsgBox(CustomMessage('CleanupLocalOnly'), mbError, MB_YESNO or MB_DEFBUTTON2) <> IDYES then exit;
+  Exec(Exe, 'uninstall-cleanup', '', SW_HIDE, ewWaitUntilTerminated, Code);
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   { only after the user confirmed the uninstall: a "No" must never have stopped their drives }
-  if CurUninstallStep = usUninstall then StopRunningCopy(nil);
+  if CurUninstallStep = usUninstall then
+  begin
+    StopRunningCopy(nil);
+    AskToCleanUp;
+  end;
   { "Start with Windows" is set by the app, so the uninstaller removes it explicitly }
   if CurUninstallStep = usPostUninstall then
     RegDeleteValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Run', 'DriveGram');

@@ -261,6 +261,33 @@ public static class TelegramAccounts
     }
 
     /// <summary>Forget an account on this PC (sign out) when no drive uses it any more.</summary>
+    /// <summary>Uninstall: log every sign-in on this PC out of Telegram (so no "DriveGram on PC" device
+    /// stays listed in the account). Best effort, a few seconds per account.</summary>
+    public static async Task SignOutAllAsync()
+    {
+        var targets = new List<AppState>();
+        foreach (var a in Known())
+        {
+            var probe = AppState.Open("__signout-" + a.Key);
+            probe.Config.AccountKey = a.Key;
+            probe.Config.ApiId = a.ApiId;
+            probe.Config.ApiHash = a.ApiHash;
+            targets.Add(probe);
+        }
+        // drives from before 0.8 kept their own sign-in in the profile
+        targets.AddRange(AppState.All().Where(s => s.Folder is null && string.IsNullOrEmpty(s.Config.AccountKey) && File.Exists(s.SessionPath)));
+        foreach (var t in targets)
+        {
+            try
+            {
+                using var client = DriveSession.NewTelegramClient(t, null, out _);
+                await TL.SchemaExtensions.Auth_LogOut(client).WaitAsync(TimeSpan.FromSeconds(15));
+                Log.Info($"signed out {t.Config.AccountKey}");
+            }
+            catch (Exception ex) { Log.Warn($"sign out: {ex.Message}"); }
+        }
+    }
+
     public static async Task SignOutIfUnusedAsync(string key)
     {
         if (AppState.All().Any(a => a.Config.AccountKey == key) || InUse(key)) return;

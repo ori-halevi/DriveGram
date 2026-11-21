@@ -22,6 +22,7 @@ bool Flag(string name) => argv.Remove(name);
 var folder = Opt("--folder");
 var envFile = Opt("--env");
 bool verbose = Flag("--verbose");
+bool checkOnly = Flag("--check");
 bool takeOver = Flag("--take-over");
 bool usePhone = Flag("--phone");
 var pickArg = Opt("--pick");
@@ -80,6 +81,7 @@ try
         "quit" => Quit(),
         "autostart" => Autostart(arg1),
         "forget-password" => ForgetPassword(),
+        "uninstall-cleanup" => await UninstallCleanup(checkOnly),
         _ => Help(),
     };
 }
@@ -89,6 +91,28 @@ catch (Exception ex)
     Log.Error("fatal", ex);
     Console.Error.WriteLine($"\nError: {ex.Message}");
     return 1;
+}
+
+// Used by the uninstaller (after the user agreed): sign every account out of Telegram on this PC and
+// delete everything DriveGram keeps here. Files in Telegram are not touched. With --check: exit code 4
+// when something exists only on this PC (files not uploaded yet / changes not sent).
+async Task<int> UninstallCleanup(bool check)
+{
+    int localOnly = 0;
+    foreach (var s in AppState.All())
+    {
+        var (pending, unsent) = DriveDeletion.LocalOnly(s);
+        localOnly += pending < 0 ? 1 : pending + unsent;
+    }
+    if (check) return localOnly > 0 ? 4 : 0;
+    await TelegramAccounts.SignOutAllAsync();
+    Log.Close(); // the log file lives in the folder being deleted
+    for (int attempt = 0; attempt < 5 && Directory.Exists(AppState.Root); attempt++)
+    {
+        try { Directory.Delete(AppState.Root, recursive: true); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { await Task.Delay(1000); }
+    }
+    return Directory.Exists(AppState.Root) ? 1 : 0;
 }
 
 int Help()

@@ -48,6 +48,15 @@ public static class Log
             { AutoFlush = true };
     }
 
+    public static void Close()
+    {
+        lock (Gate)
+        {
+            _file?.Dispose();
+            _file = null;
+        }
+    }
+
     public static void Debug(string msg) { if (Verbose) Write("DBG", msg); }
     public static void Info(string msg) => Write("INF", msg);
     public static void Warn(string msg) => Write("WRN", msg);
