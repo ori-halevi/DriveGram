@@ -332,6 +332,8 @@ public sealed class DriveSession : IAsyncDisposable
         try
         {
             Engine.Abort();
+            Sync.Halt();
+            try { if (LetterChanged is not null) ShellIntegration.ClearDriveIcon(MountPoint); } catch { } // a borrowed letter
             lock (_notifyGate) _mounted = false;
             Task.Run(() => _host.Unmount()).Wait(TimeSpan.FromSeconds(3));
         }
@@ -416,9 +418,10 @@ public sealed class DriveSession : IAsyncDisposable
     /// </summary>
     public async Task<bool> HandOverAsync(HandoverRequest r, Action<int>? progress, CancellationToken ct)
     {
-        await Sync.BeginHandoverAsync(r, Engine.Status.PendingFiles, ct);
+        bool done = false;
         try
         {
+            if (!await Sync.BeginHandoverAsync(r, Engine.Status.PendingFiles, ct)) return false; // withdrawn
             Engine.CommitAllNow();
             var lastReport = DateTime.UtcNow;
             while (Engine.PendingClosedFiles() > 0)
@@ -426,9 +429,9 @@ public sealed class DriveSession : IAsyncDisposable
                 if (!Sync.Writable) return false; // the other PC took the drive meanwhile ("take now")
                 int pending = Engine.Status.PendingFiles;
                 progress?.Invoke(pending);
-                if (DateTime.UtcNow - lastReport > TimeSpan.FromSeconds(10))
+                if (DateTime.UtcNow - lastReport > TimeSpan.FromSeconds(5))
                 {
-                    await Sync.ReportHandoverAsync(r, pending, ct);
+                    if (!await Sync.ReportHandoverAsync(r, pending, ct)) return false; // cancelled there
                     lastReport = DateTime.UtcNow;
                 }
                 await Task.Delay(1000, ct);
@@ -436,12 +439,17 @@ public sealed class DriveSession : IAsyncDisposable
             for (int attempt = 0; attempt < 30; attempt++)
             {
                 if (!Sync.Writable) return false;
-                if (await Sync.CompleteHandoverAsync(r, ct)) return true;
+                if (await Sync.CompleteHandoverAsync(r, ct)) return done = true;
+                if (!await Sync.ReportHandoverAsync(r, Engine.Status.PendingFiles, ct)) return false;
                 await Task.Delay(2000, ct);
             }
             return false;
         }
-        finally { Sync.EndHandover(); }
+        finally
+        {
+            if (!done && Sync.HandingOver) await Sync.FailHandoverAsync(r, default);
+            Sync.EndHandover();
+        }
     }
 
     public void DeleteForever(string id)

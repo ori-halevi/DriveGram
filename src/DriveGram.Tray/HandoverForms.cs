@@ -14,11 +14,19 @@ sealed class HandoverAskForm : Form
     readonly System.Windows.Forms.Timer _tick = new() { Interval = 1000 };
     readonly DateTime _deadline;
 
-    /// <summary>True: hand the drive over. False: refused.</summary>
+    /// <summary>True: hand the drive over. False: refused (or withdrawn).</summary>
     public bool Approved { get; private set; }
 
-    public HandoverAskForm(DriveSession session, HandoverRequest r)
+    /// <summary>The request disappeared while the question was open (cancelled there, or the drive was taken).</summary>
+    public bool Withdrawn { get; private set; }
+
+    readonly Func<Task<bool>> _stillOpen;
+    int _polls;
+    bool _polling;
+
+    public HandoverAskForm(DriveSession session, HandoverRequest r, Func<Task<bool>> stillOpen)
     {
+        _stillOpen = stillOpen;
         Ui.Prepare(this);
         Text = L.T("DriveGram – בקשה לקבל את הכונן", "DriveGram – a request for the drive");
         StartPosition = FormStartPosition.CenterScreen;
@@ -27,8 +35,8 @@ sealed class HandoverAskForm : Form
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
         BackColor = Color.White;
-        // the other PC takes the drive 60 s after it asked; answer a little before that
-        _deadline = DateTime.UtcNow + SyncService.HandoverAnswerTime - TimeSpan.FromSeconds(12);
+        // the asking PC counts 60 s from the moment this question is on screen ("seen"); answer before that
+        _deadline = DateTime.UtcNow + SyncService.HandoverAnswerTime - TimeSpan.FromSeconds(10);
 
         var col = Theme.Column();
         col.Padding = new Padding(24, 18, 24, 18);
@@ -68,7 +76,24 @@ sealed class HandoverAskForm : Form
     {
         int left = (int)Math.Ceiling((_deadline - DateTime.UtcNow).TotalSeconds);
         if (left <= 0) { Approved = true; Close(); return; }
+        if (++_polls % 3 == 0 && !_polling) _ = CheckStillOpenAsync();
         _countdown.Text = L.T($"אם לא תענה, הכונן יעבור בעוד {left} שניות.", $"Without an answer, the drive moves in {left} seconds.");
+    }
+
+    async Task CheckStillOpenAsync()
+    {
+        _polling = true;
+        try
+        {
+            if (!await Task.Run(_stillOpen) && !IsDisposed)
+            {
+                Withdrawn = true;
+                Approved = false;
+                Close();
+            }
+        }
+        catch { } // offline for a moment: keep asking
+        finally { _polling = false; }
     }
 }
 
@@ -132,59 +157,88 @@ sealed class HandoverWaitForm : Form
         {
             _state.Text = L.T("שולח בקשה…", "Sending the request…");
             _mine = await Task.Run(() => _session.Sync.RequestHandoverAsync(ct));
-            var asked = DateTime.UtcNow;
-            while (!ct.IsCancellationRequested && !_finished)
+        }
+        catch (OperationCanceledException) { return; }
+        catch (HandoverBusyException ex)
+        {
+            _state.ForeColor = Theme.Error;
+            _state.Text = L.T($"המחשב {ex.Other} כבר ביקש את הכונן. נסה שוב בעוד דקה.", $"{ex.Other} already asked for the drive. Try again in a minute.");
+            return;
+        }
+        catch (Exception ex)
+        {
+            _state.ForeColor = Theme.Error;
+            _state.Text = TelegramErrors.Text(ex);
+            return;
+        }
+
+        var countFrom = DateTime.UtcNow;     // answer time: from the request, or from "seen" once the other PC shows it
+        string? lastState = null;
+        long lastUpdated = -1;
+        var lastProgress = DateTime.UtcNow;  // judged by THIS PC's clock (the other PC's clock may differ)
+        while (!ct.IsCancellationRequested && !_finished)
+        {
+            try
             {
-                var mine = _mine;
+                var mine = _mine!;
                 var (req, lease) = await Task.Run(() => _session.Sync.HandoverStatusAsync(mine, ct));
                 if (_taking) return;
                 if (lease?.Dev == _session.Db.DeviceId) { await TakeAsync(force: false); return; }
-                long nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-                switch (req?.State)
+                var state = req?.Id == mine.Id ? req.State : "asked";
+                if (state != lastState)
                 {
-                    case "refused" when req.Id == mine.Id:
+                    if (state == "seen") countFrom = DateTime.UtcNow;
+                    lastState = state;
+                    lastProgress = DateTime.UtcNow;
+                }
+                if (req?.Id == mine.Id && req.Updated != lastUpdated) { lastUpdated = req.Updated; lastProgress = DateTime.UtcNow; }
+                _state.ForeColor = Theme.Text;
+                switch (state)
+                {
+                    case "refused" or "failed":
                         _state.ForeColor = Theme.Error;
-                        _state.Text = L.T($"{_holder} סירב להעביר את הכונן.", $"{_holder} refused to hand the drive over.");
+                        _state.Text = state == "refused"
+                            ? L.T($"{_holder} סירב להעביר את הכונן.", $"{_holder} refused to hand the drive over.")
+                            : L.T($"{_holder} לא הצליח להעביר את הכונן (אולי אין לו חיבור).", $"{_holder} could not hand the drive over (perhaps it is offline).");
                         _takeNow.Text = L.T("קח בכל זאת", "Take it anyway");
                         _cancel.Text = L.T("סגור", "Close");
-                        return;
-                    case "finishing" when req.Id == mine.Id:
-                        if (nowUnix - req.Updated > SyncService.HandoverStall.TotalSeconds)
+                        break; // keep watching: the drive may still arrive
+                    case "finishing":
+                        if (DateTime.UtcNow - lastProgress > SyncService.HandoverStall)
                         {
                             _state.Text = L.T($"{_holder} הפסיק לענות. לוקח את הכונן…", $"{_holder} stopped answering. Taking the drive…");
                             await TakeAsync(force: true);
                             return;
                         }
-                        _state.Text = req.Pending > 0
+                        _state.Text = req!.Pending > 0
                             ? L.T($"{_holder} מסכים, ומסיים להעלות {req.Pending} קבצים. הכונן יעבור מיד אחר כך.",
                                   $"{_holder} agreed and is finishing {req.Pending} uploads. The drive moves right after.")
                             : L.T($"{_holder} מסכים ומעביר את הכונן…", $"{_holder} agreed and is handing the drive over…");
                         break;
-                    default:
-                        int left = (int)Math.Ceiling((SyncService.HandoverAnswerTime - (DateTime.UtcNow - asked)).TotalSeconds);
+                    default: // asked / seen
+                        int left = (int)Math.Ceiling((SyncService.HandoverAnswerTime - (DateTime.UtcNow - countFrom)).TotalSeconds);
                         if (left <= 0)
                         {
                             _state.Text = L.T($"אין תשובה מ־{_holder}. לוקח את הכונן…", $"No answer from {_holder}. Taking the drive…");
                             await TakeAsync(force: true);
                             return;
                         }
-                        _state.Text = L.T($"ממתין לתשובה מ־{_holder}… אם לא תגיע תשובה, הכונן יעבור לכאן בעוד {left} שניות.",
-                                          $"Waiting for {_holder} to answer… without an answer, the drive moves here in {left} seconds.");
+                        _state.Text = state == "seen"
+                            ? L.T($"השאלה מוצגת עכשיו ב־{_holder}… בלי תשובה, הכונן יעבור לכאן בעוד {left} שניות.",
+                                  $"The question is on the screen of {_holder}… without an answer, the drive moves here in {left} seconds.")
+                            : L.T($"ממתין לתשובה מ־{_holder}… אם לא תגיע תשובה, הכונן יעבור לכאן בעוד {left} שניות.",
+                                  $"Waiting for {_holder} to answer… without an answer, the drive moves here in {left} seconds.");
                         break;
                 }
-                await Task.Delay(2000, ct);
             }
-        }
-        catch (OperationCanceledException) { }
-        catch (HandoverBusyException ex)
-        {
-            _state.ForeColor = Theme.Error;
-            _state.Text = L.T($"המחשב {ex.Other} כבר ביקש את הכונן. נסה שוב בעוד דקה.", $"{ex.Other} already asked for the drive. Try again in a minute.");
-        }
-        catch (Exception ex)
-        {
-            _state.ForeColor = Theme.Error;
-            _state.Text = TelegramErrors.Text(ex);
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
+            catch (Exception ex)
+            {
+                // a short network problem: say so, and keep trying
+                _state.ForeColor = Theme.Error;
+                _state.Text = TelegramErrors.Text(ex);
+            }
+            try { await Task.Delay(2000, ct); } catch (OperationCanceledException) { return; }
         }
     }
 

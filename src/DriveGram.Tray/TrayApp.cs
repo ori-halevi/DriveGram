@@ -513,16 +513,22 @@ sealed class TrayApp : ApplicationContext
 
     async Task OnHandoverRequestedAsync(DriveController d, DriveSession s, HandoverRequest r)
     {
-        if (d.Session != s || d.HandoverAsk is { IsDisposed: false }) return;
-        bool approved;
-        using (var ask = new HandoverAskForm(s, r))
+        if (d.Session != s) return;
+        if (d.HandoverAsk is { IsDisposed: false })
+        {
+            s.Sync.ForgetSurfacedRequest(); // offered again once the open question is gone
+            return;
+        }
+        bool approved, withdrawn;
+        using (var ask = new HandoverAskForm(s, r, () => s.Sync.RequestStillOpenAsync(r, default)))
         {
             d.HandoverAsk = ask;
             ask.ShowDialog();
             approved = ask.Approved;
+            withdrawn = ask.Withdrawn;
         }
         d.HandoverAsk = null;
-        if (d.Session != s) return;
+        if (d.Session != s || withdrawn) return;
         try
         {
             if (!approved) { await Task.Run(() => s.Sync.RefuseHandoverAsync(r, default)); return; }

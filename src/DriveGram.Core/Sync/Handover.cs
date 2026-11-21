@@ -2,8 +2,9 @@ namespace DriveGram.Sync;
 
 /// <summary>
 /// A request, kept in the control record, to move the write lease to another PC.
-/// State: "asked" (waiting for the holder) → "finishing" (approved; the holder uploads what it still has,
-/// reporting Pending every few seconds) → "done" (the lease now names the requester), or "refused".
+/// State: "asked" (waiting for the holder) → "seen" (the holder shows its question; both sides count the
+/// answer time from here) → "finishing" (approved; the holder uploads what it still has, reporting Pending
+/// every few seconds) → "done" (the lease now names the requester), or "refused" / "failed".
 /// Older versions keep the field untouched (unknown fields survive rewrites) and simply never answer:
 /// the requester then takes the drive when its wait runs out.
 /// </summary>
@@ -38,11 +39,23 @@ public sealed partial class SyncService
         _nextHandoverCheck = DateTime.UtcNow.AddSeconds(10);
         var r = (await ReadControlAsync(_remote, ct))?.Handover;
         if (r is not { State: "asked" } || r.Dev == _db.DeviceId || r.Id == _surfacedRequest) return;
-        if (NowUnix - r.At > HandoverAnswerTime.TotalSeconds * 2) return; // stale
         _surfacedRequest = r.Id;
         Log.Info($"handover: '{r.Name}' asks for the drive");
+        // tell the asking PC its question is on screen: from now on both count the same answer time
+        await UpdateControlAsync(c => c.Handover?.Id == r.Id && c.Handover.State == "asked"
+            ? c with { Handover = c.Handover with { State = "seen", Updated = NowUnix } } : c, ct);
         try { HandoverRequested?.Invoke(r); }
         catch (Exception ex) { Log.Warn($"handover listener failed: {ex.Message}"); }
+    }
+
+    /// <summary>The question could not be shown (another one is open): offer it again at the next check.</summary>
+    public void ForgetSurfacedRequest() => _surfacedRequest = null;
+
+    /// <summary>Is this request still waiting for this PC's answer (not cancelled, not taken over)?</summary>
+    public async Task<bool> RequestStillOpenAsync(HandoverRequest r, CancellationToken ct)
+    {
+        var c = await ReadControlAsync(_remote, ct);
+        return c?.Lease?.Dev == _db.DeviceId && c.Handover?.Id == r.Id && c.Handover.State is "asked" or "seen";
     }
 
     // ── on the PC that wants the drive ───────────────────────────────────────
@@ -53,7 +66,7 @@ public sealed partial class SyncService
         string? busy = null;
         await UpdateControlAsync(c =>
         {
-            if (c.Handover is { } other && other.Dev != _db.DeviceId && other.State is "asked" or "finishing"
+            if (c.Handover is { } other && other.Dev != _db.DeviceId && other.State is "asked" or "seen" or "finishing"
                 && NowUnix - Math.Max(other.At, other.Updated) < HandoverStall.TotalSeconds)
             {
                 busy = other.Name;
@@ -101,29 +114,53 @@ public sealed partial class SyncService
         Log.Info($"handover: refused '{r.Name}'");
     }
 
-    /// <summary>Approved: from now on the drive takes no new changes here (the file system asks).</summary>
-    public async Task BeginHandoverAsync(HandoverRequest r, int pending, CancellationToken ct)
+    /// <summary>Approved: from now on the drive takes no new changes here (the file system asks).
+    /// False: the request is gone (cancelled, or the drive was taken) — nothing changed.</summary>
+    public async Task<bool> BeginHandoverAsync(HandoverRequest r, int pending, CancellationToken ct)
     {
         HandingOver = true;
         WritableChanged?.Invoke();
-        await ReportHandoverAsync(r, pending, ct);
+        try
+        {
+            if (!await ReportHandoverAsync(r, pending, ct)) { EndHandover(); return false; }
+        }
+        catch { EndHandover(); throw; }
         Log.Info($"handover: approved for '{r.Name}', {pending} files still uploading");
+        return true;
     }
 
-    public Task ReportHandoverAsync(HandoverRequest r, int pending, CancellationToken ct) =>
-        UpdateControlAsync(c => c.Handover?.Id == r.Id
-            ? c with { Handover = r with { State = "finishing", Pending = pending, Updated = NowUnix } } : c, ct);
+    /// <summary>Progress for the asking PC. False: the request was withdrawn or the drive taken — stop.</summary>
+    public async Task<bool> ReportHandoverAsync(HandoverRequest r, int pending, CancellationToken ct)
+    {
+        bool ours = false;
+        await UpdateControlAsync(c =>
+        {
+            ours = c.Handover?.Id == r.Id && c.Handover.State is "asked" or "seen" or "finishing" && c.Lease?.Dev == _db.DeviceId;
+            return ours ? c with { Handover = c.Handover! with { State = "finishing", Pending = pending, Updated = NowUnix } } : c;
+        }, ct);
+        return ours;
+    }
+
+    /// <summary>The handover could not be finished (offline…): tell the asking PC, and work on as before.</summary>
+    public async Task FailHandoverAsync(HandoverRequest r, CancellationToken ct)
+    {
+        EndHandover();
+        try { await UpdateControlAsync(c => c.Handover?.Id == r.Id ? c with { Handover = c.Handover with { State = "failed", Updated = NowUnix } } : c, ct); }
+        catch (Exception ex) { Log.Warn($"handover: could not report the failure: {ex.Message}"); }
+    }
 
     /// <summary>Everything is uploaded and journaled: write the requester into the lease. False if the
     /// requester (or someone else) already took the drive, or something is still unsent.</summary>
     public async Task<bool> CompleteHandoverAsync(HandoverRequest r, CancellationToken ct)
     {
         await FlushAsync(ct);
-        if (_db.OutboxCount() > 0) return false;
+        // changes of a NEW file still open in an app stay here (sent when the drive comes back); all the rest
+        // must be in the journal before the lease moves
+        if (_db.SendableOutboxCount() > 0) return false;
         bool handed = false;
         await UpdateControlAsync(c =>
         {
-            handed = c.Lease?.Dev == _db.DeviceId;
+            handed = c.Lease?.Dev == _db.DeviceId && c.Handover?.Id == r.Id && c.Handover.State == "finishing";
             if (!handed) return c;
             return c with
             {
@@ -132,9 +169,10 @@ public sealed partial class SyncService
             };
         }, ct);
         HandingOver = false;
+        if (!handed) { WritableChanged?.Invoke(); return false; }
         SetWritable(false, r.Name);
         Log.Info($"handover: the drive now belongs to '{r.Name}'");
-        return handed;
+        return true;
     }
 
     /// <summary>The handover was abandoned (the requester took the drive, or it failed): back to normal.</summary>

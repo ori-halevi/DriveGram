@@ -434,7 +434,7 @@ public sealed partial class SyncService : IAsyncDisposable
     /// confirmation is older than one heartbeat; on loss, stop writing and keep the outbox.</summary>
     async Task<bool> StillHoldLeaseAsync(CancellationToken ct)
     {
-        if (!Writable) return false;
+        if (!Writable || ShutdownPause) return false; // after a shutdown release: append nothing without the lease
         if (DateTime.UtcNow - _leaseConfirmedAt < _o.HeartbeatInterval) return true;
         var lease = (await ReadControlAsync(_remote, ct))?.Lease;
         if (lease is not null && lease.Dev == _db.DeviceId && lease.Until > NowUnix)
@@ -561,6 +561,7 @@ public sealed partial class SyncService : IAsyncDisposable
                 if (Writable) await FlushAsync(ct);
                 if (Writable) await CheckHandoverAsync(ct); // another PC asking for the drive (every ~10 s)
                 if (DateTime.UtcNow < nextBeat && !_beatNow) continue;
+                if (ShutdownPause) continue;
                 _beatNow = false;
                 nextBeat = DateTime.UtcNow + _o.HeartbeatInterval;
 
@@ -623,8 +624,20 @@ public sealed partial class SyncService : IAsyncDisposable
         if (!Writable) return;
         await FlushAsync(ct);
         if (_db.OutboxCount() == 0 && _db.PendingNodes().Count == 0)
+        {
             await UpdateControlAsync(c => c.Lease?.Dev == _db.DeviceId ? c with { Lease = null } : c, ct);
+            // if Windows really shuts down, the other PCs may write right away; if the shutdown is cancelled,
+            // the lease is taken back properly (catch-up first) once this pause is over
+            _leaseConfirmedAt = DateTime.MinValue;
+            _shutdownPauseUntil = DateTime.UtcNow.AddMinutes(2);
+        }
     }
+
+    DateTime _shutdownPauseUntil;
+    bool ShutdownPause => DateTime.UtcNow < _shutdownPauseUntil;
+
+    /// <summary>The Windows session ends: stop the loop for good.</summary>
+    public void Halt() => _cts.Cancel();
 
     /// <summary>Windows is shutting down: push the journal and give the lease back, nothing slower.</summary>
     public async Task QuickReleaseAsync(CancellationToken ct)

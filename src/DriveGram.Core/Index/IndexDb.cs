@@ -133,7 +133,18 @@ public sealed class IndexDb : IDisposable
     /// nothing queued): used when another PC's entry turned out to sit BEFORE it in the journal.</summary>
     public void ApplyAsOwn(IReadOnlyList<Op> ops)
     {
-        foreach (var op in ops) Apply(op, remote: false);
+        foreach (var op in ops)
+        {
+            if (op is ContentOp c && IsPending(c.Id))
+            {
+                // the file has newer local changes: take the committed chunks, keep the local size and time
+                var n = Get(c.Id);
+                Apply(op, remote: false);
+                if (n is not null) SetLocalSize(c.Id, n.Size, n.Mtime);
+                continue;
+            }
+            Apply(op, remote: false);
+        }
     }
 
     public static IndexDb Open(string path)
@@ -602,6 +613,13 @@ public sealed class IndexDb : IDisposable
     public HashSet<string> UncommittedNewFiles() => Query(
         "SELECT p.node FROM pending p WHERE NOT EXISTS (SELECT 1 FROM file_chunks f WHERE f.node = p.node)",
         r => r.GetString(0)).ToHashSet();
+
+    /// <summary>Outbox ops that can be sent now (not those of a new file still being written).</summary>
+    public int SendableOutboxCount()
+    {
+        var held = UncommittedNewFiles();
+        return held.Count == 0 ? OutboxCount() : PeekOutbox(int.MaxValue).Count(o => !held.Contains(o.Op.Id));
+    }
 
     public int OutboxCount() => Convert.ToInt32(Scalar("SELECT COUNT(*) FROM outbox") ?? 0);
 
