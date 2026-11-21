@@ -49,7 +49,8 @@ static class TelegramErrors
         NeedsUpdateException => L.T("הכונן הזה נכתב בגרסה חדשה יותר של DriveGram. התקן את הגרסה החדשה כדי לפתוח אותו.",
             "This drive was written by a newer version of DriveGram. Install it to open the drive."),
         DriveGram.Remote.NoDriveException => L.T("ההגדרה של הכונן הזה לא הושלמה.", "This drive's setup is not finished."),
-        TimeoutException or System.Net.Sockets.SocketException or IOException =>
+        TimeoutException or System.Net.Sockets.SocketException or System.Net.Http.HttpRequestException
+            or IOException { InnerException: System.Net.Sockets.SocketException } =>
             L.T("אין חיבור לשרתי טלגרם. בדוק את החיבור לאינטרנט ונסה שוב.", "Cannot reach Telegram. Check the internet connection and try again."),
         _ => ex.Message,
     };

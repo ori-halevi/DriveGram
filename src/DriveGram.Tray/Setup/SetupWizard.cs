@@ -219,6 +219,10 @@ sealed class SetupWizard : Form
         FormClosed += (_, _) => _ctx.Dispose();
         Shown += async (_, _) =>
         {
+            // opened from the tray (or after a wait) it would otherwise appear behind the browser
+            Activate();
+            TopMost = true;
+            TopMost = false;
             if (SnapshotDir is null) await GoAsync(0, +1);
             else { await SnapshotAsync(SnapshotDir); Close(); }
         };

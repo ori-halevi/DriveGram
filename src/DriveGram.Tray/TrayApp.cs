@@ -23,6 +23,7 @@ sealed class DriveController
     public TrashForm? Trash;
     public BackupForm? Backup;
     public SecurityForm? Security;
+    public ExportForm? ExportWindow;
 
     public DriveController(AppState state) => State = state;
 
@@ -61,7 +62,8 @@ sealed class TrayApp : ApplicationContext
         _icon.DoubleClick += (_, _) => Activate();
         _timer.Tick += (_, _) => UpdateIcon();
         _timer.Start();
-        SystemEvents.SessionEnding += (_, _) => { foreach (var d in _drives) d.Session?.StopForShutdown(); };
+        SystemEvents.SessionEnding += (_, _) => OnSessionEnding();
+        SystemEvents.PowerModeChanged += (_, e) => { if (e.Mode == PowerModes.Resume) _ui.Post(_ => OnResume(), null); };
 
         _activate = new EventWaitHandle(false, EventResetMode.AutoReset, Program.ActivateEvent);
         _quit = new EventWaitHandle(false, EventResetMode.AutoReset, DriveSession.QuitEventName);
@@ -70,6 +72,37 @@ sealed class TrayApp : ApplicationContext
 
         if (_drives.Count == 0) _ui.Post(async _ => await AddDriveAsync(), null);
         else foreach (var d in _drives) _ = MountAsync(d);
+    }
+
+    /// <summary>Windows is ending the session: unmount fast. If the user then cancels the shutdown (an app
+    /// asked "save changes?"), the process lives on: bring the drives back a minute later.</summary>
+    void OnSessionEnding()
+    {
+        foreach (var d in _drives)
+        {
+            if (d.Session is not { } s) continue;
+            s.StopForShutdown();
+            d.Session = null;
+            d.Problem = L.T("נותק (כיבוי של וינדוס)", "disconnected (Windows shutdown)");
+            _ui.Post(async _ =>
+            {
+                await Task.Delay(TimeSpan.FromSeconds(60));
+                try { await s.DisposeAsync(); } catch (Exception ex) { Log.Warn($"after shutdown stop: {ex.Message}"); }
+                if (!_quitting && d.Session is null) await MountAsync(d);
+            }, null);
+        }
+        UpdateIcon();
+    }
+
+    void OnResume()
+    {
+        Log.Info("tray: the PC woke up");
+        TelegramAccounts.WakeUp();
+        foreach (var d in _drives)
+        {
+            d.Session?.Sync.Wake();
+            if (d.Session is null && d.RetryTimer is not null && !d.Starting) { d.RetryDelaySeconds = 15; _ = MountAsync(d); }
+        }
     }
 
     void Listen(EventWaitHandle ev, Action onSignal) => new Thread(() =>
@@ -150,12 +183,23 @@ sealed class TrayApp : ApplicationContext
                     $"{d.Name} was written by a newer DriveGram. Install the new version to open it."), ToolTipIcon.Warning);
         }
         catch (AlreadyMountedException) { d.Problem = L.T("פתוח כבר בחלון אחר", "already open in another window"); }
+        catch (WinFspMissingException ex)
+        {
+            d.Problem = L.T("WinFsp לא מותקן", "WinFsp is not installed");
+            Balloon(L.T("חסר רכיב מערכת", "A system component is missing"), ex.Message, ToolTipIcon.Error);
+        }
+        catch (DrivePairingException ex)
+        {
+            d.NeedsSetup = true;
+            d.Problem = L.T("צריך לבחור את הכונן מחדש", "the drive must be chosen again");
+            OfferSetup(d, $"{d.Name}: {ex.Message}");
+        }
         catch (WrongPasswordException) { d.Problem = L.T("סיסמה שגויה", "wrong password"); }
         catch (Exception ex)
         {
             // most likely no internet yet (e.g. right after boot): retry with backoff
             Log.Warn($"tray: mounting {d.Name} failed: {ex.Message}");
-            d.Problem = L.T($"ממתין לחיבור… ({Short(ex)})", $"waiting to connect… ({Short(ex)})");
+            d.Problem = L.T($"ממתין לחיבור… ({Short(Setup.TelegramErrors.Text(ex))})", $"waiting to connect… ({Short(Setup.TelegramErrors.Text(ex))})");
             ScheduleRetry(d);
         }
         finally
@@ -165,7 +209,7 @@ sealed class TrayApp : ApplicationContext
         }
     }
 
-    static string Short(Exception ex) => ex.Message.Length > 60 ? ex.Message[..60] + "…" : ex.Message;
+    static string Short(string text) => text.Length > 70 ? text[..70] + "…" : text;
 
     void ScheduleRetry(DriveController d)
     {
@@ -223,6 +267,8 @@ sealed class TrayApp : ApplicationContext
         }
         d.Stopping = true;
         d.Trash?.Close();
+        d.Security?.Close();
+        d.ExportWindow?.Close();
         UpdateIcon();
         try
         {
@@ -300,6 +346,7 @@ sealed class TrayApp : ApplicationContext
     async Task SetupAsync(DriveController? d)
     {
         if (_wizard is { IsDisposed: false }) { _wizard.Activate(); return; }
+        bool wasMountedBefore = d?.Session is not null;
         if (d?.Session is not null)
         {
             if (Ui.Ask(L.T($"כדי לשנות את ההגדרות של {d.Name} צריך לנתק אותו לרגע. לנתק?",
@@ -307,6 +354,7 @@ sealed class TrayApp : ApplicationContext
             if (!await StopAsync(d)) return;
         }
         bool wasRetrying = d?.RetryTimer is not null;
+        bool wasMounted = wasMountedBefore;
         if (d is not null) StopRetrying(d);
         // the wizard edits a COPY: cancelling it leaves the live drive's settings untouched
         var state = d is null ? AppState.CreateNew() : AppState.Open(d.State.Id);
@@ -323,6 +371,7 @@ sealed class TrayApp : ApplicationContext
         if (result != DialogResult.OK && !rebound)
         {
             if (isNew) state.Delete();
+            else if (wasMounted && d is { Session: null }) await MountAsync(d);
             else if (wasRetrying && d is { Session: null }) ScheduleRetry(d);
             UpdateIcon();
             return;
@@ -413,7 +462,17 @@ sealed class TrayApp : ApplicationContext
     /// lost and requires ticking "I understand" plus typing the drive's name. Drives this account does
     /// not own (a backup admin) can only be removed from this PC.
     /// </summary>
+    bool _deleting;
+
     async Task DeleteForeverAsync(DriveController d)
+    {
+        if (_deleting) return;
+        _deleting = true;
+        try { await DeleteForeverCoreAsync(d); }
+        finally { _deleting = false; }
+    }
+
+    async Task DeleteForeverCoreAsync(DriveController d)
     {
         DeletionPreview p;
         try
@@ -495,6 +554,7 @@ sealed class TrayApp : ApplicationContext
     static void Export(DriveController d)
     {
         if (d.Session is null) return;
+        if (d.ExportWindow is { IsDisposed: false }) { d.ExportWindow.Activate(); return; }
         using var dlg = new FolderBrowserDialog
         {
             Description = L.T($"לאן להעתיק את כל הקבצים של {d.Name}?", $"Where should every file of {d.Name} be copied?"),
@@ -506,7 +566,8 @@ sealed class TrayApp : ApplicationContext
             Ui.Error(L.T("בחר תיקייה מחוץ לכונן עצמו.", "Choose a folder outside the drive itself."));
             return;
         }
-        new ExportForm(d.Session, dlg.SelectedPath).Show();
+        d.ExportWindow = new ExportForm(d.Session, dlg.SelectedPath);
+        d.ExportWindow.Show();
     }
 
     static void ShowBackup(DriveController d)
@@ -579,7 +640,7 @@ sealed class TrayApp : ApplicationContext
             _menu.Items.Add(item);
         }
         _menu.Items.Add(new ToolStripSeparator());
-        _menu.Items.Add(Item(L.T("הוסף כונן (חשבון טלגרם נוסף)…", "Add a drive (another Telegram account)…"), async () => await AddDriveAsync()));
+        _menu.Items.Add(Item(L.T("הוסף כונן נוסף…", "Add another drive…"), async () => await AddDriveAsync()));
 
         var autostart = new ToolStripMenuItem(L.T("הפעל עם וינדוס", "Start with Windows")) { Checked = ShellIntegration.AutostartEnabled };
         autostart.Click += (_, _) =>

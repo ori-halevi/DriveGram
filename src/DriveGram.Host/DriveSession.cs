@@ -11,6 +11,9 @@ namespace DriveGram.Host;
 public sealed class DrivePairingException() : Exception(L.T(
     "ערוץ הקבצים לא שייך ליומן של הכונן הזה (אולי ערוץ של כונן אחר עם אותו שם). פתח את 'הגדרות והתחברות' ובחר את הכונן מחדש.",
     "The data channel does not belong to this drive's journal (perhaps another drive's channel with the same name). Open 'Settings and sign-in' and choose the drive again."));
+public sealed class WinFspMissingException() : Exception(L.T(
+    "WinFsp לא מותקן, ובלעדיו הכונן לא יכול לעבוד. הפעל שוב את התקנת DriveGram (או התקן מ-https://winfsp.dev/rel), ואז לחץ 'התחבר'.",
+    "WinFsp is not installed, and the drive cannot work without it. Run the DriveGram installer again (or install it from https://winfsp.dev/rel), then click Connect."));
 public sealed class AlreadyMountedException() : Exception("DriveGram is already running for this drive on this PC.");
 
 /// <summary>An item in the drive's own trash.</summary>
@@ -90,7 +93,12 @@ public sealed class DriveSession : IAsyncDisposable
 
     public static bool WinFspInstalled()
     {
-        try { _ = FileSystemHost.Version(); return true; }
+        try
+        {
+            using var key = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry32)
+                .OpenSubKey(@"SOFTWARE\WinFsp");
+            return key?.GetValue("InstallDir") is string dir && File.Exists(Path.Combine(dir, "bin", "winfsp-x64.dll"));
+        }
         catch { return false; }
     }
 
@@ -151,7 +159,7 @@ public sealed class DriveSession : IAsyncDisposable
     public static async Task<DriveSession> StartAsync(AppState state,
         Func<ControlState, Task<Keys>> unlock, string? mountPoint, bool takeOver, CancellationToken ct = default)
     {
-        if (!WinFspInstalled()) throw new InvalidOperationException(L.T("WinFsp לא מותקן. התקן אותו מ-https://winfsp.dev/rel (גרסה 2.1), או הפעל שוב את התקנת DriveGram.", "WinFsp is not installed. Install it from https://winfsp.dev/rel (version 2.1), or run the DriveGram installer again."));
+        if (!WinFspInstalled()) throw new WinFspMissingException();
         mountPoint ??= state.Config.MountPoint;
         mountPoint = mountPoint.TrimEnd('\\');
         if (!mountPoint.EndsWith(':')) mountPoint += ":";

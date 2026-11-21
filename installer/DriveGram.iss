@@ -6,7 +6,7 @@
 
 #define AppName "DriveGram"
 #ifndef AppVersion
-  #define AppVersion "1.0.1"
+  #define AppVersion "1.0.2"
 #endif
 #define WinFspMsi "winfsp-2.1.25156.msi"
 
@@ -37,21 +37,25 @@ Name: "hebrew"; MessagesFile: "compiler:Languages\Hebrew.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [CustomMessages]
-hebrew.AutoStart=הפעל את DriveGram אוטומטית עם וינדוס
 hebrew.Desktop=צור קיצור דרך בשולחן העבודה
 hebrew.Launch=הפעל את DriveGram עכשיו
 hebrew.InstallingWinFsp=מתקין את WinFsp (רכיב מערכת שנדרש לכונן)...
-hebrew.StillRunning=DriveGram עדיין פועל. סגור אותו מהאייקון ליד השעון (יציאה) והפעל את ההתקנה שוב.
-english.StillRunning=DriveGram is still running. Close it from its tray icon (Exit) and run setup again.
+hebrew.StillRunning=DriveGram עדיין מסיים להעלות קבצים לטלגרם. חכה כמה דקות (ההתקדמות מוצגת באייקון ליד השעון) והפעל את ההתקנה שוב.
+english.StillRunning=DriveGram is still finishing uploads to Telegram. Wait a few minutes (the tray icon shows the progress) and run setup again.
+hebrew.Stopping=סוגר את DriveGram…
+english.Stopping=Closing DriveGram…
+hebrew.StoppingDetail=מחכה שקבצים שעוד לא עלו יסיימו לעלות לטלגרם. זה יכול לקחת כמה דקות.
+english.StoppingDetail=Waiting for files not yet uploaded to finish uploading to Telegram. This can take a few minutes.
+hebrew.CmdShortcut=DriveGram – שורת פקודה
+english.CmdShortcut=DriveGram – command line
 hebrew.WinFspFailed=התקנת WinFsp לא הושלמה. הכונן לא יעבוד בלעדיו. אפשר להתקין אותו ידנית מ-https://winfsp.dev/rel
-english.AutoStart=Start DriveGram with Windows
 english.Desktop=Create a desktop shortcut
 english.Launch=Start DriveGram now
 english.InstallingWinFsp=Installing WinFsp (a system component the drive needs)...
 english.WinFspFailed=WinFsp was not installed. The drive cannot work without it. Install it from https://winfsp.dev/rel
 
 [Tasks]
-Name: "autostart"; Description: "{cm:AutoStart}"
+; "Start with Windows" belongs to the app (setup wizard + tray menu); the uninstaller removes it
 Name: "desktopicon"; Description: "{cm:Desktop}"; Flags: unchecked
 
 [Files]
@@ -60,12 +64,9 @@ Source: "redist\{#WinFspMsi}"; DestDir: "{tmp}"; Flags: deleteafterinstall; Chec
 
 [Icons]
 Name: "{group}\DriveGram"; Filename: "{app}\drivegram-tray.exe"
-Name: "{group}\DriveGram – שורת פקודה"; Filename: "{cmd}"; Parameters: "/k ""cd /d ""{app}"" && drivegram help"""; IconFilename: "{app}\drivegram.ico"
+Name: "{group}\{cm:CmdShortcut}"; Filename: "{cmd}"; Parameters: "/k ""cd /d ""{app}"" && drivegram help"""; IconFilename: "{app}\drivegram.ico"
 Name: "{userdesktop}\DriveGram"; Filename: "{app}\drivegram-tray.exe"; Tasks: desktopicon
 
-[Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "DriveGram"; \
-  ValueData: """{app}\drivegram-tray.exe"""; Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
 Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\{#WinFspMsi}"" /qb /norestart"; StatusMsg: "{cm:InstallingWinFsp}"; \
@@ -84,37 +85,51 @@ begin
   Result := not WinFspInstalled;
 end;
 
-{ Ask a running copy to finish uploads and unmount, then wait for it to exit (up to 10 minutes). }
-procedure StopRunningCopy;
+{ Ask a running copy to finish uploads and unmount, then wait for it to exit (up to 10 minutes).
+  Progress (setup only) shows that something is happening, instead of a window that looks frozen. }
+procedure StopRunningCopy(Progress: TOutputProgressWizardPage);
 var Code, Waited: Integer;
 begin
   if not CheckForMutexes('DriveGramTrayRunning') then exit;
   { a copy running from somewhere else (e.g. a dev build): the user closes it }
   if not FileExists(ExpandConstant('{app}\drivegram.exe')) then exit;
-  { `unmount` stops every drive (older versions exit on it); `quit` closes the tray app (0.5+) }
-  Exec(ExpandConstant('{app}\drivegram.exe'), 'unmount', '', SW_HIDE, ewWaitUntilTerminated, Code);
-  Exec(ExpandConstant('{app}\drivegram.exe'), 'quit', '', SW_HIDE, ewWaitUntilTerminated, Code);
-  Waited := 0;
-  while CheckForMutexes('DriveGramTrayRunning') and (Waited < 600) do
+  if Progress <> nil then
   begin
-    Sleep(1000);
-    Waited := Waited + 1;
+    Progress.SetText(CustomMessage('Stopping'), CustomMessage('StoppingDetail'));
+    Progress.Show;
+  end;
+  try
+    { `unmount` stops every drive (older versions exit on it); `quit` closes the tray app (0.5+) }
+    Exec(ExpandConstant('{app}\drivegram.exe'), 'unmount', '', SW_HIDE, ewWaitUntilTerminated, Code);
+    Exec(ExpandConstant('{app}\drivegram.exe'), 'quit', '', SW_HIDE, ewWaitUntilTerminated, Code);
+    Waited := 0;
+    while CheckForMutexes('DriveGramTrayRunning') and (Waited < 600) do
+    begin
+      if Progress <> nil then Progress.SetProgress(Waited, 600);
+      Sleep(1000);
+      Waited := Waited + 1;
+    end;
+  finally
+    if Progress <> nil then Progress.Hide;
   end;
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
-  StopRunningCopy;
+  StopRunningCopy(CreateOutputProgressPage(CustomMessage('Stopping'), ''));
   if CheckForMutexes('DriveGramTrayRunning') then
     Result := CustomMessage('StillRunning')
   else
     Result := '';
 end;
 
-function InitializeUninstall: Boolean;
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
-  StopRunningCopy;
-  Result := True;
+  { only after the user confirmed the uninstall: a "No" must never have stopped their drives }
+  if CurUninstallStep = usUninstall then StopRunningCopy(nil);
+  { "Start with Windows" is set by the app, so the uninstaller removes it explicitly }
+  if CurUninstallStep = usPostUninstall then
+    RegDeleteValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Run', 'DriveGram');
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

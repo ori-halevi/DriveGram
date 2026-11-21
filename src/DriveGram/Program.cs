@@ -31,7 +31,9 @@ DriveGram.Sync.DriveIdentity? newIdentity = null; // set when `init` creates a b
 var driveSel = Opt("--drive");
 Log.Open(Path.Combine(AppState.Root, "logs"));
 var command0 = argv.Count > 0 ? argv[0].ToLowerInvariant() : "help";
-AppState state = folder is not null ? AppState.ForFolder(folder) : SelectDrive(driveSel, command0);
+AppState state;
+try { state = folder is not null ? AppState.ForFolder(folder) : SelectDrive(driveSel, command0); }
+catch (ArgumentException e) { Console.Error.WriteLine(e.Message); return 2; }
 
 // Which drive a command acts on: --drive <letter|id>, else the only one, else the first one.
 static AppState SelectDrive(string? sel, string command)

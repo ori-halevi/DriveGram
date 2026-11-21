@@ -25,8 +25,8 @@ sealed class WelcomePage : WizardPage
         bool another = ctx.IsNew && AppState.All().Count > 0;
         if (another)
             col.Controls.Add(Theme.Label(L.T(
-                "כל כונן נשמר בחשבון טלגרם משלו ומקבל אות משלו. כדאי להשתמש כאן בחשבון שעוד לא משמש כונן אחר.",
-                "Each drive lives in its own Telegram account and gets its own letter. Use an account that no other drive uses yet."), maxWidth: 640));
+                "כל כונן מקבל אות משלו וערוצים משלו בטלגרם. אפשר לשים אותו באותו חשבון של כונן קיים, או בחשבון אחר.",
+                "Each drive gets its own letter and its own Telegram channels. It can live on the same account as an existing drive, or on another one."), maxWidth: 640));
         col.Controls.Add(Theme.Label(L.T("ההגדרה לוקחת כ־2 דקות:", "Setup takes about 2 minutes:"), Theme.Heading));
         string[] steps = ctx.UsesTelegram
             ? [L.T("פרטי API של טלגרם (מזהה חינמי שכל תוכנה צריכה)", "Telegram API details (a free ID every app needs)"),
@@ -82,7 +82,7 @@ sealed class ApiPage : WizardPage
         col.Controls.Add(_hash);
 
         var import = Theme.Secondary(L.T("ייבוא מקובץ env…", "Import from an .env file…"));
-        import.Click += (_, _) => ImportEnv();
+        import.Click += (_, _) => { try { ImportEnv(); } catch (Exception ex) { Ui.Error(ex.Message); } };
         col.Controls.Add(import);
         col.Controls.Add(_status);
         SetContent(col);
@@ -93,7 +93,7 @@ sealed class ApiPage : WizardPage
         _hash.TextChanged += (_, _) => UpdateState();
     }
 
-    bool Valid => Regex.IsMatch(_id.Text.Trim(), @"^\d{3,12}$") && Regex.IsMatch(_hash.Text.Trim(), "^[0-9a-fA-F]{32}$");
+    bool Valid => Regex.IsMatch(_id.Text.Trim(), @"^\d{3,10}$") && int.TryParse(_id.Text.Trim(), out _) && Regex.IsMatch(_hash.Text.Trim(), "^[0-9a-fA-F]{32}$");
 
     void UpdateState()
     {
@@ -173,6 +173,7 @@ sealed class LoginPage : WizardPage
     readonly Button _twoFaOk = Theme.Primary(L.T("אישור", "OK"));
 
     readonly Label _error = Theme.Label("", Theme.Small, Theme.Error, 640);
+    readonly Button _enterRetry = Theme.Secondary(L.T("נסה שוב", "Try again"));
     readonly FlowLayoutPanel _known = Theme.Column();
     readonly System.Windows.Forms.Timer _tick = new() { Interval = 1000 };
     CancellationTokenSource? _qrCts;
@@ -253,7 +254,9 @@ sealed class LoginPage : WizardPage
 
         _signIn.Controls.AddRange([methods, _qr, _phone]);
         _known.Visible = false;
-        col.Controls.AddRange([_account, _known, _signIn, _twoFa, _error]);
+        col.Controls.AddRange([_account, _known, _signIn, _twoFa, _error, _enterRetry]);
+        _enterRetry.Visible = false;
+        _enterRetry.Click += async (_, _) => await EnterAsync();
         SetContent(col);
 
         _tick.Tick += (_, _) =>
@@ -270,11 +273,22 @@ sealed class LoginPage : WizardPage
     public override async Task EnterAsync()
     {
         _error.Text = "";
+        _enterRetry.Visible = false;
         if (Ctx.User is not null) { ShowSignedIn(Ctx.User); return; }
         try
         {
             var user = await Task.Run(() => TelegramRemote.ResumeAsync(Ctx.GetClient()));
             ShowSignedIn(user);
+        }
+        catch (NotSignedInException) when (Ctx.GetClient().UserId != 0)
+        {
+            // a saved sign-in that Telegram revoked (e.g. "terminate all sessions"): start from a clean one,
+            // or every new attempt would run on the dead session again
+            Ctx.ResetClient(signOut: true);
+            _account.Visible = false;
+            _signIn.Visible = true;
+            ShowKnownAccounts();
+            await ModeChangedAsync();
         }
         catch (NotSignedInException)
         {
@@ -282,6 +296,11 @@ sealed class LoginPage : WizardPage
             _signIn.Visible = true;
             ShowKnownAccounts();
             await ModeChangedAsync();
+        }
+        catch (Exception ex)
+        {
+            _error.Text = TelegramErrors.Text(ex);
+            _enterRetry.Visible = true;
         }
     }
 
@@ -405,7 +424,7 @@ sealed class LoginPage : WizardPage
         {
             var client = Ctx.GetClient();
             var user = await Task.Run(() => client.LoginWithQRCode(url => BeginInvoke(() => ShowQr(url)), logoutFirst: false, ct: ct), ct);
-            Ctx.AdoptSignIn(user);
+            await Task.Run(() => Ctx.AdoptSignIn(user));
             ShowSignedIn(user);
         }
         catch (OperationCanceledException) { }
@@ -510,10 +529,13 @@ sealed class LoginPage : WizardPage
             switch (next)
             {
                 case null:
-                    Ctx.AdoptSignIn(client.User!);
+                    await Task.Run(() => Ctx.AdoptSignIn(client.User!));
                     ShowSignedIn(client.User!);
                     break;
                 case "verification_code":
+                    if (button == _verify) _error.Text = L.T("הקוד שגוי, נסה שוב.", "Wrong code, try again.");
+                    _phoneBox.ReadOnly = true;   // the code belongs to this number; changing it needs a new start
+                    _sendCode.Visible = false;
                     _codeRow.Visible = true;
                     _codeBox.Text = "";
                     _codeBox.Focus();
@@ -562,6 +584,7 @@ sealed class DrivePage : WizardPage
 {
     enum Mode { Checking, Connected, Connect, Create }
 
+    readonly Button _driveRetry = Theme.Secondary(L.T("נסה שוב", "Try again"));
     readonly Label _checking = Theme.Label(L.T("מחפש כונני DriveGram בחשבון…", "Looking for DriveGram drives on the account…"), Theme.Body, Theme.Muted);
     readonly FlowLayoutPanel _connected = Theme.Column();
     readonly FlowLayoutPanel _choices = Theme.Column();
@@ -642,7 +665,9 @@ sealed class DrivePage : WizardPage
         _form.Controls.AddRange([_intro, _nameLabel, _name, grid, _strength, _show, _warning, _saved, _remember, _error]);
         _form.Visible = false;
 
-        col.Controls.AddRange([_checking, _connected, _vanished, _choices, _form]);
+        col.Controls.AddRange([_checking, _driveRetry, _connected, _vanished, _choices, _form]);
+        _driveRetry.Visible = false;
+        _driveRetry.Click += async (_, _) => await EnterAsync();
         SetContent(col);
 
         _show.CheckedChanged += (_, _) => _pw.UseSystemPasswordChar = _pw2.UseSystemPasswordChar = !_show.Checked;
@@ -658,6 +683,7 @@ sealed class DrivePage : WizardPage
     public override async Task EnterAsync()
     {
         _error.Text = "";
+        _driveRetry.Visible = false;
         _wasVanished = false;
         _selected = null;
         SetMode(Mode.Checking);
@@ -686,6 +712,7 @@ sealed class DrivePage : WizardPage
         {
             _checking.ForeColor = Theme.Error;
             _checking.Text = TelegramErrors.Text(ex);
+            _driveRetry.Visible = true;
         }
     }
 
