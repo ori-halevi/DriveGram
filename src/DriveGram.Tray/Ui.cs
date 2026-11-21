@@ -132,7 +132,7 @@ sealed class TrashForm : Form
         bar.Controls.AddRange([restore, purge, refresh,
             new Label
             {
-                Text = L.T("פריטים נמחקים לצמיתות אוטומטית אחרי 30 יום.", "Items are deleted forever automatically after 30 days."),
+                Text = L.T("פריטים נמחקים לצמיתות אוטומטית אחרי 30 יום. קובץ שנוסף לפני פחות מחצי שעה ועוד לא עלה נמחק מיד, בלי לעבור בסל.", "Items are deleted forever automatically after 30 days. A file added less than half an hour ago that has not uploaded yet is deleted at once, without the bin."),
                 AutoSize = true, Padding = new Padding(12, 8, 0, 0), ForeColor = Color.DimGray,
             }]);
         Controls.Add(_list);

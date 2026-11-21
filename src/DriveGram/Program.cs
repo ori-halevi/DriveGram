@@ -5,6 +5,7 @@ using DriveGram.Index;
 using DriveGram.Sync;
 
 Console.OutputEncoding = System.Text.Encoding.UTF8;
+L.Override("en"); // a console shows Hebrew reversed: the CLI speaks English
 var argv = args.ToList();
 
 string? Opt(string name)
@@ -183,7 +184,7 @@ async Task<int> Setup()
 
         """);
     await Init();
-    Console.WriteLine("\nAll set. Press Enter to close this window; DriveGram will mount the drive.");
+    Console.WriteLine("\nAll set. Now start DriveGram from the Start menu: it mounts the drive.");
     if (!Console.IsInputRedirected) Console.ReadLine();
     return 0;
 }

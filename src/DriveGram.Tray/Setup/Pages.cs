@@ -15,7 +15,7 @@ sealed class WelcomePage : WizardPage
     public override string Title => Ctx.IsNew && AppState.All().Count > 0
         ? L.T("כונן נוסף", "Another drive")
         : L.T("ברוך הבא ל־DriveGram", "Welcome to DriveGram");
-    public override string Subtitle => L.T("כונן ב־This PC שהקבצים שלו נשמרים, מוצפנים, בחשבון הטלגרם שלך.",
+    public override string Subtitle => L.T("כונן ב\"מחשב זה\" שהקבצים שלו נשמרים, מוצפנים, בחשבון הטלגרם שלך.",
         "A drive in This PC whose files are stored, encrypted, in your Telegram account.");
     public override string NextText => L.T("בוא נתחיל", "Let's start");
 
@@ -682,8 +682,8 @@ sealed class DrivePage : WizardPage
         _meterText.Margin = new Padding(10, 0, 10, 0);
         _strength.Controls.AddRange([_meter, _meterText]);
         _warning.Controls.Add(Theme.Label(L.T(
-            "⚠  אי אפשר לשחזר את הסיסמה. בלעדיה אף אחד, כולל אתה, לא יוכל לקרוא את הקבצים, גם עם גישה מלאה לחשבון הטלגרם. שמור אותה במנהל סיסמאות או רשום אותה.",
-            "⚠  The password cannot be recovered. Without it nobody, including you, can read the files, even with full access to the Telegram account. Keep it in a password manager or write it down."),
+            "⚠  אי אפשר לשחזר את הסיסמה. בלעדיה (ובלי מפתח שחזור) אף אחד, כולל אתה, לא יוכל לקרוא את הקבצים, גם עם גישה מלאה לחשבון הטלגרם. שמור אותה במנהל סיסמאות או רשום אותה. אחרי ההגדרה מומלץ ליצור מפתח שחזור: בתפריט ← \"סיסמה ומפתח שחזור…\".",
+            "⚠  The password cannot be recovered. Without it (or a recovery key) nobody, including you, can read the files, even with full access to the Telegram account. Keep it in a password manager or write it down. After setup, create a recovery key: menu → \"Password and recovery key…\"."),
             Theme.Small, Theme.Text, 640));
         _name.RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No;
         _name.Font = Theme.Body;
@@ -948,7 +948,7 @@ sealed class DrivePage : WizardPage
             {
                 await UseRemoteAsync(await Task.Run(() => TelegramRemote.OpenAsync(Ctx.GetClient(), chosen, ownsClient: false)));
                 _ctrl = await SyncService.ReadControlAsync(_remote!, default);
-                if (_ctrl is null) { _error.Text = L.T("לכונן הזה אין רשומת בקרה.", "This drive has no control record."); return false; }
+                if (_ctrl is null) { _error.Text = L.T("ההגדרה של הכונן הזה לא הושלמה. בחר כונן אחר או צור חדש.", "This drive was never finished. Choose another one or create a new one."); return false; }
                 cfg.Channels = chosen;
                 cfg.DriveId = c.DriveId ?? "";
                 if (cfg.VolumeLabel is "" or "DriveGram") cfg.VolumeLabel = c.Name;
@@ -990,7 +990,7 @@ sealed class FinishPage : WizardPage
         col.Controls.Add(summaryCard);
         col.Controls.Add(Theme.Label(L.T("אות הכונן:", "Drive letter:"), Theme.Small, Theme.Muted));
         col.Controls.Add(_letter);
-        col.Controls.Add(Theme.Label(L.T("שם הכונן ב־This PC:", "Name in This PC:"), Theme.Small, Theme.Muted));
+        col.Controls.Add(Theme.Label(L.T("שם הכונן ב\"מחשב זה\":", "Name in This PC:"), Theme.Small, Theme.Muted));
         col.Controls.Add(_label);
         col.Controls.Add(_autostart);
         SetContent(col);

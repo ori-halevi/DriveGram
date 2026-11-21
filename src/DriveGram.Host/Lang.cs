@@ -18,6 +18,13 @@ public static class L
 
     public static string T(string hebrew, string english) => Hebrew ? hebrew : english;
 
+    /// <summary>A count in words: N(1, "קובץ אחד", "{0} קבצים", "1 file", "{0} files").</summary>
+    public static string N(int n, string heOne, string heMany, string enOne, string enMany) =>
+        string.Format(n == 1 ? T(heOne, enOne) : T(heMany, enMany), n);
+
+    /// <summary>Latin text (drive letter, path, PC name) kept in its order inside a Hebrew sentence.</summary>
+    public static string Ltr(string s) => "\u200E" + s + "\u200E";
+
     static void Apply()
     {
         Hebrew = Preference switch

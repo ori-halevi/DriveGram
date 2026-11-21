@@ -84,7 +84,7 @@ sealed class BackupForm : Form
 
         Section(col, L.T("3. מומלץ: להעביר את הבעלות לחשבון הגיבוי", "3. Recommended: transfer ownership to the backup account"));
         Para(col, L.T(
-            "מנהל עלול להישאר עם הרשאות חלקיות אם חשבון הבעלים נמחק. בעלים לא. את זה טלגרם מאפשרים רק מהאפליקציה שלהם, ובחשבון הנוכחי צריך אימות דו־שלבי:",
+            "מנהל עלול להישאר עם הרשאות חלקיות אם חשבון הבעלים נמחק. בעלים לא. את זה טלגרם מאפשר רק מהאפליקציה שלהם, ובחשבון הנוכחי צריך אימות דו־שלבי:",
             "An admin may be left with partial rights if the owner account is deleted; an owner is not. Telegram allows this only from its own app, and the current account needs two-step verification:"));
         foreach (var step in new[]
         {

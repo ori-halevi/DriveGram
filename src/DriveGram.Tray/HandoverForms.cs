@@ -77,7 +77,7 @@ sealed class HandoverAskForm : Form
         int left = (int)Math.Ceiling((_deadline - DateTime.UtcNow).TotalSeconds);
         if (left <= 0) { Approved = true; Close(); return; }
         if (++_polls % 3 == 0 && !_polling) _ = CheckStillOpenAsync();
-        _countdown.Text = L.T($"אם לא תענה, הכונן יעבור בעוד {left} שניות.", $"Without an answer, the drive moves in {left} seconds.");
+        _countdown.Text = L.T($"אם לא תענה (או תסגור את החלון), הכונן יעבור בעוד {left} שניות.", $"Without an answer (or if you close this window), the drive moves in {left} seconds.");
     }
 
     async Task CheckStillOpenAsync()

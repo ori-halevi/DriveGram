@@ -34,7 +34,7 @@ sealed class DriveController
     public DriveController(AppState state) => State = state;
 
     public string Letter => Session?.MountPoint ?? State.Config.MountPoint;
-    public string Name => $"{Letter} {State.Config.VolumeLabel}";
+    public string Name => $"{L.Ltr(Letter)} {State.Config.VolumeLabel}";
     public bool Busy => Session is { } s && (s.Status.PendingFiles > 0 || s.Status.UploadsInFlight > 0);
 }
 
@@ -171,8 +171,8 @@ sealed class TrayApp : ApplicationContext
             }, null);
 
             string text = session.Writable
-                ? L.T($"הכונן זמין ב־{session.MountPoint}", $"The drive is available as {session.MountPoint}")
-                : $"{session.MountPoint}: {ReadOnlyWhy(session)}";
+                ? L.T($"הכונן זמין ב־{L.Ltr(session.MountPoint)}", $"The drive is available as {session.MountPoint}")
+                : $"{L.Ltr(session.MountPoint)} – {ReadOnlyWhy(session)}";
             if (session.LetterChanged is { } moved)
                 text += L.T($"\nהאות הרגילה תפוסה כרגע ({moved}); בפעם הבאה הכונן ינסה אותה שוב.", $"\nThe usual letter is taken right now ({moved}); next time the drive tries it again.");
             Balloon(L.T("DriveGram מחובר", "DriveGram connected"), text);
@@ -199,6 +199,7 @@ sealed class TrayApp : ApplicationContext
         {
             d.NeedsSetup = true;
             d.Problem = L.T("הערוצים של הכונן נמחקו מטלגרם", "the drive's channels were deleted from Telegram");
+            _pendingSetup = d; // clicking the balloon opens its settings
             Balloon(L.T("הכונן לא נמצא בטלגרם", "Drive not found in Telegram"),
                 L.T($"הערוצים של {d.Name} נמחקו מהחשבון. פתח את 'הגדרות והתחברות' כדי להחליט מה לעשות.",
                     $"The channels of {d.Name} were deleted from the account. Open 'Settings and sign-in' to decide what to do."),
@@ -225,6 +226,15 @@ sealed class TrayApp : ApplicationContext
             OfferSetup(d, $"{d.Name}: {ex.Message}");
         }
         catch (WrongPasswordException) { d.Problem = L.T("סיסמה שגויה", "wrong password"); }
+        catch (Exception ex) when (IsLocalProblem(ex))
+        {
+            Log.Error($"tray: mounting {d.Name} failed (local problem)", ex);
+            d.Problem = L.T("לא ניתן לפתוח את הכונן במחשב הזה (בעיה מקומית)", "the drive could not be opened on this PC (a local problem)");
+            Balloon(L.T("לא ניתן לפתוח את הכונן", "The drive could not be opened"),
+                L.T($"{d.Name}: בעיה במחשב הזה, לא באינטרנט ({Short(Setup.TelegramErrors.Text(ex))}). פרטים ביומן: בתפריט ← \"פתח את תיקיית היומן\".",
+                    $"{d.Name}: a problem on this PC, not the internet ({Short(Setup.TelegramErrors.Text(ex))}). Details in the log: menu → \"Open the log folder\"."),
+                ToolTipIcon.Error);
+        }
         catch (Exception ex)
         {
             // most likely no internet yet (e.g. right after boot): retry with backoff
@@ -238,6 +248,11 @@ sealed class TrayApp : ApplicationContext
             UpdateIcon();
         }
     }
+
+    /// <summary>Failures a retry cannot fix (files on this PC unreadable, no permission, damaged data).</summary>
+    static bool IsLocalProblem(Exception ex) => ex is UnauthorizedAccessException or InvalidDataException
+        or NotSupportedException or Microsoft.Data.Sqlite.SqliteException or DirectoryNotFoundException or PathTooLongException
+        || (ex is IOException io && (io.HResult & 0xFFFF) is 112 or 39); // disk full
 
     static string Short(string text) => text.Length > 70 ? text[..70] + "…" : text;
 
@@ -588,7 +603,13 @@ sealed class TrayApp : ApplicationContext
                     L.T("המחשב הזה עכשיו לקריאה בלבד. אפשר לבקש את הכונן בחזרה מהתפריט.",
                         "This PC is now read-only. You can ask for the drive back from the menu."));
         }
-        catch (Exception ex) { Log.Warn($"tray: handover of {d.Name}: {ex.Message}"); }
+        catch (Exception ex)
+        {
+            Log.Warn($"tray: handover of {d.Name}: {ex.Message}");
+            Balloon(L.T("ההעברה לא הושלמה", "The handover did not complete"),
+                L.T($"{d.Name} נשאר במחשב הזה ({Short(Setup.TelegramErrors.Text(ex))}).", $"{d.Name} stays on this PC ({Short(Setup.TelegramErrors.Text(ex))})."),
+                ToolTipIcon.Warning);
+        }
         UpdateIcon();
     }
 
@@ -731,28 +752,29 @@ sealed class TrayApp : ApplicationContext
         var st = s.Status;
         if (s.Sync.NeedsUpdate) return L.T("קריאה בלבד: צריך לעדכן את DriveGram", "read-only: DriveGram needs an update");
         if (s.Sync.HandingOver)
-            return L.T($"מעביר את הכונן למחשב אחר (נשארו {st.PendingFiles} קבצים להעלות)", $"handing the drive to another PC ({st.PendingFiles} uploads left)");
+            return L.T("מעביר את הכונן למחשב אחר", "handing the drive to another PC") + " (" + L.N(st.PendingFiles, "נשאר קובץ אחד להעלות", "נשארו {0} קבצים להעלות", "1 upload left", "{0} uploads left") + ")";
         if (s.Sync.HeldBackChanges is > 0 and var held)
-            return L.T($"⚠ {held} שינויים מוחזקים: הכונן נפתח לכתיבה ב־{s.Sync.LeaseHolder}", $"⚠ {held} changes held back: the drive was opened for writing on {s.Sync.LeaseHolder}");
+            return "⚠ " + L.N(held, "שינוי אחד מוחזק", "{0} שינויים מוחזקים", "1 change held back", "{0} changes held back")
+                + L.T($": הכונן פתוח לכתיבה ב־{s.Sync.LeaseHolder}; הם יישלחו כשהכונן יחזור לכאן", $": the drive is open for writing on {s.Sync.LeaseHolder}; they are sent when it comes back here");
         if (!s.Writable) return s.Sync.LeaseHolder is { } h
             ? L.T($"קריאה בלבד (פתוח לכתיבה ב־{h})", $"read-only (open for writing on {h})")
             : L.T("קריאה בלבד כרגע (בודק…)", "read-only for now (checking…)");
         var wait = s.WaitingUntil is { } until ? L.T($" · טלגרם ביקש להמתין עד {until:HH:mm}", $" · Telegram asked to wait until {until:HH:mm}") : "";
         if (st.PendingFiles > 0 || st.UploadsInFlight > 0)
-            return L.T($"מעלה: {st.PendingFiles} קבצים, {Ui.Size(st.StagedBytes)}", $"uploading: {st.PendingFiles} files, {Ui.Size(st.StagedBytes)}") + wait;
+            return L.T("מעלה: ", "uploading: ") + L.N(st.PendingFiles, "קובץ אחד", "{0} קבצים", "1 file", "{0} files") + $", {Ui.Size(st.StagedBytes)}" + wait;
         if (s.Sync.UnsentChanges is > 0 and var unsent)
-            return L.T($"{unsent} שינויים ממתינים לשליחה לטלגרם", $"{unsent} changes waiting to be sent to Telegram") + wait;
+            return L.N(unsent, "שינוי אחד ממתין לשליחה לטלגרם", "{0} שינויים ממתינים לשליחה לטלגרם", "1 change waiting to be sent to Telegram", "{0} changes waiting to be sent to Telegram") + wait;
         return L.T("הכל שמור בטלגרם ✓", "everything is saved in Telegram ✓");
     }
 
     static string ReadOnlyWhy(DriveSession s) => s.Sync.LeaseHolder is { } h
-        ? L.T($"הכונן פתוח לכתיבה במחשב {h}. כאן אפשר רק לקרוא. כדי לכתוב כאן: בתפריט, \"בקש את הכונן\".",
-              $"The drive is open for writing on {h}. Here it can only be read. To write here: \"Ask for the drive\" in the menu.")
+        ? L.T($"הכונן פתוח לכתיבה במחשב {h}. כאן אפשר רק לקרוא. כדי לכתוב כאן: בתפריט, \"בקש את הכונן מ־{h}…\".",
+              $"The drive is open for writing on {h}. Here it can only be read. To write here: \"Ask {h} for the drive…\" in the menu.")
         : L.T("הכונן זמין כרגע לקריאה בלבד; DriveGram בודק אם אפשר לכתוב.", "The drive is read-only for now; DriveGram is checking whether it can write.");
 
     string Summary() => _drives.Count == 0
         ? L.T("אין עדיין כוננים", "no drives yet")
-        : string.Join("\n", _drives.Select(d => $"{d.Name}: {StatusOf(d)}"));
+        : string.Join("\n", _drives.Select(d => _drives.Count > 1 ? $"{L.Ltr(d.Letter)} {StatusOf(d)}" : $"{d.Name}: {StatusOf(d)}"));
 
     void BuildMenu()
     {
