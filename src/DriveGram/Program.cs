@@ -161,6 +161,7 @@ async Task<int> Login()
     {
         await client.ConnectAsync();
         user = client.User ?? await client.LoginWithQRCode(ShowQr, logoutFirst: false);
+        File.Delete(Path.Combine(state.Dir, "login-qr.png"));
     }
     Console.WriteLine($"Signed in as {user.first_name} {user.last_name} (@{user.username}). The session is stored encrypted for this Windows user only.");
     return 0;
