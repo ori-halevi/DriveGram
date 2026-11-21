@@ -77,7 +77,7 @@ public sealed class TelegramRemote : IRemote
         if (client.UserId == 0) throw new NotSignedInException();
         try
         {
-            var users = await client.Users_GetUsers(InputUser.Self);
+            var users = await Patiently(() => client.Users_GetUsers(InputUser.Self));
             return users.FirstOrDefault() as User ?? throw new NotSignedInException();
         }
         catch (RpcException e) when (e.Code == 401) { throw new NotSignedInException(); }
@@ -89,9 +89,9 @@ public sealed class TelegramRemote : IRemote
 
     static async Task<string?> ReadPinnedTextAsync(Client client, Channel channel)
     {
-        var full = await client.Channels_GetFullChannel(channel);
+        var full = await Patiently(() => client.Channels_GetFullChannel(channel));
         if (full.full_chat is not ChannelFull { pinned_msg_id: > 0 } cf) return null;
-        var r = await client.Channels_GetMessages(channel, [new InputMessageID { id = cf.pinned_msg_id }]);
+        var r = await Patiently(() => client.Channels_GetMessages(channel, [new InputMessageID { id = cf.pinned_msg_id }]));
         return r.Messages.FirstOrDefault() is Message m ? m.message : null;
     }
 
@@ -106,7 +106,7 @@ public sealed class TelegramRemote : IRemote
     public static async Task<List<DriveCandidate>> DiscoverAsync(Client client)
     {
         await ResumeAsync(client);
-        var all = (await client.Messages_GetAllChats()).chats.Values.OfType<Channel>().Where(c => !c.flags.HasFlag(Channel.Flags.left)).ToList();
+        var all = (await Patiently(() => client.Messages_GetAllChats())).chats.Values.OfType<Channel>().Where(c => !c.flags.HasFlag(Channel.Flags.left)).ToList();
         var journals = all.Where(IsJournal).ToList();
         var datas = all.Where(IsData).ToList();
         var found = new List<(Channel J, Sync.ControlState? Ctrl)>();
@@ -144,10 +144,22 @@ public sealed class TelegramRemote : IRemote
     public static async Task<TelegramChannels> CreateChannelsAsync(Client client, string name, string driveId)
     {
         await ResumeAsync(client);
+        try { await CleanupLeftoversAsync(client); }
+        catch (Exception ex) { Log.Warn($"cleanup of leftover channels skipped: {ex.Message}"); }
         var data = await CreateChannel(client, $"{DataTitle} · {name}",
             $"DriveGram encrypted storage of drive {driveId}. Do not post or delete here.");
-        var journal = await CreateChannel(client, $"{JournalTitle} · {name}",
-            $"DriveGram journal of drive {driveId}. Do not post, pin or delete here.");
+        Channel journal;
+        try
+        {
+            journal = await CreateChannel(client, $"{JournalTitle} · {name}",
+                $"DriveGram journal of drive {driveId}. Do not post, pin or delete here.");
+        }
+        catch
+        {
+            // never leave half a drive behind
+            try { await Patiently(() => client.Channels_DeleteChannel(data)); } catch { }
+            throw;
+        }
         return new TelegramChannels(data.id, data.access_hash, journal.id, journal.access_hash);
     }
 
@@ -159,7 +171,7 @@ public sealed class TelegramRemote : IRemote
         Governor? up = null, Governor? down = null, bool ownsClient = true, IDisposable? release = null)
     {
         var account = await ResumeAsync(client);
-        var all = (await client.Messages_GetAllChats()).chats.Values.OfType<Channel>().ToList();
+        var all = (await Patiently(() => client.Messages_GetAllChats())).chats.Values.OfType<Channel>().ToList();
         var data = all.FirstOrDefault(c => c.id == known.DataId && !c.flags.HasFlag(Channel.Flags.left));
         var journal = all.FirstOrDefault(c => c.id == known.JournalId && !c.flags.HasFlag(Channel.Flags.left));
         // A drive this PC knew is gone: never quietly put an empty one in its place.
@@ -181,9 +193,71 @@ public sealed class TelegramRemote : IRemote
         catch (FileNotFoundException) { return false; }
     }
 
+    /// <summary>
+    /// For setup-time calls on a client that may be shared with a mounted drive: that drive turned
+    /// the library's automatic flood-wait handling off (FloodRetryThreshold = 0, so its governor sees
+    /// every wait). Setup calls are few and not governed, so they wait out FLOOD_WAIT themselves —
+    /// e.g. Telegram makes a second channel creation right after the first wait ~6 s.
+    /// </summary>
+    static async Task<T> Patiently<T>(Func<Task<T>> call)
+    {
+        for (int attempt = 1; ; attempt++)
+        {
+            try { return await call(); }
+            catch (RpcException e) when (e.Code == 420 && e.X <= 300 && attempt <= 5)
+            {
+                Log.Info($"Telegram asks to wait {e.X}s (setup); waiting");
+                await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, e.X) + 1));
+            }
+        }
+    }
+
+    /// <summary>A channel of ours that holds nothing at all (only the "channel created" service message).</summary>
+    static async Task<bool> IsEmptyAsync(Client client, Channel c)
+    {
+        var h = await Patiently(() => client.Messages_GetHistory(c, limit: 5));
+        return !h.Messages.OfType<Message>().Any();
+    }
+
+    /// <summary>
+    /// Remove channels left over by an interrupted drive creation (e.g. the data channel was created,
+    /// then the journal's creation failed). Only channels that are ours, new-style named, bound to no
+    /// drive, and completely EMPTY — a channel with any content is never touched.
+    /// </summary>
+    static async Task CleanupLeftoversAsync(Client client)
+    {
+        var all = (await Patiently(() => client.Messages_GetAllChats())).chats.Values.OfType<Channel>()
+            .Where(c => !c.flags.HasFlag(Channel.Flags.left)).ToList();
+        var bound = new HashSet<long>();
+        var unboundJournals = new List<Channel>();
+        foreach (var j in all.Where(IsJournal))
+        {
+            Sync.ControlState? ctrl;
+            try { ctrl = Sync.ControlState.FromJson(await ReadPinnedTextAsync(client, j)); }
+            catch (Exception ex)
+            {
+                // cannot tell which data channel this journal owns: delete nothing this time
+                Log.Warn($"cleanup skipped: cannot read the control record of '{j.title}': {ex.Message}");
+                return;
+            }
+            if (ctrl?.Drive is { } id) { bound.Add(id.DataChannel); bound.Add(j.id); }
+            else if (ctrl is not null) bound.Add(j.id); // an older drive: keep it (and never guess its data channel away)
+            else unboundJournals.Add(j);
+        }
+        var leftovers = all.Where(c => c.flags.HasFlag(Channel.Flags.creator) && !bound.Contains(c.id)
+                && (c.title.StartsWith(DataTitle + " · ") || unboundJournals.Contains(c)))
+            .ToList();
+        foreach (var c in leftovers)
+        {
+            if (!await IsEmptyAsync(client, c)) continue;
+            await Patiently(() => client.Channels_DeleteChannel(c));
+            Log.Info($"removed an empty leftover channel '{c.title}' ({c.id})");
+        }
+    }
+
     static async Task<Channel> CreateChannel(Client client, string title, string about)
     {
-        var updates = await client.Channels_CreateChannel(title, about, broadcast: true);
+        var updates = await Patiently(() => client.Channels_CreateChannel(title, about, broadcast: true));
         var channel = updates.Chats.Values.OfType<Channel>().First();
         Log.Info($"created private channel '{title}'");
         return channel;
