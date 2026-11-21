@@ -25,8 +25,27 @@ bool verbose = Flag("--verbose");
 bool takeOver = Flag("--take-over");
 bool usePhone = Flag("--phone");
 
-var state = new AppState(folder);
-Log.Open(state.LogDir);
+var driveSel = Opt("--drive");
+Log.Open(Path.Combine(AppState.Root, "logs"));
+var command0 = argv.Count > 0 ? argv[0].ToLowerInvariant() : "help";
+AppState state = folder is not null ? AppState.ForFolder(folder) : SelectDrive(driveSel, command0);
+
+// Which drive a command acts on: --drive <letter|id>, else the only one, else the first one.
+static AppState SelectDrive(string? sel, string command)
+{
+    var all = AppState.All().Where(a => a.Folder is null).ToList();
+    if (sel is not null)
+    {
+        var key = sel.TrimEnd(':', '\\').ToUpperInvariant();
+        return all.FirstOrDefault(a => a.Config.MountPoint.TrimEnd(':').Equals(key, StringComparison.OrdinalIgnoreCase)
+                                       || a.Id.Equals(sel, StringComparison.OrdinalIgnoreCase))
+               ?? throw new ArgumentException($"No drive '{sel}'. See: drivegram drives");
+    }
+    if (all.Count == 0) return AppState.Open("telegram");                 // first drive on this PC
+    if (command is "setup" or "login" or "init" && all.Count > 0 && all.All(a => a.Config.Channels is not null))
+        return command == "setup" ? AppState.CreateNew() : all[0];         // `setup` with drives already = add one
+    return all[0];
+}
 Log.Console = true;
 Log.Verbose = verbose;
 WTelegram.Helpers.Log = (level, msg) => { if (level >= 3) Log.Warn("[tg] " + msg); else Log.Debug("[tg] " + msg); };
@@ -43,6 +62,8 @@ try
         "mount" => await Mount(arg1),
         "unmount" => Unmount(),
         "status" => await Status(),
+        "drives" => Drives(),
+        "quit" => Quit(),
         "autostart" => Autostart(arg1),
         "forget-password" => ForgetPassword(),
         _ => Help(),
@@ -74,6 +95,10 @@ int Help()
                                            Mount in this console (Ctrl+C unmounts after uploads finish).
           drivegram unmount                Ask the running drive (console or tray) to unmount.
           drivegram status                 Show what is stored and what is waiting to upload.
+          drivegram drives                 List the drives on this PC (one per Telegram account).
+          drivegram quit                   Close the tray app (it finishes uploads first).
+
+        Several drives: add --drive <letter> (e.g. --drive U:) to choose one; default is the first.
           drivegram forget-password        Stop remembering the drive password on this PC.
 
         Try it without Telegram: add --folder <path> to init / mount / status / unmount.
@@ -232,6 +257,7 @@ async Task<int> Init()
             Console.WriteLine("They do not match.");
         }
         var keys = await SyncService.CreateDriveAsync(remote, pw, default);
+        state.Save();
         OfferRemember(keys);
         Console.WriteLine("Drive created. Next: drivegram-tray (or: drivegram mount)");
     }
@@ -271,15 +297,43 @@ async Task<int> Status()
     return 0;
 }
 
+// `unmount` without --drive unmounts every drive (the installer relies on this).
 int Unmount()
 {
-    if (!EventWaitHandle.TryOpenExisting(DriveSession.StopEventName(state), out var ev))
+    var targets = driveSel is not null || folder is not null ? [state] : AppState.All();
+    int n = 0;
+    foreach (var t in targets)
     {
-        Console.WriteLine("DriveGram is not mounted.");
+        if (!EventWaitHandle.TryOpenExisting(DriveSession.StopEventName(t), out var ev)) continue;
+        ev.Set();
+        n++;
+        Console.WriteLine($"Asked {t.Config.MountPoint} to unmount (it finishes pending uploads first).");
+    }
+    if (n == 0) Console.WriteLine("No DriveGram drive is mounted.");
+    return 0;
+}
+
+int Quit()
+{
+    if (!EventWaitHandle.TryOpenExisting(DriveSession.QuitEventName, out var ev))
+    {
+        Console.WriteLine("The DriveGram tray app is not running.");
         return 0;
     }
     ev.Set();
-    Console.WriteLine("Asked the running DriveGram to unmount (it finishes pending uploads first).");
+    Console.WriteLine("Asked the DriveGram tray app to close (it finishes pending uploads first).");
+    return 0;
+}
+
+int Drives()
+{
+    var all = AppState.All();
+    if (all.Count == 0) { Console.WriteLine("No drives yet. Run: drivegram setup (or open DriveGram from the Start menu)."); return 0; }
+    foreach (var a in all)
+    {
+        bool mounted = EventWaitHandle.TryOpenExisting(DriveSession.StopEventName(a), out _);
+        Console.WriteLine($"{a.Config.MountPoint,-3} {a.Config.VolumeLabel,-16} {(a.Folder ?? a.Config.AccountName),-28} {(mounted ? "mounted" : "")}  [{a.Id}]");
+    }
     return 0;
 }
 

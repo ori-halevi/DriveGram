@@ -6,7 +6,7 @@
 
 #define AppName "DriveGram"
 #ifndef AppVersion
-  #define AppVersion "0.4.0"
+  #define AppVersion "0.5.0"
 #endif
 #define WinFspMsi "winfsp-2.1.25156.msi"
 
@@ -30,6 +30,7 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
+ShowLanguageDialog=auto
 
 [Languages]
 Name: "hebrew"; MessagesFile: "compiler:Languages\Hebrew.isl"
@@ -88,7 +89,9 @@ begin
   if not CheckForMutexes('DriveGramTrayRunning') then exit;
   { a copy running from somewhere else (e.g. a dev build): the user closes it }
   if not FileExists(ExpandConstant('{app}\drivegram.exe')) then exit;
+  { `unmount` stops every drive (older versions exit on it); `quit` closes the tray app (0.5+) }
   Exec(ExpandConstant('{app}\drivegram.exe'), 'unmount', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  Exec(ExpandConstant('{app}\drivegram.exe'), 'quit', '', SW_HIDE, ewWaitUntilTerminated, Code);
   Waited := 0;
   while CheckForMutexes('DriveGramTrayRunning') and (Waited < 600) do
   begin

@@ -126,6 +126,21 @@ public class EngineTests
     }
 
     [Fact]
+    public async Task FilesWhoseCloseNeverArrivesStillCommitAfterUnmount()
+    {
+        await using var kit = await TestKit.CreateAsync();
+        var a = kit.Pc("a");
+        var id = a.NewFile("lazy-close.bin");
+        var data = TestKit.RandomBytes(CS + 99, 8);
+        a.Engine.Opened(id, true);               // the cache manager still holds the file...
+        a.Engine.Write(id, 0, data);
+        a.Engine.ReleaseAllHandles();            // ...when the volume is unmounted
+        await a.SettleAsync();
+        Assert.False(a.Db.IsPending(id));
+        Assert.Equal(data, a.ReadFile(id));
+    }
+
+    [Fact]
     public async Task HugeCopyStaysWithinTheStagingQuota()
     {
         await using var kit = await TestKit.CreateAsync();

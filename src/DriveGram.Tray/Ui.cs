@@ -1,3 +1,5 @@
+using DriveGram.Host;
+
 namespace DriveGram.Tray;
 
 static class Ui
@@ -12,34 +14,44 @@ static class Ui
         _ => $"{bytes / 1073741824.0:0.##} GB",
     };
 
-    public static void Rtl(Form f)
+    /// <summary>Direction, font and icon for a window, by the UI language.</summary>
+    public static void Prepare(Form f)
     {
-        f.RightToLeft = RightToLeft.Yes;
-        f.RightToLeftLayout = true;
+        f.RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No;
+        f.RightToLeftLayout = L.Rtl;
         f.Font = Font;
         var icon = Path.Combine(AppContext.BaseDirectory, "drivegram.ico");
         if (File.Exists(icon)) f.Icon = new Icon(icon);
     }
 
+    static MessageBoxOptions Options => L.Rtl ? MessageBoxOptions.RightAlign | MessageBoxOptions.RtlReading : 0;
+
+    public static DialogResult Ask(string text, MessageBoxButtons buttons = MessageBoxButtons.YesNo,
+        MessageBoxIcon icon = MessageBoxIcon.Question, MessageBoxDefaultButton def = MessageBoxDefaultButton.Button1) =>
+        MessageBox.Show(text, "DriveGram", buttons, icon, def, Options);
+
     public static void Error(string text) =>
-        MessageBox.Show(text, "DriveGram", MessageBoxButtons.OK, MessageBoxIcon.Error, MessageBoxDefaultButton.Button1,
-            MessageBoxOptions.RightAlign | MessageBoxOptions.RtlReading);
+        MessageBox.Show(text, "DriveGram", MessageBoxButtons.OK, MessageBoxIcon.Error, MessageBoxDefaultButton.Button1, Options);
 }
 
-/// <summary>Asks for the drive password (when it is not remembered on this PC).</summary>
+/// <summary>Asks for a drive's password (when it is not remembered on this PC).</summary>
 sealed class PasswordForm : Form
 {
-    readonly TextBox _pw = new() { UseSystemPasswordChar = true, Width = 300 };
-    readonly CheckBox _remember = new() { Text = "לזכור את הסיסמה במחשב הזה (נדרש כדי לעלות עם וינדוס)", AutoSize = true, Checked = true };
+    readonly TextBox _pw = new() { UseSystemPasswordChar = true, Width = 300, RightToLeft = RightToLeft.No };
+    readonly CheckBox _remember = new()
+    {
+        Text = L.T("לזכור את הסיסמה במחשב הזה (נדרש כדי לעלות עם וינדוס)", "Remember the password on this PC (needed to start with Windows)"),
+        AutoSize = true, Checked = true,
+    };
     readonly Label _error = new() { ForeColor = Color.Firebrick, AutoSize = true };
 
     public string Password => _pw.Text;
     public bool Remember => _remember.Checked;
 
-    public PasswordForm(string? error)
+    public PasswordForm(string driveName, string? error)
     {
-        Ui.Rtl(this);
-        Text = "DriveGram – סיסמת הכונן";
+        Ui.Prepare(this);
+        Text = L.T($"DriveGram – הסיסמה של {driveName}", $"DriveGram – password for {driveName}");
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterScreen;
         MaximizeBox = MinimizeBox = false;
@@ -48,16 +60,17 @@ sealed class PasswordForm : Form
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
         Padding = new Padding(16);
 
-        var ok = new Button { Text = "פתח את הכונן", DialogResult = DialogResult.OK, AutoSize = true };
-        var cancel = new Button { Text = "ביטול", DialogResult = DialogResult.Cancel, AutoSize = true };
+        var ok = new Button { Text = L.T("פתח את הכונן", "Open the drive"), DialogResult = DialogResult.OK, AutoSize = true };
+        var cancel = new Button { Text = L.T("ביטול", "Cancel"), DialogResult = DialogResult.Cancel, AutoSize = true };
         AcceptButton = ok;
         CancelButton = cancel;
         _error.Text = error ?? "";
 
-        var buttons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+        var buttons = new FlowLayoutPanel { AutoSize = true };
         buttons.Controls.AddRange([ok, cancel]);
         var layout = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false };
-        layout.Controls.AddRange([new Label { Text = "הקלד את סיסמת הכונן:", AutoSize = true }, _pw, _remember, _error, buttons]);
+        layout.Controls.AddRange([new Label { Text = L.T("הקלד את סיסמת הכונן:", "Enter the drive password:"), AutoSize = true },
+            _pw, _remember, _error, buttons]);
         Controls.Add(layout);
         Shown += (_, _) => { Activate(); _pw.Focus(); };
     }
@@ -66,29 +79,28 @@ sealed class PasswordForm : Form
 /// <summary>The drive's own recycle bin: restore or delete forever.</summary>
 sealed class TrashForm : Form
 {
-    readonly DriveGram.Host.DriveSession _session;
+    readonly DriveSession _session;
     readonly ListView _list = new()
     {
-        View = View.Details, FullRowSelect = true, Dock = DockStyle.Fill, MultiSelect = true,
-        RightToLeftLayout = true, HideSelection = false,
+        View = View.Details, FullRowSelect = true, Dock = DockStyle.Fill, MultiSelect = true, HideSelection = false,
     };
 
-    public TrashForm(DriveGram.Host.DriveSession session)
+    public TrashForm(DriveSession session)
     {
         _session = session;
-        Ui.Rtl(this);
-        Text = "DriveGram – סל המחזור";
+        Ui.Prepare(this);
+        _list.RightToLeftLayout = L.Rtl;
         StartPosition = FormStartPosition.CenterScreen;
         Size = new Size(900, 520);
 
-        _list.Columns.Add("שם", 260);
-        _list.Columns.Add("מיקום מקורי", 300);
-        _list.Columns.Add("נמחק ב־", 150);
-        _list.Columns.Add("גודל", 100);
+        _list.Columns.Add(L.T("שם", "Name"), 260);
+        _list.Columns.Add(L.T("מיקום מקורי", "Original location"), 300);
+        _list.Columns.Add(L.T("נמחק ב־", "Deleted"), 150);
+        _list.Columns.Add(L.T("גודל", "Size"), 100);
 
-        var restore = new Button { Text = "שחזר", AutoSize = true };
-        var purge = new Button { Text = "מחק לצמיתות", AutoSize = true };
-        var refresh = new Button { Text = "רענן", AutoSize = true };
+        var restore = new Button { Text = L.T("שחזר", "Restore"), AutoSize = true };
+        var purge = new Button { Text = L.T("מחק לצמיתות", "Delete forever"), AutoSize = true };
+        var refresh = new Button { Text = L.T("רענן", "Refresh"), AutoSize = true };
         restore.Click += (_, _) => Act(restore: true);
         purge.Click += (_, _) => Act(restore: false);
         refresh.Click += (_, _) => Reload();
@@ -96,7 +108,11 @@ sealed class TrashForm : Form
 
         var bar = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, Padding = new Padding(8) };
         bar.Controls.AddRange([restore, purge, refresh,
-            new Label { Text = "פריטים נמחקים לצמיתות אוטומטית אחרי 30 יום.", AutoSize = true, Padding = new Padding(12, 8, 0, 0), ForeColor = Color.DimGray }]);
+            new Label
+            {
+                Text = L.T("פריטים נמחקים לצמיתות אוטומטית אחרי 30 יום.", "Items are deleted forever automatically after 30 days."),
+                AutoSize = true, Padding = new Padding(12, 8, 0, 0), ForeColor = Color.DimGray,
+            }]);
         Controls.Add(_list);
         Controls.Add(bar);
         Reload();
@@ -108,21 +124,21 @@ sealed class TrashForm : Form
         _list.Items.Clear();
         foreach (var t in _session.Trash())
         {
-            var item = new ListViewItem([t.Dir ? $"📁 {t.Name}" : t.Name, t.OriginalFolder, t.DeletedAt.ToString("dd/MM/yyyy HH:mm"),
-                t.Dir ? "" : Ui.Size(t.Size)]) { Tag = t };
-            _list.Items.Add(item);
+            _list.Items.Add(new ListViewItem([t.Dir ? $"📁 {t.Name}" : t.Name, t.OriginalFolder,
+                t.DeletedAt.ToString(L.Hebrew ? "dd/MM/yyyy HH:mm" : "g"), t.Dir ? "" : Ui.Size(t.Size)]) { Tag = t });
         }
         _list.EndUpdate();
-        Text = $"DriveGram – סל המחזור ({_list.Items.Count})";
+        Text = L.T($"DriveGram – סל המחזור של {_session.MountPoint} ({_list.Items.Count})",
+                   $"DriveGram – {_session.MountPoint} recycle bin ({_list.Items.Count})");
     }
 
     void Act(bool restore)
     {
-        var items = _list.SelectedItems.Cast<ListViewItem>().Select(i => (DriveGram.Host.TrashItem)i.Tag!).ToList();
+        var items = _list.SelectedItems.Cast<ListViewItem>().Select(i => (TrashItem)i.Tag!).ToList();
         if (items.Count == 0) return;
-        if (!restore && MessageBox.Show($"למחוק לצמיתות {items.Count} פריטים? אי אפשר לבטל את זה.", "DriveGram",
-                MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2,
-                MessageBoxOptions.RightAlign | MessageBoxOptions.RtlReading) != DialogResult.Yes)
+        if (!restore && Ui.Ask(L.T($"למחוק לצמיתות {items.Count} פריטים? אי אפשר לבטל את זה.",
+                    $"Delete {items.Count} items forever? This cannot be undone."),
+                icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes)
             return;
         try
         {

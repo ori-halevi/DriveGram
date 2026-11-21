@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using DriveGram.Host;
 using DriveGram.Remote;
 
@@ -7,6 +8,8 @@ namespace DriveGram.Tray.Setup;
 sealed class SetupContext : IDisposable
 {
     public AppState State { get; }
+    /// <summary>Adding a new drive (vs. fixing / changing an existing one).</summary>
+    public bool IsNew { get; }
     public bool UsesTelegram => State.Folder is null;
     public WTelegram.Client? Client { get; private set; }
     public TL.User? User { get; set; }
@@ -14,7 +17,11 @@ sealed class SetupContext : IDisposable
     /// <summary>Answers a 2FA prompt during QR sign-in (set by the login page).</summary>
     public Func<string?>? AskPassword { get; set; }
 
-    public SetupContext(AppState state) => State = state;
+    public SetupContext(AppState state, bool isNew)
+    {
+        State = state;
+        IsNew = isNew;
+    }
 
     public WTelegram.Client GetClient() => Client ??= DriveSession.NewTelegramClient(State, () => AskPassword?.Invoke());
 
@@ -24,13 +31,12 @@ sealed class SetupContext : IDisposable
         var c = Client;
         Client = null;
         User = null;
-        Remote = null;
-        if (c is null) return;
-        if (signOut)
+        if (Remote is not null) { Remote.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5)); Remote = null; c = null; }
+        if (c is not null)
         {
-            try { TL.SchemaExtensions.Auth_LogOut(c).Wait(TimeSpan.FromSeconds(10)); } catch { }
+            if (signOut) { try { TL.SchemaExtensions.Auth_LogOut(c).Wait(TimeSpan.FromSeconds(10)); } catch { } }
+            c.Dispose();
         }
-        c.Dispose();
         if (signOut) try { File.Delete(State.SessionPath); } catch { }
     }
 
@@ -48,8 +54,8 @@ abstract class WizardPage : UserControl
 {
     public abstract string Title { get; }
     public abstract string Subtitle { get; }
-    public virtual string NextText => "הבא";
-    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public virtual string NextText => L.T("הבא", "Next");
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool CanGoNext { get; protected set; } = true;
     public event Action? StateChanged;
     protected SetupContext Ctx { get; }
@@ -60,10 +66,9 @@ abstract class WizardPage : UserControl
         Dock = DockStyle.Fill;
         BackColor = Color.White;
         Font = Theme.Body;
-        AutoScroll = true;
     }
 
-    /// <summary>Put the page's main column in place: full width, so right-to-left content hugs the right edge.</summary>
+    /// <summary>Put the page's main column in place: full width, so the content hugs the reading edge.</summary>
     protected void SetContent(FlowLayoutPanel column)
     {
         column.AutoSize = false;
@@ -84,16 +89,16 @@ abstract class WizardPage : UserControl
     public virtual void LeavePage() { }
     /// <summary>Validate / do the page's work before moving on. False = stay.</summary>
     public virtual Task<bool> NextAsync() => Task.FromResult(true);
-    /// <summary>Skip this page entirely right now (e.g. already signed in and nothing to show).</summary>
+    /// <summary>Skip this page entirely right now (e.g. already configured).</summary>
     public virtual bool Skip => false;
     /// <summary>Snapshot aid: put the page into an alternative visual state (no network).</summary>
     public virtual void Demo(int variant) { }
-    public virtual int DemoVariants => this is LoginPage or DrivePage ? 2 : 0;
+    public virtual int DemoVariants => 0;
 }
 
 /// <summary>
-/// The first-run / settings wizard: Telegram API details → sign-in (QR or phone, with 2FA) →
-/// create or connect the drive → drive letter and start with Windows. Hebrew, right-to-left.
+/// The first-run / add-drive / settings wizard: Telegram API details → sign-in (QR or phone, with
+/// 2FA) → create or connect the drive → drive letter and start with Windows. Hebrew (RTL) or English.
 /// </summary>
 sealed class SetupWizard : Form
 {
@@ -103,22 +108,23 @@ sealed class SetupWizard : Form
     readonly Label _subtitle = new() { Font = Theme.Body, ForeColor = Theme.Muted, AutoSize = true, MaximumSize = new Size(540, 0) };
     readonly Label _step = new() { Font = Theme.Small, ForeColor = Theme.Muted, AutoSize = true };
     readonly Panel _progress = new() { Height = 3, Dock = DockStyle.Bottom, BackColor = Theme.Border };
-    readonly Panel _progressFill = new() { Dock = DockStyle.Right, BackColor = Theme.Accent };
+    readonly Panel _progressFill = new() { Dock = L.Rtl ? DockStyle.Right : DockStyle.Left, BackColor = Theme.Accent };
     readonly Panel _host = new() { Dock = DockStyle.Fill, Padding = new Padding(32, 20, 32, 8), BackColor = Color.White };
-    readonly Button _next = Theme.Primary("הבא");
-    readonly Button _back = Theme.Secondary("חזרה");
-    readonly Button _cancel = Theme.Secondary("ביטול");
+    readonly Button _next = Theme.Primary(L.T("הבא", "Next"));
+    readonly Button _back = Theme.Secondary(L.T("חזרה", "Back"));
+    readonly Button _cancel = Theme.Secondary(L.T("ביטול", "Cancel"));
     int _index = -1;
-    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
-    public string? SnapshotDir { get; init; }
     bool _busy;
 
-    public SetupWizard(AppState state)
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public string? SnapshotDir { get; init; }
+
+    public SetupWizard(AppState state, bool isNew)
     {
-        _ctx = new SetupContext(state);
-        Text = "DriveGram – הגדרה";
-        RightToLeft = RightToLeft.Yes;
-        RightToLeftLayout = true;
+        _ctx = new SetupContext(state, isNew);
+        Text = isNew ? L.T("DriveGram – כונן חדש", "DriveGram – new drive") : $"DriveGram – {state.DisplayName}";
+        RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No;
+        RightToLeftLayout = L.Rtl;
         Font = Theme.Body;
         BackColor = Color.White;
         StartPosition = FormStartPosition.CenterScreen;
@@ -133,26 +139,30 @@ sealed class SetupWizard : Form
             : [new WelcomePage(_ctx), new DrivePage(_ctx), new FinishPage(_ctx)];
         foreach (var p in _pages) p.StateChanged += UpdateButtons;
 
-        // header
+        // header: logo on the reading-start side, step counter on the other
         var header = new Panel { Dock = DockStyle.Top, Height = 118, BackColor = Color.White, Padding = new Padding(32, 18, 32, 0) };
-        var logo = new PictureBox { Size = new Size(48, 48), SizeMode = PictureBoxSizeMode.Zoom, Dock = DockStyle.Right };
-        var png = Path.Combine(AppContext.BaseDirectory, "drivegram.ico");
-        if (File.Exists(png)) logo.Image = new Icon(png, 48, 48).ToBitmap();
+        var logo = new PictureBox { Size = new Size(48, 48), SizeMode = PictureBoxSizeMode.Zoom, Dock = L.Rtl ? DockStyle.Right : DockStyle.Left };
+        if (File.Exists(icon)) logo.Image = new Icon(icon, 48, 48).ToBitmap();
         var titles = Theme.Column();
         titles.Dock = DockStyle.Fill;
         titles.Padding = new Padding(14, 0, 14, 0);
         titles.Controls.AddRange([_title, _subtitle]);
-        _step.Dock = DockStyle.Left;
+        _step.Dock = L.Rtl ? DockStyle.Left : DockStyle.Right;
         _progress.Controls.Add(_progressFill);
         header.Controls.AddRange([titles, logo, _step, _progress]);
 
-        // footer
+        // footer: Next/Back on the reading-end side, Cancel on the other
         var footer = new Panel { Dock = DockStyle.Bottom, Height = 68, BackColor = Theme.Surface, Padding = new Padding(28, 14, 28, 14) };
-        var right = Theme.Row();
-        right.Dock = DockStyle.Right;
-        right.Controls.AddRange([_next, _back]);
-        _cancel.Dock = DockStyle.Left;
-        footer.Controls.AddRange([right, _cancel]);
+        // explicit left-to-right layout so the order never depends on automatic mirroring:
+        // English  [Cancel] ............ [Back][Next]     Hebrew  [Next][Back] ............ [Cancel]
+        var buttons = new FlowLayoutPanel
+        {
+            AutoSize = true, WrapContents = false, RightToLeft = RightToLeft.No, FlowDirection = FlowDirection.LeftToRight,
+            Dock = L.Rtl ? DockStyle.Left : DockStyle.Right,
+        };
+        buttons.Controls.AddRange(L.Rtl ? [_next, _back] : [_back, _next]);
+        _cancel.Dock = L.Rtl ? DockStyle.Right : DockStyle.Left;
+        footer.Controls.AddRange([buttons, _cancel]);
         footer.Paint += (_, e) => e.Graphics.DrawLine(new Pen(Theme.Border), 0, 0, footer.Width, 0);
 
         Controls.AddRange([_host, header, footer]);
@@ -166,7 +176,11 @@ sealed class SetupWizard : Form
             if (_index >= 0) _pages[_index].LeavePage();
         };
         FormClosed += (_, _) => _ctx.Dispose();
-        Shown += async (_, _) => { if (SnapshotDir is null) await GoAsync(0, +1); else { await SnapshotAsync(SnapshotDir); Close(); } };
+        Shown += async (_, _) =>
+        {
+            if (SnapshotDir is null) await GoAsync(0, +1);
+            else { await SnapshotAsync(SnapshotDir); Close(); }
+        };
     }
 
     async Task GoNextAsync()
@@ -176,7 +190,7 @@ sealed class SetupWizard : Form
         SetBusy(true);
         bool ok;
         try { ok = await page.NextAsync(); }
-        catch (Exception ex) { Ui.Error(TelegramErrors.Hebrew(ex)); ok = false; }
+        catch (Exception ex) { Ui.Error(TelegramErrors.Text(ex)); ok = false; }
         finally { SetBusy(false); }
         if (!ok) return;
         if (_index == _pages.Count - 1)
@@ -197,21 +211,20 @@ sealed class SetupWizard : Form
         _index = index;
         _host.Controls.Clear();
         _host.Controls.Add(page);
-        _title.Text = page.Title;
-        _subtitle.Text = page.Subtitle;
-        _step.Text = $"שלב {index + 1} מתוך {_pages.Count}";
+        _step.Text = L.T($"שלב {index + 1} מתוך {_pages.Count}", $"Step {index + 1} of {_pages.Count}");
         _progressFill.Width = (int)(ClientSize.Width * (index + 1.0) / _pages.Count);
         UpdateButtons();
-        // snapshots never touch Telegram (the real session may be in use by the running drive)
+        // snapshots never touch Telegram (the real session may be in use by a running drive)
         bool offline = SnapshotDir is not null && page is (LoginPage or DrivePage);
         try { if (!offline) await page.EnterAsync(); }
-        catch (Exception ex) { Ui.Error(TelegramErrors.Hebrew(ex)); }
+        catch (Exception ex) { Ui.Error(TelegramErrors.Text(ex)); }
+        UpdateButtons();
         if (direction != 0 && page.Skip && index + direction >= 0 && index + direction < _pages.Count)
             await GoAsync(index + direction, direction);
     }
 
-    /// <summary>Developer aid: render every page to PNG files (window kept off-screen).</summary>
-    public async Task SnapshotAsync(string dir)
+    /// <summary>Developer aid: render every page (and its demo states) to PNG files.</summary>
+    async Task SnapshotAsync(string dir)
     {
         Directory.CreateDirectory(dir);
         for (int i = 0; i < _pages.Count; i++)
@@ -228,6 +241,7 @@ sealed class SetupWizard : Form
                 Save(Path.Combine(dir, $"step{i + 1}-demo{v + 1}.png"));
             }
         }
+        _ctx.State.Delete(); // the snapshot used a throw-away new profile
     }
 
     void Save(string path)

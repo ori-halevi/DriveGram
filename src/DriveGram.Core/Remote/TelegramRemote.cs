@@ -30,6 +30,13 @@ public sealed class TelegramRemote : IRemote
     readonly Governor _up, _down;
     int _controlId;
 
+    /// <summary>The account this drive lives on.</summary>
+    public User? Account { get; private set; }
+
+    /// <summary>The session stopped being valid while the drive was in use (raised once).</summary>
+    public event Action? SignedOut;
+    int _signedOut;
+
     public TelegramChannels Channels => new(_data.id, _data.access_hash, _journal.id, _journal.access_hash);
 
     TelegramRemote(Client client, Channel data, Channel journal, int uploadParallel, int downloadParallel)
@@ -39,6 +46,17 @@ public sealed class TelegramRemote : IRemote
         _journal = journal;
         _up = new Governor("upload", uploadParallel);
         _down = new Governor("download", downloadParallel);
+        _up.SignedOut += OnSignedOut;
+        _down.SignedOut += OnSignedOut;
+    }
+
+    void OnSignedOut()
+    {
+        if (Interlocked.Exchange(ref _signedOut, 1) == 0)
+        {
+            Log.Error("Telegram session was revoked; the drive needs a new sign-in");
+            SignedOut?.Invoke();
+        }
     }
 
     /// <summary>
@@ -72,7 +90,7 @@ public sealed class TelegramRemote : IRemote
     public static async Task<TelegramRemote> OpenAsync(Client client, TelegramChannels? known, bool createIfMissing,
         int uploadParallel = 8, int downloadParallel = 8)
     {
-        await ResumeAsync(client);
+        var account = await ResumeAsync(client);
         var all = (await client.Messages_GetAllChats()).chats.Values.OfType<Channel>().ToList();
 
         Channel? Find(long? id, string title) =>
@@ -82,12 +100,14 @@ public sealed class TelegramRemote : IRemote
         var journal = Find(known?.JournalId, JournalTitle);
         if (data is null || journal is null)
         {
+            // A drive this PC knew is gone: never quietly put an empty one in its place.
+            if (known is not null) throw new DriveVanishedException();
             if (!createIfMissing) throw new NoDriveException();
             data ??= await CreateChannel(client, DataTitle, "DriveGram encrypted storage. Do not post or delete here.");
             journal ??= await CreateChannel(client, JournalTitle, "DriveGram journal. Do not post, pin or delete here.");
         }
         client.FloodRetryThreshold = 0; // flood waits surface to the governor from now on
-        return new TelegramRemote(client, data, journal, uploadParallel, downloadParallel);
+        return new TelegramRemote(client, data, journal, uploadParallel, downloadParallel) { Account = account };
     }
 
     static async Task<Channel> CreateChannel(Client client, string title, string about)

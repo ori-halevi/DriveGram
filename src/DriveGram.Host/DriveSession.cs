@@ -33,6 +33,13 @@ public sealed class DriveSession : IAsyncDisposable
 
     /// <summary>Raised when another process asked us to stop (`drivegram unmount`).</summary>
     public event Action? StopRequested;
+    /// <summary>The Telegram session was revoked while mounted: the drive needs a new sign-in.</summary>
+    public event Action? SignedOut;
+    /// <summary>Set when the configured letter was taken and another one was used ("T: → U:").</summary>
+    public string? LetterChanged { get; private set; }
+
+    static bool LetterInUse(char letter) =>
+        DriveInfo.GetDrives().Any(d => char.ToUpperInvariant(d.Name[0]) == char.ToUpperInvariant(letter));
 
     DriveSession(AppState state, string mountPoint, IRemote remote, IndexDb db, ContentEngine engine, SyncService sync,
         Semaphore instance, EventWaitHandle stopEvent)
@@ -53,6 +60,9 @@ public sealed class DriveSession : IAsyncDisposable
             catch (ObjectDisposedException) { }
         }) { IsBackground = true, Name = "drivegram-stop-listener" }.Start();
     }
+
+    /// <summary>Signalled by `drivegram quit` (and the installer): the tray app finishes uploads and exits.</summary>
+    public const string QuitEventName = @"Local\DriveGram-quit";
 
     public static string StopEventName(AppState state) => @"Local\DriveGram-stop-" + Path.GetFileName(state.Dir);
     static string InstanceName(AppState state) => @"Local\DriveGram-instance-" + Path.GetFileName(state.Dir);
@@ -79,7 +89,7 @@ public sealed class DriveSession : IAsyncDisposable
             "api_hash" => cfg.ApiHash,
             "device_model" => "DriveGram on " + Environment.MachineName,
             "system_version" => Environment.OSVersion.VersionString,
-            "app_version" => "DriveGram 0.4",
+            "app_version" => "DriveGram 0.5",
             "password" => askPassword is null ? throw new NotSignedInException() : askPassword(),
             "verification_code" or "first_name" or "last_name" or "email" or "email_verification_code" =>
                 throw new NotSignedInException(),
@@ -95,11 +105,16 @@ public sealed class DriveSession : IAsyncDisposable
         TelegramRemote remote;
         try { remote = await TelegramRemote.OpenAsync(client, state.Config.Channels, create); }
         catch { client.Dispose(); throw; }
-        if (state.Config.Channels != remote.Channels)
+        bool changed = state.Config.Channels != remote.Channels;
+        state.Config.Channels = remote.Channels;
+        if (remote.Account is { } u)
         {
-            state.Config.Channels = remote.Channels;
-            state.Save();
+            var name = string.IsNullOrEmpty(u.username) ? $"{u.first_name} {u.last_name}".Trim() : "@" + u.username;
+            changed |= state.Config.AccountId != u.id || state.Config.AccountName != name;
+            state.Config.AccountId = u.id;
+            state.Config.AccountName = name;
         }
+        if (changed) state.Save();
         return remote;
     }
 
@@ -107,10 +122,22 @@ public sealed class DriveSession : IAsyncDisposable
     public static async Task<DriveSession> StartAsync(AppState state,
         Func<ControlState, Task<Keys>> unlock, string? mountPoint, bool takeOver, CancellationToken ct = default)
     {
-        if (!WinFspInstalled()) throw new InvalidOperationException("WinFsp is not installed (https://winfsp.dev/rel/, version 2.1).");
+        if (!WinFspInstalled()) throw new InvalidOperationException(L.T("WinFsp לא מותקן. התקן אותו מ-https://winfsp.dev/rel (גרסה 2.1), או הפעל שוב את התקנת DriveGram.", "WinFsp is not installed. Install it from https://winfsp.dev/rel (version 2.1), or run the DriveGram installer again."));
         mountPoint ??= state.Config.MountPoint;
         mountPoint = mountPoint.TrimEnd('\\');
         if (!mountPoint.EndsWith(':')) mountPoint += ":";
+        string? letterNote = null;
+        if (LetterInUse(mountPoint[0]))
+        {
+            // e.g. a USB stick took the letter: use the next free one, and remember it
+            var taken = AppState.All().Where(a => a.Dir != state.Dir).Select(a => char.ToUpperInvariant(a.Config.MountPoint[0])).ToHashSet();
+            var free = "TUVWXYZSRQPONMLKJIHGFED".FirstOrDefault(c => !LetterInUse(c) && !taken.Contains(c));
+            if (free == default) throw new IOException("No free drive letter.");
+            letterNote = $"{mountPoint} → {free}:";
+            mountPoint = $"{free}:";
+            state.Config.MountPoint = mountPoint;
+            state.Save();
+        }
 
         var instance = new Semaphore(1, 1, InstanceName(state));
         if (!instance.WaitOne(0)) { instance.Dispose(); throw new AlreadyMountedException(); }
@@ -148,6 +175,8 @@ public sealed class DriveSession : IAsyncDisposable
                 throw new IOException($"Could not mount {mountPoint} (NTSTATUS 0x{status:X8}). Is the drive letter already in use?");
             }
             session._mounted = true;
+            session.LetterChanged = letterNote;
+            if (remote is TelegramRemote tr) tr.SignedOut += () => session.SignedOut?.Invoke();
             try { ShellIntegration.SetDriveIcon(mountPoint, cfg.VolumeLabel); }
             catch (Exception ex) { Log.Warn($"drive icon: {ex.Message}"); }
             Log.Info($"mounted at {mountPoint}{(sync.Writable ? "" : " (read-only)")}");
@@ -177,6 +206,7 @@ public sealed class DriveSession : IAsyncDisposable
             _mounted = false;
             Log.Info($"unmounted {MountPoint}");
         }
+        Engine.ReleaseAllHandles(); // lazily-closed files would otherwise never commit
         if (waitForUploads && Db.PendingNodes().Count > 0) await Engine.DrainAsync(progress, ct);
         try { await Sync.StopAsync(releaseLease: true, ct); }
         catch (Exception ex) { Log.Warn($"stop: could not reach the journal ({ex.Message}); changes stay queued"); }
@@ -230,7 +260,7 @@ public sealed class DriveSession : IAsyncDisposable
     /// <summary>Put an item back where it was (or in the root if that folder is gone); returns where it went.</summary>
     public string Restore(string id)
     {
-        if (!Writable) throw new InvalidOperationException("The drive is read-only on this PC right now.");
+        if (!Writable) throw new InvalidOperationException(L.T("הכונן במצב קריאה בלבד במחשב הזה כרגע.", "The drive is read-only on this PC right now."));
         var n = Db.Get(id) ?? throw new FileNotFoundException(id);
         var parent = n.Parent is not null && IsLive(n.Parent) ? n.Parent : IndexDb.RootId;
         Db.ApplyLocal(new RestoreOp(n.Id, parent, n.Name));
@@ -241,7 +271,7 @@ public sealed class DriveSession : IAsyncDisposable
 
     public void DeleteForever(string id)
     {
-        if (!Writable) throw new InvalidOperationException("The drive is read-only on this PC right now.");
+        if (!Writable) throw new InvalidOperationException(L.T("הכונן במצב קריאה בלבד במחשב הזה כרגע.", "The drive is read-only on this PC right now."));
         Db.ApplyLocal(new PurgeOp(id));
     }
 

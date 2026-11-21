@@ -1,3 +1,5 @@
+using DriveGram.Host;
+
 namespace DriveGram.Tray.Setup;
 
 /// <summary>Colors, fonts and small control factories shared by the setup wizard.</summary>
@@ -93,9 +95,10 @@ static class Theme
         Margin = new Padding(0),
     };
 
+    /// <summary>Items in reading order: right-to-left in Hebrew, left-to-right in English.</summary>
     public static FlowLayoutPanel Row() => new()
     {
-        FlowDirection = FlowDirection.RightToLeft,
+        FlowDirection = L.Rtl ? FlowDirection.RightToLeft : FlowDirection.LeftToRight,
         WrapContents = false,
         AutoSize = true,
         AutoSizeMode = AutoSizeMode.GrowAndShrink,

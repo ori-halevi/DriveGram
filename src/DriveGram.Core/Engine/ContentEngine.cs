@@ -150,6 +150,25 @@ public sealed class ContentEngine : IAsyncDisposable
         _commitQueue.Writer.TryWrite(id);
     });
 
+    /// <summary>
+    /// After unmount no handle can be open, but Windows' cache manager closes files lazily, so some
+    /// Close callbacks never arrive once the volume is gone. Forget all open-writer counts and
+    /// queue every pending file, or those files would wait for a close that will never come.
+    /// </summary>
+    public void ReleaseAllHandles()
+    {
+        foreach (var (id, st) in _nodes)
+        {
+            lock (st.Lock)
+            {
+                if (st.OpenWriters == 0) continue;
+                st.OpenWriters = 0;
+            }
+            Log.Debug($"released lingering writer handles of {id}");
+        }
+        foreach (var node in _db.PendingNodes()) _commitQueue.Writer.TryWrite(node);
+    }
+
     /// <summary>Drop uncommitted local changes (the file was deleted).</summary>
     public void Discard(string id)
     {

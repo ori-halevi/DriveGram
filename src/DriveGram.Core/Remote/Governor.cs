@@ -34,6 +34,9 @@ public sealed class Governor
 
     public int Limit { get { lock (_gate) return _limit; } }
 
+    /// <summary>Raised when Telegram says the session is no longer valid (revoked from the phone, etc.).</summary>
+    public event Action? SignedOut;
+
     async Task AcquireAsync(CancellationToken ct)
     {
         while (true)
@@ -76,6 +79,11 @@ public sealed class Governor
                 var result = await task;
                 OnOk();
                 return result;
+            }
+            catch (RpcException e) when (e.Code == 401)
+            {
+                SignedOut?.Invoke();
+                throw new NotSignedInException();
             }
             catch (RpcException e) when (e.Code == 420)
             {

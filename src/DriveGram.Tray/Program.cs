@@ -5,15 +5,15 @@ namespace DriveGram.Tray;
 
 static class Program
 {
+    /// <summary>Named mutex = "the tray app is running": single instance, and the installer waits on it.</summary>
+    public const string RunningMutex = "DriveGramTrayRunning";
+    /// <summary>A second launch signals this, so the running copy shows itself instead.</summary>
+    public const string ActivateEvent = @"Local\DriveGram-activate";
+
     [STAThread]
     static void Main(string[] args)
     {
-        string? folder = null;
-        int i = Array.IndexOf(args, "--folder");
-        if (i >= 0 && i + 1 < args.Length) folder = args[i + 1];
-
-        var state = new AppState(folder);
-        Log.Open(state.LogDir);
+        Log.Open(Path.Combine(AppState.Root, "logs"));
         Log.Verbose = args.Contains("--verbose");
         WTelegram.Helpers.Log = (level, msg) => { if (level >= 3) Log.Warn("[tg] " + msg); else Log.Debug("[tg] " + msg); };
 
@@ -23,16 +23,34 @@ static class Program
         Application.ThreadException += (_, e) => Log.Error("tray: unhandled", e.Exception);
         AppDomain.CurrentDomain.UnhandledException += (_, e) => Log.Error("tray: fatal", e.ExceptionObject as Exception);
         SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
+
         int snap = Array.IndexOf(args, "--snapshot-setup");
-        if (snap >= 0 && snap + 1 < args.Length)
+        if (snap >= 0 && snap + 1 < args.Length) // developer aid: render the wizard pages to images, offline
         {
-            Application.Run(new Setup.SetupWizard(state)
+            if (args.Contains("--en")) L.Override("en");
+            if (args.Contains("--he")) L.Override("he");
+            Application.Run(new Setup.SetupWizard(AppState.CreateNew(), isNew: true)
                 { SnapshotDir = args[snap + 1], StartPosition = FormStartPosition.Manual, Location = new Point(-4000, -4000), ShowInTaskbar = false });
             return;
         }
-        // Lets the installer see that the app is running (Inno Setup AppMutex) before it replaces files.
-        using var running = new Mutex(false, "DriveGramTrayRunning");
-        Application.Run(new TrayApp(state));
+
+        using var running = new Mutex(true, RunningMutex, out bool first);
+        if (!first)
+        {
+            // already running: bring that copy forward (it opens the drive, or setup if there is none)
+            if (EventWaitHandle.TryOpenExisting(ActivateEvent, out var ev)) ev.Set();
+            return;
+        }
+
+        // `--folder <path>`: developer/trial drive in a local folder, added to the list of drives
+        int fi = Array.IndexOf(args, "--folder");
+        if (fi >= 0 && fi + 1 < args.Length)
+        {
+            var trial = AppState.ForFolder(args[fi + 1]);
+            if (!trial.Exists) trial.Save();
+        }
+
+        Application.Run(new TrayApp());
         GC.KeepAlive(running);
     }
 }

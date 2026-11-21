@@ -1,40 +1,50 @@
 using System.Diagnostics;
 using System.Text.RegularExpressions;
-using DriveGram.Crypto;
 using DriveGram.Host;
 using DriveGram.Remote;
 using DriveGram.Sync;
 using QRCoder;
 using Keys = DriveGram.Crypto.Keys;
+using WrongPasswordException = DriveGram.Crypto.WrongPasswordException;
 
 namespace DriveGram.Tray.Setup;
 
 // ── 1. Welcome ──────────────────────────────────────────────────────────────
 sealed class WelcomePage : WizardPage
 {
-    public override string Title => "ברוך הבא ל־DriveGram";
-    public override string Subtitle => "כונן ב־This PC שהקבצים שלו נשמרים, מוצפנים, בחשבון הטלגרם שלך.";
-    public override string NextText => "בוא נתחיל";
+    public override string Title => Ctx.IsNew && AppState.All().Count > 0
+        ? L.T("כונן נוסף", "Another drive")
+        : L.T("ברוך הבא ל־DriveGram", "Welcome to DriveGram");
+    public override string Subtitle => L.T("כונן ב־This PC שהקבצים שלו נשמרים, מוצפנים, בחשבון הטלגרם שלך.",
+        "A drive in This PC whose files are stored, encrypted, in your Telegram account.");
+    public override string NextText => L.T("בוא נתחיל", "Let's start");
 
     public WelcomePage(SetupContext ctx) : base(ctx)
     {
         var col = Theme.Column();
-        col.Controls.Add(Theme.Label("ההגדרה לוקחת כ־2 דקות ונעשית פעם אחת במחשב הזה:", Theme.Heading));
+        bool another = ctx.IsNew && AppState.All().Count > 0;
+        if (another)
+            col.Controls.Add(Theme.Label(L.T(
+                "כל כונן נשמר בחשבון טלגרם משלו ומקבל אות משלו. כדאי להשתמש כאן בחשבון שעוד לא משמש כונן אחר.",
+                "Each drive lives in its own Telegram account and gets its own letter. Use an account that no other drive uses yet."), maxWidth: 640));
+        col.Controls.Add(Theme.Label(L.T("ההגדרה לוקחת כ־2 דקות:", "Setup takes about 2 minutes:"), Theme.Heading));
         string[] steps = ctx.UsesTelegram
-            ? ["פרטי API של טלגרם (מזהה חינמי שכל תוכנה צריכה)",
-               "התחברות לחשבון: סריקת קוד QR מהטלפון, או קוד בהודעה",
-               "סיסמה לכונן: מצפינה הכל, ורק אתה יודע אותה",
-               "אות לכונן והפעלה אוטומטית עם וינדוס"]
-            : ["סיסמה לכונן (מצב ניסיון: הקבצים נשמרים בתיקייה מקומית)", "אות לכונן והפעלה אוטומטית עם וינדוס"];
+            ? [L.T("פרטי API של טלגרם (מזהה חינמי שכל תוכנה צריכה)", "Telegram API details (a free ID every app needs)"),
+               L.T("התחברות לחשבון: סריקת קוד QR מהטלפון, או קוד בהודעה", "Sign in: scan a QR code with your phone, or use a code"),
+               L.T("סיסמה לכונן: מצפינה הכל, ורק אתה יודע אותה", "A drive password: it encrypts everything, only you know it"),
+               L.T("אות לכונן והפעלה אוטומטית עם וינדוס", "A drive letter, and starting with Windows")]
+            : [L.T("סיסמה לכונן (מצב ניסיון: הקבצים נשמרים בתיקייה מקומית)", "A drive password (trial mode: files are kept in a local folder)"),
+               L.T("אות לכונן והפעלה אוטומטית עם וינדוס", "A drive letter, and starting with Windows")];
         for (int i = 0; i < steps.Length; i++)
             col.Controls.Add(Theme.Label($"  {i + 1}.  {steps[i]}"));
 
         if (ctx.UsesTelegram)
         {
             var tip = Theme.Card(Theme.Surface, Theme.Border);
-            tip.Controls.Add(Theme.Label(
+            tip.Controls.Add(Theme.Label(L.T(
                 "המלצה: השתמש בחשבון טלגרם ייעודי ל־DriveGram ולא בחשבון האישי. טלגרם יכול להגביל או לחסום חשבונות שמשמשים כאחסון כבד.",
-                Theme.Small, Theme.Muted, 600));
+                "Tip: use a dedicated Telegram account for DriveGram, not your personal one. Telegram may limit or ban accounts used as heavy storage."),
+                Theme.Small, Theme.Muted, 620));
             col.Controls.Add(tip);
         }
         SetContent(col);
@@ -49,8 +59,9 @@ sealed class ApiPage : WizardPage
     readonly Label _status = Theme.Label("", Theme.Small);
     bool _entered, _autoSkip;
 
-    public override string Title => "פרטי API של טלגרם";
-    public override string Subtitle => "טלגרם דורש מכל תוכנה מזהה משלה. מקבלים אותו בחינם, פעם אחת.";
+    public override string Title => L.T("פרטי API של טלגרם", "Telegram API details");
+    public override string Subtitle => L.T("טלגרם דורש מכל תוכנה מזהה משלה. מקבלים אותו בחינם, פעם אחת.",
+        "Telegram requires every app to have its own ID. It is free, and needed once.");
     public override bool Skip => _autoSkip;
 
     public ApiPage(SetupContext ctx) : base(ctx)
@@ -59,17 +70,18 @@ sealed class ApiPage : WizardPage
         var link = new LinkLabel { Text = "my.telegram.org", AutoSize = true, Font = Theme.Body, LinkColor = Theme.Accent };
         link.LinkClicked += (_, _) => Process.Start(new ProcessStartInfo("https://my.telegram.org/apps") { UseShellExecute = true });
         var row = Theme.Row();
-        row.Controls.AddRange([Theme.Label("1. היכנס עם מספר הטלפון של החשבון ל־"), link]);
+        row.Controls.AddRange([Theme.Label(L.T("1. היכנס עם מספר הטלפון של החשבון ל־", "1. Sign in with the account's phone number at ")), link]);
         col.Controls.Add(row);
-        col.Controls.Add(Theme.Label("2. בחר API development tools, ומלא טופס קצר. השם לא משנה, למשל DriveGram."));
-        col.Controls.Add(Theme.Label("3. העתק לכאן את api_id ואת api_hash:"));
+        col.Controls.Add(Theme.Label(L.T("2. בחר API development tools, ומלא טופס קצר. השם לא משנה, למשל DriveGram.",
+            "2. Choose API development tools and fill in the short form (any name, e.g. DriveGram).")));
+        col.Controls.Add(Theme.Label(L.T("3. העתק לכאן את api_id ואת api_hash:", "3. Copy api_id and api_hash here:")));
 
         col.Controls.Add(Theme.Label("api_id", Theme.Small, Theme.Muted));
         col.Controls.Add(_id);
         col.Controls.Add(Theme.Label("api_hash", Theme.Small, Theme.Muted));
         col.Controls.Add(_hash);
 
-        var import = Theme.Secondary("ייבוא מקובץ env…");
+        var import = Theme.Secondary(L.T("ייבוא מקובץ env…", "Import from an .env file…"));
         import.Click += (_, _) => ImportEnv();
         col.Controls.Add(import);
         col.Controls.Add(_status);
@@ -87,14 +99,15 @@ sealed class ApiPage : WizardPage
     {
         bool ok = Valid;
         _status.ForeColor = ok ? Theme.Success : Theme.Muted;
-        _status.Text = ok ? "✓ הפרטים נראים תקינים" :
-            (_id.Text.Length + _hash.Text.Length == 0 ? "" : "api_id הוא מספר, ו־api_hash הוא 32 תווים (0-9, a-f).");
+        _status.Text = ok ? L.T("✓ הפרטים נראים תקינים", "✓ These look valid") :
+            (_id.Text.Length + _hash.Text.Length == 0 ? "" :
+                L.T("api_id הוא מספר, ו־api_hash הוא 32 תווים (0-9, a-f).", "api_id is a number; api_hash is 32 characters (0-9, a-f)."));
         Changed(ok);
     }
 
     void ImportEnv()
     {
-        using var dlg = new OpenFileDialog { Title = "בחר קובץ .env", Filter = "env|*.env;.env|כל הקבצים|*.*" };
+        using var dlg = new OpenFileDialog { Title = L.T("בחר קובץ .env", "Choose an .env file"), Filter = "env|*.env;.env|*.*|*.*" };
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
         foreach (var line in File.ReadAllLines(dlg.FileName))
         {
@@ -103,13 +116,17 @@ sealed class ApiPage : WizardPage
             if (kv[0] == "API_ID") _id.Text = kv[1].Trim('"');
             if (kv[0] == "API_HASH") _hash.Text = kv[1].Trim('"');
         }
-        if (!Valid) { _status.ForeColor = Theme.Error; _status.Text = "לא נמצאו API_ID ו־API_HASH תקינים בקובץ."; }
+        if (!Valid)
+        {
+            _status.ForeColor = Theme.Error;
+            _status.Text = L.T("לא נמצאו API_ID ו־API_HASH תקינים בקובץ.", "No valid API_ID and API_HASH in that file.");
+        }
     }
 
     public override Task EnterAsync()
     {
         UpdateState();
-        _autoSkip = !_entered && Valid; // already configured: go straight to sign-in (Back still reaches this page)
+        _autoSkip = !_entered && Valid; // already configured: straight to sign-in (Back still reaches this page)
         _entered = true;
         return Task.CompletedTask;
     }
@@ -123,7 +140,6 @@ sealed class ApiPage : WizardPage
         {
             cfg.ApiId = id;
             cfg.ApiHash = hash;
-            Ctx.State.Save();
             Ctx.ResetClient(signOut: false);
         }
         return Task.FromResult(true);
@@ -136,25 +152,25 @@ sealed class LoginPage : WizardPage
     readonly Panel _account = Theme.Card(Color.FromArgb(0xEC, 0xF7, 0xEE), Color.FromArgb(0xB7, 0xDF, 0xC0));
     readonly Label _accountText = Theme.Label("", Theme.Body, Theme.Text, 600);
     readonly FlowLayoutPanel _signIn = Theme.Column();
-    readonly RadioButton _byQr = new() { Text = "סריקת קוד QR (מומלץ)", AutoSize = true, Checked = true, Appearance = Appearance.Button, FlatStyle = FlatStyle.Flat, Padding = new Padding(10, 4, 10, 4) };
-    readonly RadioButton _byPhone = new() { Text = "מספר טלפון וקוד", AutoSize = true, Appearance = Appearance.Button, FlatStyle = FlatStyle.Flat, Padding = new Padding(10, 4, 10, 4) };
+    readonly RadioButton _byQr = MethodButton(L.T("סריקת קוד QR (מומלץ)", "Scan a QR code (recommended)"), true);
+    readonly RadioButton _byPhone = MethodButton(L.T("מספר טלפון וקוד", "Phone number and code"), false);
 
     readonly FlowLayoutPanel _qr = Theme.Row();
-    readonly PictureBox _qrImage = new() { Size = new Size(230, 230), SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.White, Margin = new Padding(0, 0, 0, 0) };
-    readonly Label _qrState = Theme.Label("מכין קוד…", Theme.Small, Theme.Muted, 360);
-    readonly Button _qrRetry = Theme.Secondary("נסה שוב");
+    readonly PictureBox _qrImage = new() { Size = new Size(230, 230), SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.White };
+    readonly Label _qrState = Theme.Label(L.T("מכין קוד…", "Preparing a code…"), Theme.Small, Theme.Muted, 360);
+    readonly Button _qrRetry = Theme.Secondary(L.T("נסה שוב", "Try again"));
 
     readonly FlowLayoutPanel _phone = Theme.Column();
     readonly TextBox _phoneBox = Theme.Input(240);
-    readonly Button _sendCode = Theme.Primary("שלח קוד");
+    readonly Button _sendCode = Theme.Primary(L.T("שלח קוד", "Send code"));
     readonly FlowLayoutPanel _codeRow = Theme.Row();
     readonly TextBox _codeBox = Theme.Input(140);
-    readonly Button _verify = Theme.Primary("אמת");
+    readonly Button _verify = Theme.Primary(L.T("אמת", "Verify"));
 
     readonly FlowLayoutPanel _twoFa = Theme.Column();
     readonly Label _twoFaHint = Theme.Label("", Theme.Small, Theme.Muted);
     readonly TextBox _twoFaBox = Theme.Input(260, password: true);
-    readonly Button _twoFaOk = Theme.Primary("אישור");
+    readonly Button _twoFaOk = Theme.Primary(L.T("אישור", "OK"));
 
     readonly Label _error = Theme.Label("", Theme.Small, Theme.Error, 640);
     readonly System.Windows.Forms.Timer _tick = new() { Interval = 1000 };
@@ -164,40 +180,43 @@ sealed class LoginPage : WizardPage
     TaskCompletionSource<string?>? _pwWait;
     int _pwAsks;
 
-    public override string Title => "התחברות לטלגרם";
-    public override string Subtitle => "החשבון שבו יישמרו הקבצים. החיבור נשמר מוצפן, רק למשתמש שלך במחשב הזה.";
+    public override string Title => L.T("התחברות לטלגרם", "Sign in to Telegram");
+    public override string Subtitle => L.T("החשבון שבו יישמרו הקבצים. החיבור נשמר מוצפן, רק למשתמש שלך במחשב הזה.",
+        "The account that will hold the files. The sign-in is stored encrypted, for your Windows user only.");
+    public override int DemoVariants => 2;
+
+    static RadioButton MethodButton(string text, bool on)
+    {
+        var rb = new RadioButton { Text = text, AutoSize = true, Checked = on, Appearance = Appearance.Button, FlatStyle = FlatStyle.Flat, Padding = new Padding(10, 4, 10, 4) };
+        rb.FlatAppearance.CheckedBackColor = Color.FromArgb(0xE3, 0xF2, 0xFB);
+        rb.FlatAppearance.BorderColor = Theme.Border;
+        rb.Margin = new Padding(0);
+        return rb;
+    }
 
     public LoginPage(SetupContext ctx) : base(ctx)
     {
         var col = Theme.Column();
 
-        // signed-in card
-        var switchAcc = new LinkLabel { Text = "התחבר עם חשבון אחר", AutoSize = true, LinkColor = Theme.Accent, Font = Theme.Small };
+        var switchAcc = new LinkLabel { Text = L.T("התחבר עם חשבון אחר", "Use a different account"), AutoSize = true, LinkColor = Theme.Accent, Font = Theme.Small };
         switchAcc.LinkClicked += async (_, _) => await SwitchAccountAsync();
         var accCol = Theme.Column();
         accCol.Controls.AddRange([_accountText, switchAcc]);
         _account.Controls.Add(accCol);
         _account.Visible = false;
 
-        // method switch
         var methods = Theme.Row();
         foreach (var rb in new[] { _byQr, _byPhone })
-        {
-            rb.FlatAppearance.CheckedBackColor = Color.FromArgb(0xE3, 0xF2, 0xFB);
-            rb.FlatAppearance.BorderColor = Theme.Border;
-            rb.Margin = new Padding(0, 0, 0, 0);
             rb.CheckedChanged += async (_, _) => { if (rb.Checked) await ModeChangedAsync(); };
-        }
         methods.Controls.AddRange([_byQr, _byPhone]);
         methods.Margin = new Padding(0, 0, 0, 14);
 
-        // QR
         var qrSide = Theme.Column();
-        qrSide.Padding = new Padding(18, 0, 0, 0);
-        qrSide.Controls.Add(Theme.Label("בטלפון:", Theme.Heading));
-        qrSide.Controls.Add(Theme.Label("1. פתח את טלגרם", maxWidth: 360));
-        qrSide.Controls.Add(Theme.Label("2. הגדרות ← מכשירים ← קישור מכשיר שולחני", maxWidth: 360));
-        qrSide.Controls.Add(Theme.Label("3. כוון את המצלמה לקוד", maxWidth: 360));
+        qrSide.Padding = new Padding(18, 0, 18, 0);
+        qrSide.Controls.Add(Theme.Label(L.T("בטלפון:", "On your phone:"), Theme.Heading));
+        qrSide.Controls.Add(Theme.Label(L.T("1. פתח את טלגרם", "1. Open Telegram"), maxWidth: 360));
+        qrSide.Controls.Add(Theme.Label(L.T("2. הגדרות ← מכשירים ← קישור מכשיר שולחני", "2. Settings → Devices → Link Desktop Device"), maxWidth: 360));
+        qrSide.Controls.Add(Theme.Label(L.T("3. כוון את המצלמה לקוד", "3. Point the camera at this code"), maxWidth: 360));
         qrSide.Controls.Add(_qrState);
         _qrRetry.Visible = false;
         _qrRetry.Click += (_, _) => StartQr();
@@ -207,27 +226,26 @@ sealed class LoginPage : WizardPage
         frame.Controls.Add(_qrImage);
         _qr.Controls.AddRange([frame, qrSide]);
 
-        // phone
         _phoneBox.PlaceholderText = "+972501234567";
         var phoneRow = Theme.Row();
         phoneRow.Controls.AddRange([_phoneBox, _sendCode]);
         _codeBox.PlaceholderText = "12345";
         _codeRow.Controls.AddRange([_codeBox, _verify]);
         _codeRow.Visible = false;
-        _phone.Controls.Add(Theme.Label("מספר הטלפון של החשבון, בפורמט בינלאומי:", Theme.Small, Theme.Muted));
+        _phone.Controls.Add(Theme.Label(L.T("מספר הטלפון של החשבון, בפורמט בינלאומי:", "The account's phone number, in international format:"), Theme.Small, Theme.Muted));
         _phone.Controls.Add(phoneRow);
-        _phone.Controls.Add(Theme.Label(
+        _phone.Controls.Add(Theme.Label(L.T(
             "הקוד נשלח לאפליקציית טלגרם עצמה, לצ'אט בשם \"Telegram\" עם ✓ כחול (בטלפון או במחשב). בדרך כלל הוא לא מגיע ב־SMS. כל שליחה חדשה מבטלת את הקוד הקודם.",
+            "The code arrives inside the Telegram app, in the chat named \"Telegram\" with a blue ✓ (on your phone or computer), usually not by SMS. Each new code cancels the previous one."),
             Theme.Small, Theme.Muted, 620));
         _phone.Controls.Add(_codeRow);
         _phone.Visible = false;
         _sendCode.Click += async (_, _) => await SendCodeAsync();
         _verify.Click += async (_, _) => await VerifyCodeAsync();
 
-        // two-step verification (used by both methods)
         var twoFaRow = Theme.Row();
         twoFaRow.Controls.AddRange([_twoFaBox, _twoFaOk]);
-        _twoFa.Controls.Add(Theme.Label("לחשבון יש אימות דו־שלבי. הקלד את הסיסמה שלו:", Theme.Heading));
+        _twoFa.Controls.Add(Theme.Label(L.T("לחשבון יש אימות דו־שלבי. הקלד את הסיסמה שלו:", "This account has two-step verification. Enter its password:"), Theme.Heading));
         _twoFa.Controls.AddRange([_twoFaHint, twoFaRow]);
         _twoFa.Visible = false;
         _twoFaOk.Click += async (_, _) => await SubmitTwoFaAsync();
@@ -240,7 +258,7 @@ sealed class LoginPage : WizardPage
         {
             var left = (int)Math.Ceiling((_qrExpires - DateTime.UtcNow).TotalSeconds);
             if (_qrTask is { IsCompleted: false } && _qrImage.Image is not null && left > 0)
-                _qrState.Text = $"ממתין לסריקה… הקוד מתחדש בעוד {left} שניות.";
+                _qrState.Text = L.T($"ממתין לסריקה… הקוד מתחדש בעוד {left} שניות.", $"Waiting for the scan… a new code in {left} seconds.");
         };
         Ctx.AskPassword = AskPasswordFromQr;
         Changed(false);
@@ -271,7 +289,7 @@ sealed class LoginPage : WizardPage
         _pwWait?.TrySetResult(null);
     }
 
-    public override Task<bool> NextAsync() => Task.FromResult(Ctx.User is not null);
+    public override Task<bool> NextAsync() => Task.FromResult(Ctx.User is not null && CanGoNext);
 
     void ShowSignedIn(TL.User user)
     {
@@ -284,14 +302,25 @@ sealed class LoginPage : WizardPage
         var name = $"{user.first_name} {user.last_name}".Trim();
         var handle = string.IsNullOrEmpty(user.username) ? "" : $"  ·  @{user.username}";
         var phone = string.IsNullOrEmpty(user.phone) ? "" : $"  ·  ‎+{user.phone}‎";
-        _accountText.Text = $"✓  מחובר כ־{name}{handle}{phone}";
+        _accountText.Text = L.T($"✓  מחובר כ־{name}{handle}{phone}", $"✓  Signed in as {name}{handle}{phone}");
         _account.Visible = true;
+
+        // one drive per account: this account must not already hold another drive on this PC
+        var other = AppState.All().FirstOrDefault(a => a.Dir != Ctx.State.Dir && a.Config.AccountId == user.id);
+        if (other is not null)
+        {
+            _error.Text = L.T($"החשבון הזה כבר משמש את הכונן {other.DisplayName} במחשב הזה. התחבר עם חשבון אחר.",
+                              $"This account already holds the drive {other.DisplayName} on this PC. Use a different account.");
+            Changed(false);
+            return;
+        }
+        Ctx.State.Config.AccountId = user.id;
+        Ctx.State.Config.AccountName = string.IsNullOrEmpty(user.username) ? name : "@" + user.username;
         Changed(true);
     }
 
-    void ShowError(Exception ex) => _error.Text = TelegramErrors.Hebrew(ex);
+    void ShowError(Exception ex) => _error.Text = TelegramErrors.Text(ex);
 
-    /// <summary>Snapshot aid: show the sign-in screens without touching Telegram.</summary>
     public override void Demo(int variant)
     {
         _account.Visible = false;
@@ -301,7 +330,7 @@ sealed class LoginPage : WizardPage
             _qr.Visible = true;
             _phone.Visible = false;
             ShowQr("tg://login?token=AQTllwFrRdZaXmvADMPwhnSW5XRrCpa0PEE_rdEpvHIrMA-DEMO");
-            _qrState.Text = "ממתין לסריקה… הקוד מתחדש בעוד 23 שניות.";
+            _qrState.Text = L.T("ממתין לסריקה… הקוד מתחדש בעוד 23 שניות.", "Waiting for the scan… a new code in 23 seconds.");
         }
         else
         {
@@ -312,7 +341,7 @@ sealed class LoginPage : WizardPage
             _phoneBox.Text = "+972501234567";
             _codeRow.Visible = true;
             _codeBox.Text = "12345";
-            _error.Text = "הקוד שגוי. ודא שאתה מקליד את הקוד האחרון שקיבלת (כל שליחה חדשה מבטלת את הקודם).";
+            ShowError(new TL.RpcException(400, "PHONE_CODE_INVALID"));
         }
     }
 
@@ -343,12 +372,11 @@ sealed class LoginPage : WizardPage
         if (_qrTask is { IsCompleted: false }) return;
         _qrRetry.Visible = false;
         _error.Text = "";
-        _qrState.Text = "מכין קוד…";
+        _qrState.Text = L.T("מכין קוד…", "Preparing a code…");
         _qrCts = new CancellationTokenSource();
-        var ct = _qrCts.Token;
         _pwAsks = 0;
         _tick.Start();
-        _qrTask = RunQrAsync(ct, retryAfterRestart: true);
+        _qrTask = RunQrAsync(_qrCts.Token, retryAfterRestart: true);
     }
 
     async Task RunQrAsync(CancellationToken ct, bool retryAfterRestart)
@@ -371,7 +399,7 @@ sealed class LoginPage : WizardPage
             if (ct.IsCancellationRequested) return;
             Log.Warn($"QR sign-in: {ex.Message}");
             ShowError(ex);
-            _qrState.Text = "הקוד לא פעיל.";
+            _qrState.Text = L.T("הקוד לא פעיל.", "The code is not active.");
             _qrImage.Image = null;
             _qrRetry.Visible = true;
         }
@@ -387,7 +415,7 @@ sealed class LoginPage : WizardPage
         _qrImage.Image = new Bitmap(img);
         old?.Dispose();
         _qrExpires = DateTime.UtcNow.AddSeconds(30);
-        _qrState.Text = "ממתין לסריקה… הקוד מתחדש בעוד 30 שניות.";
+        _qrState.Text = L.T("ממתין לסריקה… הקוד מתחדש בעוד 30 שניות.", "Waiting for the scan… a new code in 30 seconds.");
     }
 
     /// <summary>The library asks for the 2FA password on a worker thread during QR sign-in.</summary>
@@ -398,7 +426,7 @@ sealed class LoginPage : WizardPage
         {
             _pwWait = wait;
             _qr.Visible = false;
-            await ShowTwoFaAsync(_pwAsks++ > 0 ? "הסיסמה שגויה, נסה שוב." : null);
+            await ShowTwoFaAsync(_pwAsks++ > 0 ? L.T("הסיסמה שגויה, נסה שוב.", "Wrong password, try again.") : null);
         });
         var pw = wait.Task.GetAwaiter().GetResult();
         return pw ?? throw new OperationCanceledException();
@@ -412,7 +440,7 @@ sealed class LoginPage : WizardPage
         try
         {
             var info = await TL.SchemaExtensions.Account_GetPassword(Ctx.GetClient());
-            _twoFaHint.Text = string.IsNullOrEmpty(info.hint) ? "" : $"רמז: {info.hint}";
+            _twoFaHint.Text = string.IsNullOrEmpty(info.hint) ? "" : L.T($"רמז: {info.hint}", $"Hint: {info.hint}");
         }
         catch { _twoFaHint.Text = ""; }
         _twoFaBox.Focus();
@@ -422,12 +450,12 @@ sealed class LoginPage : WizardPage
     {
         var pw = _twoFaBox.Text;
         if (pw.Length == 0) return;
-        if (_pwWait is { } wait) // QR flow is waiting on us
+        if (_pwWait is { } wait) // the QR flow is waiting on us
         {
             _pwWait = null;
             _twoFa.Visible = false;
             _qr.Visible = true;
-            _qrState.Text = "מאמת…";
+            _qrState.Text = L.T("מאמת…", "Verifying…");
             wait.TrySetResult(pw);
             return;
         }
@@ -437,7 +465,11 @@ sealed class LoginPage : WizardPage
     async Task SendCodeAsync()
     {
         var phone = new string(_phoneBox.Text.Where(c => char.IsDigit(c) || c == '+').ToArray());
-        if (phone.Length < 8) { _error.Text = "הקלד מספר טלפון מלא, למשל ‎+972501234567‎."; return; }
+        if (phone.Length < 8)
+        {
+            _error.Text = L.T("הקלד מספר טלפון מלא, למשל ‎+972501234567‎.", "Enter the full phone number, e.g. +972501234567.");
+            return;
+        }
         if (!phone.StartsWith('+') && phone.StartsWith('0')) phone = "+972" + phone[1..]; // local Israeli format
         await RunLoginStepAsync(_sendCode, phone);
     }
@@ -466,13 +498,14 @@ sealed class LoginPage : WizardPage
                     break;
                 case "password":
                     _codeRow.Visible = false;
-                    await ShowTwoFaAsync(_twoFa.Visible ? "הסיסמה שגויה, נסה שוב." : null);
+                    await ShowTwoFaAsync(_twoFa.Visible ? L.T("הסיסמה שגויה, נסה שוב.", "Wrong password, try again.") : null);
                     break;
                 case "name":
-                    _error.Text = "אין חשבון טלגרם למספר הזה. צור חשבון באפליקציית טלגרם ונסה שוב.";
+                    _error.Text = L.T("אין חשבון טלגרם למספר הזה. צור חשבון באפליקציית טלגרם ונסה שוב.",
+                                      "There is no Telegram account for this number. Create one in the Telegram app and try again.");
                     break;
                 default:
-                    _error.Text = $"טלגרם ביקש '{next}', שעדיין לא נתמך כאן.";
+                    _error.Text = L.T($"טלגרם ביקש '{next}', שעדיין לא נתמך כאן.", $"Telegram asked for '{next}', which is not supported here yet.");
                     break;
             }
         }
@@ -486,12 +519,12 @@ sealed class LoginPage : WizardPage
 
     async Task SwitchAccountAsync()
     {
-        if (MessageBox.Show("להתנתק מהחשבון הנוכחי ולהתחבר עם חשבון אחר?", "DriveGram", MessageBoxButtons.YesNo,
-                MessageBoxIcon.Question, MessageBoxDefaultButton.Button2, MessageBoxOptions.RightAlign | MessageBoxOptions.RtlReading)
-            != DialogResult.Yes) return;
+        if (Ui.Ask(L.T("להתנתק מהחשבון הנוכחי ולהתחבר עם חשבון אחר?", "Sign out of this account and use a different one?"),
+                def: MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
         await Task.Run(() => Ctx.ResetClient(signOut: true));
         Ctx.State.Config.Channels = null; // the drive lives on the other account
-        Ctx.State.Save();
+        Ctx.State.Config.AccountId = 0;
+        Ctx.State.Config.AccountName = "";
         Changed(false);
         await EnterAsync();
     }
@@ -502,62 +535,77 @@ sealed class DrivePage : WizardPage
 {
     enum Mode { Checking, Connected, Connect, Create }
 
-    readonly Label _checking = Theme.Label("בודק אם כבר יש כונן DriveGram בחשבון…", Theme.Body, Theme.Muted);
+    readonly Label _checking = Theme.Label(L.T("בודק אם כבר יש כונן DriveGram בחשבון…", "Checking whether the account already has a DriveGram drive…"), Theme.Body, Theme.Muted);
     readonly FlowLayoutPanel _connected = Theme.Column();
     readonly FlowLayoutPanel _form = Theme.Column();
+    readonly Panel _vanished = Theme.Card(Color.FromArgb(0xFD, 0xEC, 0xEA), Color.FromArgb(0xE5, 0x9A, 0x92));
+    readonly CheckBox _vanishedOk = new() { AutoSize = true, Text = L.T("הבנתי. צור כונן חדש וריק בחשבון הזה.", "I understand. Create a new, empty drive on this account.") };
     readonly Label _intro = Theme.Label("", Theme.Body, Theme.Text, 640);
-    readonly TextBox _pw = Theme.Input(320, password: true);
-    readonly Label _confirmLabel = Theme.Label("הקלד שוב:", Theme.Small, Theme.Muted);
-    readonly Label _pwLabel;
-    readonly FlowLayoutPanel _strength;
-    readonly TextBox _pw2 = Theme.Input(320, password: true);
-    readonly CheckBox _show = new() { Text = "הצג סיסמה", AutoSize = true, Font = Theme.Small };
-    readonly Panel _meter = new() { Size = new Size(290, 6), BackColor = Theme.Border, Margin = new Padding(0, 0, 0, 4) };
-    readonly Panel _meterFill = new() { Dock = DockStyle.Left, Width = 0 };
+    readonly TextBox _pw = Theme.Input(290, password: true);
+    readonly Label _pwLabel = Theme.Label(L.T("סיסמה:", "Password:"), Theme.Small, Theme.Muted);
+    readonly Label _confirmLabel = Theme.Label(L.T("הקלד שוב:", "Repeat it:"), Theme.Small, Theme.Muted);
+    readonly TextBox _pw2 = Theme.Input(290, password: true);
+    readonly CheckBox _show = new() { Text = L.T("הצג סיסמה", "Show password"), AutoSize = true, Font = Theme.Small };
+    readonly FlowLayoutPanel _strength = Theme.Row();
+    readonly Panel _meter = new() { Size = new Size(290, 6), BackColor = Theme.Border, Margin = new Padding(0, 8, 0, 0) };
+    readonly Panel _meterFill = new() { Dock = L.Rtl ? DockStyle.Right : DockStyle.Left, Width = 0 };
     readonly Label _meterText = Theme.Label("", Theme.Small, Theme.Muted);
     readonly Panel _warning = Theme.Card(Theme.WarnBack, Theme.WarnBorder);
-    readonly CheckBox _saved = new() { Text = "שמרתי את הסיסמה במקום בטוח", AutoSize = true };
-    readonly CheckBox _remember = new() { Text = "לזכור את הסיסמה במחשב הזה (נדרש כדי שהכונן יעלה לבד עם וינדוס)", AutoSize = true, Checked = true };
+    readonly CheckBox _saved = new() { Text = L.T("שמרתי את הסיסמה במקום בטוח", "I saved the password somewhere safe"), AutoSize = true };
+    readonly CheckBox _remember = new()
+    {
+        Text = L.T("לזכור את הסיסמה במחשב הזה (נדרש כדי שהכונן יעלה לבד עם וינדוס)", "Remember the password on this PC (needed for the drive to start with Windows)"),
+        AutoSize = true, Checked = true,
+    };
     readonly Label _error = Theme.Label("", Theme.Small, Theme.Error);
     Mode _mode = Mode.Checking;
+    bool _wasVanished;
     ControlState? _ctrl;
     IRemote? _remote;
 
-    public override string Title => "הכונן";
+    public override string Title => L.T("הכונן", "The drive");
     public override string Subtitle => _mode switch
     {
-        Mode.Create => "יצירת כונן חדש וסיסמה שמצפינה אותו.",
-        Mode.Connect => "בחשבון כבר יש כונן. חבר אליו את המחשב הזה.",
-        Mode.Connected => "הכל מוכן כאן.",
-        _ => "רגע אחד…",
+        Mode.Create when _wasVanished => L.T("הכונן הקודם נמחק מטלגרם.", "The previous drive was deleted from Telegram."),
+        Mode.Create => L.T("יצירת כונן חדש וסיסמה שמצפינה אותו.", "Create a new drive, and the password that encrypts it."),
+        Mode.Connect => L.T("בחשבון כבר יש כונן. חבר אליו את המחשב הזה.", "This account already has a drive. Connect this PC to it."),
+        Mode.Connected => L.T("הכל מוכן כאן.", "All set here."),
+        _ => L.T("רגע אחד…", "One moment…"),
     };
+    public override int DemoVariants => 3;
 
     public DrivePage(SetupContext ctx) : base(ctx)
     {
         var col = Theme.Column();
-        _connected.Controls.Add(Theme.Label("✓  המחשב הזה כבר מחובר לכונן, והסיסמה שמורה בו.", Theme.Heading, Theme.Success));
-        _connected.Controls.Add(Theme.Label("אפשר להמשיך לשלב האחרון.", Theme.Body, Theme.Muted));
+        _connected.Controls.Add(Theme.Label(L.T("✓  המחשב הזה כבר מחובר לכונן, והסיסמה שמורה בו.", "✓  This PC is already connected to the drive, and its password is remembered."), Theme.Heading, Theme.Success));
+        _connected.Controls.Add(Theme.Label(L.T("אפשר להמשיך לשלב האחרון.", "Continue to the last step."), Theme.Body, Theme.Muted));
         _connected.Visible = false;
 
+        var vcol = Theme.Column();
+        vcol.Controls.Add(Theme.Label(L.T(
+            "⚠  הערוצים של הכונן שהיה בחשבון הזה נמחקו מטלגרם, ואיתם הקבצים שהיו בו. אי אפשר לשחזר אותם מכאן.",
+            "⚠  The channels of the drive that was on this account were deleted from Telegram, together with its files. They cannot be recovered from here."),
+            Theme.Small, Theme.Text, 620));
+        vcol.Controls.Add(_vanishedOk);
+        _vanished.Controls.Add(vcol);
+        _vanished.Visible = false;
+
         _meter.Controls.Add(_meterFill);
-        _pw.Width = _pw2.Width = 290;
-        _pwLabel = Theme.Label("סיסמה:", Theme.Small, Theme.Muted);
         var grid = new TableLayoutPanel { ColumnCount = 2, RowCount = 2, AutoSize = true, Margin = new Padding(0) };
         grid.Controls.Add(_pwLabel, 0, 0);
         grid.Controls.Add(_confirmLabel, 1, 0);
         grid.Controls.Add(_pw, 0, 1);
         grid.Controls.Add(_pw2, 1, 1);
         _pw.Margin = new Padding(0, 0, 0, 6);
-        _pw2.Margin = new Padding(16, 0, 0, 6);
-        _confirmLabel.Margin = new Padding(16, 0, 0, 4);
-        _strength = Theme.Row();
-        _meter.Margin = new Padding(0, 8, 0, 0);
+        _pw2.Margin = new Padding(16, 0, 16, 6);
+        _confirmLabel.Margin = new Padding(16, 0, 16, 4);
+        _meterText.Margin = new Padding(10, 0, 10, 0);
         _strength.Controls.AddRange([_meter, _meterText]);
-        _meterText.Margin = new Padding(10, 0, 0, 0);
-        _warning.Controls.Add(Theme.Label(
+        _warning.Controls.Add(Theme.Label(L.T(
             "⚠  אי אפשר לשחזר את הסיסמה. בלעדיה אף אחד, כולל אתה, לא יוכל לקרוא את הקבצים, גם עם גישה מלאה לחשבון הטלגרם. שמור אותה במנהל סיסמאות או רשום אותה.",
+            "⚠  The password cannot be recovered. Without it nobody, including you, can read the files, even with full access to the Telegram account. Keep it in a password manager or write it down."),
             Theme.Small, Theme.Text, 640));
-        _form.Controls.AddRange([_intro, grid, _strength, _show, _warning, _saved, _remember, _error]);
+        _form.Controls.AddRange([_vanished, _intro, grid, _strength, _show, _warning, _saved, _remember, _error]);
         _form.Visible = false;
 
         col.Controls.AddRange([_checking, _connected, _form]);
@@ -567,20 +615,24 @@ sealed class DrivePage : WizardPage
         _pw.TextChanged += (_, _) => UpdateState();
         _pw2.TextChanged += (_, _) => UpdateState();
         _saved.CheckedChanged += (_, _) => UpdateState();
+        _vanishedOk.CheckedChanged += (_, _) => UpdateState();
         Changed(false);
     }
 
     public override async Task EnterAsync()
     {
         _error.Text = "";
+        _wasVanished = false;
         SetMode(Mode.Checking);
         try
         {
             if (Ctx.UsesTelegram)
             {
                 var client = Ctx.GetClient();
+                var known = Ctx.State.Config.Channels;
                 bool exists = Ctx.Remote is not null ||
-                              await Task.Run(() => TelegramRemote.DriveExistsAsync(client, Ctx.State.Config.Channels));
+                              await Task.Run(() => TelegramRemote.DriveExistsAsync(client, known));
+                if (!exists && known is not null) _wasVanished = true; // this PC knew a drive here, and it is gone
                 if (exists && Ctx.Remote is null) Ctx.Remote = await Task.Run(() => OpenRemoteAsync(create: false));
                 _remote = Ctx.Remote;
             }
@@ -598,24 +650,24 @@ sealed class DrivePage : WizardPage
         catch (Exception ex)
         {
             _checking.ForeColor = Theme.Error;
-            _checking.Text = TelegramErrors.Hebrew(ex);
+            _checking.Text = TelegramErrors.Text(ex);
         }
-    }
-
-    public override void Demo(int variant)
-    {
-        SetMode(variant == 0 ? Mode.Create : Mode.Connect);
-        _pw.Text = variant == 0 ? "Correct-Horse-7" : "secret";
-        _pw2.Text = variant == 0 ? "Correct-Horse-7" : "";
-        if (variant == 1) _error.Text = "הסיסמה שגויה.";
     }
 
     async Task<TelegramRemote> OpenRemoteAsync(bool create)
     {
         var remote = await TelegramRemote.OpenAsync(Ctx.GetClient(), Ctx.State.Config.Channels, create);
         Ctx.State.Config.Channels = remote.Channels;
-        Ctx.State.Save();
         return remote;
+    }
+
+    public override void Demo(int variant)
+    {
+        _wasVanished = variant == 2;
+        SetMode(variant == 1 ? Mode.Connect : Mode.Create);
+        _pw.Text = variant == 1 ? "secret" : "Correct-Horse-7";
+        _pw2.Text = variant == 1 ? "" : "Correct-Horse-7";
+        if (variant == 1) _error.Text = L.T("הסיסמה שגויה.", "Wrong password.");
     }
 
     void SetMode(Mode mode)
@@ -626,10 +678,13 @@ sealed class DrivePage : WizardPage
         _connected.Visible = mode == Mode.Connected;
         _form.Visible = mode is Mode.Connect or Mode.Create;
         bool create = mode == Mode.Create;
+        _vanished.Visible = create && _wasVanished;
         _confirmLabel.Visible = _pw2.Visible = _strength.Visible = _warning.Visible = _saved.Visible = create;
         _intro.Text = create
-            ? "בחר סיסמה לכונן, לפחות 10 תווים. היא מצפינה כל קובץ לפני שהוא עולה לטלגרם."
-            : "נמצא כונן DriveGram בחשבון. הקלד את הסיסמה שלו כדי לחבר את המחשב הזה.";
+            ? L.T("בחר סיסמה לכונן, לפחות 10 תווים. היא מצפינה כל קובץ לפני שהוא עולה לטלגרם.",
+                  "Choose a drive password, at least 10 characters. It encrypts every file before it goes to Telegram.")
+            : L.T("נמצא כונן DriveGram בחשבון. הקלד את הסיסמה שלו כדי לחבר את המחשב הזה.",
+                  "This account has a DriveGram drive. Enter its password to connect this PC.");
         if (_form.Visible) _pw.Focus();
         UpdateState();
     }
@@ -642,10 +697,10 @@ sealed class DrivePage : WizardPage
         int score = pw.Length < 10 ? 0 : Math.Min(4, (pw.Length - 6) / 4 + classes - 1);
         return score switch
         {
-            <= 0 => (1, pw.Length < 10 ? "קצרה מדי" : "חלשה", Theme.Error),
-            1 => (2, "בינונית", Color.FromArgb(0xE8, 0x8F, 0x1A)),
-            2 or 3 => (3, "טובה", Theme.Accent),
-            _ => (4, "חזקה מאוד", Theme.Success),
+            <= 0 => (1, pw.Length < 10 ? L.T("קצרה מדי", "too short") : L.T("חלשה", "weak"), Theme.Error),
+            1 => (2, L.T("בינונית", "fair"), Color.FromArgb(0xE8, 0x8F, 0x1A)),
+            2 or 3 => (3, L.T("טובה", "good"), Theme.Accent),
+            _ => (4, L.T("חזקה מאוד", "very strong"), Theme.Success),
         };
     }
 
@@ -659,11 +714,11 @@ sealed class DrivePage : WizardPage
             var (score, text, color) = Strength(_pw.Text);
             _meterFill.Width = _pw.Text.Length == 0 ? 0 : _meter.Width * score / 4;
             _meterFill.BackColor = color;
-            _meterText.Text = _pw.Text.Length == 0 ? "" : $"חוזק: {text}";
+            _meterText.Text = _pw.Text.Length == 0 ? "" : L.T($"חוזק: {text}", $"Strength: {text}");
             _meterText.ForeColor = color;
             bool match = _pw2.Text.Length == 0 || _pw2.Text == _pw.Text;
-            _error.Text = match ? "" : "הסיסמאות לא זהות.";
-            ok = _pw.Text.Length >= 10 && _pw2.Text == _pw.Text && _saved.Checked;
+            _error.Text = match ? "" : L.T("הסיסמאות לא זהות.", "The passwords do not match.");
+            ok = _pw.Text.Length >= 10 && _pw2.Text == _pw.Text && _saved.Checked && (!_wasVanished || _vanishedOk.Checked);
         }
         else ok = false;
         Changed(ok);
@@ -677,20 +732,27 @@ sealed class DrivePage : WizardPage
         Keys keys;
         if (_mode == Mode.Create)
         {
+            if (_wasVanished)
+            {
+                // start clean: the old local index points at chunks that no longer exist
+                Ctx.State.ResetLocalData();
+                Ctx.State.Config.Channels = null;
+            }
             if (Ctx.UsesTelegram && Ctx.Remote is null)
             {
                 Ctx.Remote = await Task.Run(() => OpenRemoteAsync(create: true));
                 _remote = Ctx.Remote;
             }
             keys = await Task.Run(() => SyncService.CreateDriveAsync(_remote!, pw, default));
-            Log.Info("setup: created a new drive");
+            Log.Info($"setup: created a new drive ({Ctx.State.Id})");
+            Ctx.State.Save();
         }
         else
         {
             try { keys = await Task.Run(() => Keys.Unlock(_ctrl!.Vault, pw)); }
             catch (WrongPasswordException)
             {
-                _error.Text = "הסיסמה שגויה.";
+                _error.Text = L.T("הסיסמה שגויה.", "Wrong password.");
                 _pw.SelectAll();
                 _pw.Focus();
                 return false;
@@ -707,12 +769,12 @@ sealed class FinishPage : WizardPage
 {
     readonly ComboBox _letter = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 100, Font = Theme.Body, RightToLeft = RightToLeft.No };
     readonly TextBox _label = Theme.Input(240);
-    readonly CheckBox _autostart = new() { Text = "הפעל את DriveGram אוטומטית כשנכנסים לוינדוס", AutoSize = true, Checked = true };
+    readonly CheckBox _autostart = new() { Text = L.T("הפעל את DriveGram אוטומטית כשנכנסים לוינדוס", "Start DriveGram automatically when I sign in to Windows"), AutoSize = true, Checked = true };
     readonly Label _summary = Theme.Label("", Theme.Body, Theme.Text, 620);
 
-    public override string Title => "כמעט סיימנו";
-    public override string Subtitle => "איך הכונן יופיע במחשב.";
-    public override string NextText => "סיום וחיבור הכונן";
+    public override string Title => L.T("כמעט סיימנו", "Almost done");
+    public override string Subtitle => L.T("איך הכונן יופיע במחשב.", "How the drive appears on this PC.");
+    public override string NextText => L.T("סיום וחיבור הכונן", "Finish and connect");
 
     public FinishPage(SetupContext ctx) : base(ctx)
     {
@@ -720,9 +782,9 @@ sealed class FinishPage : WizardPage
         var summaryCard = Theme.Card(Theme.Surface, Theme.Border);
         summaryCard.Controls.Add(_summary);
         col.Controls.Add(summaryCard);
-        col.Controls.Add(Theme.Label("אות הכונן:", Theme.Small, Theme.Muted));
+        col.Controls.Add(Theme.Label(L.T("אות הכונן:", "Drive letter:"), Theme.Small, Theme.Muted));
         col.Controls.Add(_letter);
-        col.Controls.Add(Theme.Label("שם הכונן ב־This PC:", Theme.Small, Theme.Muted));
+        col.Controls.Add(Theme.Label(L.T("שם הכונן ב־This PC:", "Name in This PC:"), Theme.Small, Theme.Muted));
         col.Controls.Add(_label);
         col.Controls.Add(_autostart);
         SetContent(col);
@@ -731,18 +793,21 @@ sealed class FinishPage : WizardPage
     public override Task EnterAsync()
     {
         var cfg = Ctx.State.Config;
-        var used = DriveInfo.GetDrives().Select(d => d.Name[0]).ToHashSet();
+        var inUse = DriveInfo.GetDrives().Select(d => char.ToUpperInvariant(d.Name[0])).ToHashSet();
+        var otherDrives = AppState.All().Where(a => a.Dir != Ctx.State.Dir).Select(a => char.ToUpperInvariant(a.Config.MountPoint[0])).ToHashSet();
         var current = char.ToUpperInvariant(cfg.MountPoint[0]);
-        var free = "TUVWXYZSRQPONMLKJIHGFED".Where(c => !used.Contains(c) || c == current).ToList();
+        var free = "DEFGHIJKLMNOPQRSTUVWXYZ".Where(c => !otherDrives.Contains(c) && (!inUse.Contains(c) || c == current)).ToList();
         _letter.Items.Clear();
-        foreach (var c in free.OrderBy(c => c)) _letter.Items.Add($"{c}:");
-        _letter.SelectedItem = free.Contains(current) ? $"{current}:" : $"{free.FirstOrDefault('T')}:";
+        foreach (var c in free) _letter.Items.Add($"{c}:");
+        char pick = free.Contains(current) ? current : "TUVWXYZSRQPONMLKJIHGFED".FirstOrDefault(free.Contains, 'T');
+        _letter.SelectedItem = $"{pick}:";
         _label.Text = cfg.VolumeLabel;
-        _autostart.Checked = true; // the usual choice; unticking it turns autostart off
+        _autostart.Checked = true;
 
-        var account = Ctx.User is { } u ? $"{u.first_name} {u.last_name}".Trim() + (string.IsNullOrEmpty(u.username) ? "" : $" (@{u.username})") : null;
-        _summary.Text = (account is null ? "" : $"חשבון טלגרם: {account}\n") +
-                        "הכונן מוכן. הקבצים יעלו מוצפנים ברקע, ואייקון ליד השעון יראה מה המצב.";
+        var account = Ctx.State.Folder ?? (string.IsNullOrEmpty(cfg.AccountName) ? null : cfg.AccountName);
+        _summary.Text = (account is null ? "" : L.T($"חשבון: {account}\n", $"Account: {account}\n")) +
+                        L.T("הכונן מוכן. הקבצים יעלו מוצפנים ברקע, ואייקון ליד השעון יראה מה המצב.",
+                            "The drive is ready. Files upload encrypted in the background; an icon next to the clock shows what is happening.");
         return Task.CompletedTask;
     }
 
