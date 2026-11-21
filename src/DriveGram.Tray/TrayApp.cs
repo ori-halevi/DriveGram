@@ -22,6 +22,7 @@ sealed class DriveController
     public System.Windows.Forms.Timer? RetryTimer;
     public TrashForm? Trash;
     public BackupForm? Backup;
+    public SecurityForm? Security;
 
     public DriveController(AppState state) => State = state;
 
@@ -285,7 +286,7 @@ sealed class TrayApp : ApplicationContext
             if (input is null) throw new OperationCanceledException();
             try
             {
-                var keys = Keys.Unlock(ctrl.Vault, input.Value.pw);
+                var keys = Keys.UnlockAny(ctrl.Vault, input.Value.pw); // the password, or the recovery key
                 if (input.Value.remember) d.State.RememberMaster(keys.ExportMaster());
                 return Task.FromResult(keys);
             }
@@ -470,6 +471,31 @@ sealed class TrayApp : ApplicationContext
         Process.Start(new ProcessStartInfo(d.Session.MountPoint + "\\") { UseShellExecute = true });
     }
 
+    static void ShowSecurity(DriveController d)
+    {
+        if (d.Session is null) return;
+        if (d.Security is { IsDisposed: false }) { d.Security.Activate(); return; }
+        d.Security = new SecurityForm(d.Session);
+        d.Security.Show();
+    }
+
+    static void Export(DriveController d)
+    {
+        if (d.Session is null) return;
+        using var dlg = new FolderBrowserDialog
+        {
+            Description = L.T($"לאן להעתיק את כל הקבצים של {d.Name}?", $"Where should every file of {d.Name} be copied?"),
+            UseDescriptionForTitle = true,
+        };
+        if (dlg.ShowDialog() != DialogResult.OK) return;
+        if (dlg.SelectedPath.StartsWith(d.Session.MountPoint, StringComparison.OrdinalIgnoreCase))
+        {
+            Ui.Error(L.T("בחר תיקייה מחוץ לכונן עצמו.", "Choose a folder outside the drive itself."));
+            return;
+        }
+        new ExportForm(d.Session, dlg.SelectedPath).Show();
+    }
+
     static void ShowBackup(DriveController d)
     {
         if (d.Backup is { IsDisposed: false }) { d.Backup.Activate(); return; }
@@ -521,12 +547,14 @@ sealed class TrayApp : ApplicationContext
             bool on = d.Session is not null && !d.Stopping;
             item.DropDownItems.Add(Item(L.T("פתח את הכונן", "Open the drive"), () => OpenDrive(d), on, bold: true));
             item.DropDownItems.Add(Item(L.T("סל המחזור…", "Recycle bin…"), () => ShowTrash(d), on));
+            item.DropDownItems.Add(Item(L.T("ייצוא כל הקבצים לתיקייה…", "Export every file to a folder…"), () => Export(d), on));
             item.DropDownItems.Add(new ToolStripSeparator());
             if (d.Session is null)
                 item.DropDownItems.Add(Item(L.T("חבר", "Connect"), async () => { if (d.NeedsSetup) await SetupAsync(d); else await MountAsync(d); },
                     !d.Starting));
             else item.DropDownItems.Add(Item(L.T("נתק", "Disconnect"), async () => await StopAsync(d), !d.Stopping));
             item.DropDownItems.Add(Item(L.T("הגדרות והתחברות…", "Settings and sign-in…"), async () => await SetupAsync(d), !d.Starting && !d.Stopping));
+            item.DropDownItems.Add(Item(L.T("סיסמה ומפתח שחזור…", "Password and recovery key…"), () => ShowSecurity(d), on));
             if (d.State.Folder is null && d.State.Config.Channels is not null)
                 item.DropDownItems.Add(Item(L.T("גיבוי בחשבון נוסף…", "Backup on another account…"), () => ShowBackup(d)));
             item.DropDownItems.Add(new ToolStripSeparator());

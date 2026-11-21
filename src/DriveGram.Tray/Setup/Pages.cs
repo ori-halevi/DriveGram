@@ -795,7 +795,7 @@ sealed class DrivePage : WizardPage
         _intro.Text = create
             ? L.T("בחר סיסמה לכונן, לפחות 10 תווים. היא מצפינה כל קובץ לפני שהוא עולה לטלגרם.",
                   "Choose a drive password, at least 10 characters. It encrypts every file before it goes to Telegram.")
-            : L.T("הקלד את הסיסמה של הכונן כדי לחבר אליו את המחשב הזה.", "Enter the drive's password to connect this PC to it.");
+            : L.T("הקלד את הסיסמה של הכונן (או את מפתח השחזור שלו) כדי לחבר אליו את המחשב הזה.", "Enter the drive's password (or its recovery key) to connect this PC to it.");
         if (_form.Visible) (create && _name.Visible ? _name : _pw).Focus();
         UpdateState();
     }
@@ -901,7 +901,7 @@ sealed class DrivePage : WizardPage
                 cfg.DriveId = c.DriveId ?? "";
                 if (cfg.VolumeLabel is "" or "DriveGram") cfg.VolumeLabel = c.Name;
             }
-            try { keys = await Task.Run(() => Keys.Unlock(_ctrl!.Vault, pw)); }
+            try { keys = await Task.Run(() => Keys.UnlockAny(_ctrl!.Vault, pw)); } // the password, or the recovery key
             catch (WrongPasswordException)
             {
                 _error.Text = L.T("הסיסמה שגויה.", "Wrong password.");

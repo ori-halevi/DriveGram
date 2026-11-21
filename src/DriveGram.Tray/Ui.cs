@@ -72,7 +72,7 @@ sealed class PasswordForm : Form
         var buttons = new FlowLayoutPanel { AutoSize = true };
         buttons.Controls.AddRange([ok, cancel]);
         var layout = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false };
-        layout.Controls.AddRange([new Label { Text = L.T("הקלד את סיסמת הכונן:", "Enter the drive password:"), AutoSize = true },
+        layout.Controls.AddRange([new Label { Text = L.T("הקלד את סיסמת הכונן, או את מפתח השחזור שלו:", "Enter the drive password, or its recovery key:"), AutoSize = true },
             _pw, _remember, _error, buttons]);
         Controls.Add(layout);
         Shown += (_, _) => { Activate(); _pw.Focus(); };

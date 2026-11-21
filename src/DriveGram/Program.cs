@@ -66,6 +66,7 @@ try
         "unmount" => Unmount(),
         "status" => await Status(),
         "drives" => Drives(),
+        "export" => await Export(arg1),
         "quit" => Quit(),
         "autostart" => Autostart(arg1),
         "forget-password" => ForgetPassword(),
@@ -98,7 +99,8 @@ int Help()
                                            Mount in this console (Ctrl+C unmounts after uploads finish).
           drivegram unmount                Ask the running drive (console or tray) to unmount.
           drivegram status                 Show what is stored and what is waiting to upload.
-          drivegram drives                 List the drives on this PC (one per Telegram account).
+          drivegram drives                 List the drives on this PC.
+          drivegram export <folder>        Copy every file of a mounted drive to a folder (resumable).
           drivegram quit                   Close the tray app (it finishes uploads first).
 
         Several drives: add --drive <letter> (e.g. --drive U:) to choose one; default is the first.
@@ -228,10 +230,10 @@ Task<Keys> Unlock(ControlState ctrl)
     }
     for (int attempt = 1; ; attempt++)
     {
-        var pw = Ask("Drive password: ", secret: true);
+        var pw = Ask("Drive password (or recovery key): ", secret: true);
         try
         {
-            var keys = Keys.Unlock(ctrl.Vault, pw);
+            var keys = Keys.UnlockAny(ctrl.Vault, pw); // the password, or the recovery key
             OfferRemember(keys);
             return Task.FromResult(keys);
         }
@@ -359,6 +361,37 @@ int Unmount()
     }
     if (n == 0) Console.WriteLine("No DriveGram drive is mounted.");
     return 0;
+}
+
+async Task<int> Export(string? target)
+{
+    if (string.IsNullOrWhiteSpace(target)) { Console.Error.WriteLine("Usage: drivegram export <folder> [--drive T:]"); return 1; }
+    var root = state.Config.MountPoint.TrimEnd('\\') + "\\";
+    if (!EventWaitHandle.TryOpenExisting(DriveSession.StopEventName(state), out _) || !Directory.Exists(root))
+    {
+        Console.Error.WriteLine($"{state.Config.MountPoint} is not mounted. Start DriveGram (or `drivegram mount`) first.");
+        return 1;
+    }
+    var full = Path.GetFullPath(target);
+    if (full.StartsWith(root, StringComparison.OrdinalIgnoreCase)) { Console.Error.WriteLine("Choose a folder outside the drive."); return 1; }
+    using var cts = new CancellationTokenSource();
+    Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
+    var last = DateTime.MinValue;
+    var progress = new Progress<ExportProgress>(p =>
+    {
+        if ((DateTime.UtcNow - last).TotalSeconds < 1 && p.Current.Length > 0) return;
+        last = DateTime.UtcNow;
+        Console.Write($"\r  {p.Files:N0} copied, {p.Skipped:N0} already there, {p.Bytes / 1048576.0:N0} MiB      ");
+    });
+    try
+    {
+        var errors = await Exporter.CopyAsync(root, full, progress, cts.Token);
+        Console.WriteLine();
+        foreach (var e in errors) Console.Error.WriteLine("  failed: " + e);
+        Console.WriteLine(errors.Count == 0 ? "Export complete." : $"Done; {errors.Count} files failed (run again to retry them).");
+        return errors.Count == 0 ? 0 : 1;
+    }
+    catch (OperationCanceledException) { Console.WriteLine("\nStopped. Run the same command again to continue."); return 1; }
 }
 
 int Quit()

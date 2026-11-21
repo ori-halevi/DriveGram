@@ -15,7 +15,8 @@ namespace DriveGram;
 /// </summary>
 public static class StorageFormat
 {
-    public const int Current = 1;
+    /// <summary>2: the vault may hold a wrapped master key (password changed) — see VaultHeader.</summary>
+    public const int Current = 2;
 }
 
 /// <summary>The drive was written by a newer DriveGram whose format this version does not understand.</summary>

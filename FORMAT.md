@@ -1,4 +1,4 @@
-# DriveGram — stored formats (StorageFormat 1)
+# DriveGram — stored formats (StorageFormat 2)
 
 Everything a drive needs lives in two private Telegram channels. This document is enough to
 read a drive back **without DriveGram**, given the drive password. Anything not described here
@@ -30,8 +30,25 @@ whose `StorageFormat.Current` is lower must refuse to open (reader) or open read
 
 ## Keys
 
+The **master key** never changes for a drive. How to obtain it:
+
+- vault `v: 1` (every drive until its password is changed): `master = PBKDF2-HMAC-SHA256(password UTF-8, vault.salt, vault.iter, 32 bytes)`
+- vault `v: 2` (after a password change; `salt`/`iter` unused): master is **wrapped** in `vault.password`
+- either version may also hold `vault.recovery`: the master wrapped under the recovery key
+
+A wrap is `{ "salt", "iter", "nonce", "wrapped" }` (base64): `wrapped = AES-256-GCM(KEK, nonce, aad = "drivegram/wrap/v1")(master) || tag`, where
+
 ```
-master     = PBKDF2-HMAC-SHA256(password UTF-8, salt, iter, 32 bytes)
+password KEK = PBKDF2-HMAC-SHA256(password UTF-8, wrap.salt, wrap.iter, 32 bytes)
+recovery KEK = HMAC-SHA256(key = 32 raw recovery-key bytes, "drivegram/recovery/v1" || wrap.salt)
+recovery key text = Crockford base32 (0-9 A-Z without I L O U) of the 32 raw bytes, 52 chars, groups of 4
+```
+
+Changing the password or adding a recovery key re-wraps the same master: no stored file changes.
+A password change also sets `minReader: 2` (versions before 1.0 cannot read a v2 vault).
+
+```
+master     = (see above)
 verifier   = hex(HMAC-SHA256(master, "drivegram/verify/v1"))          -- must equal vault.verifier
 K_id       = HMAC-SHA256(master, "drivegram/chunk-id/v1")
 K_key      = HMAC-SHA256(master, "drivegram/chunk-key/v1")
@@ -74,6 +91,6 @@ Snapshot plaintext: gzip of JSON `{ "nodes": [...], "fileChunks": [[node, idx, c
 
 ## Reading a drive by hand
 
-1. Read the control record; derive `master` from the password; check the verifier.
+1. Read the control record; obtain `master` (password or recovery key, see Keys); check the verifier.
 2. Load the snapshot named by `snap.msg` (if any), then apply every `j-*.bin` with a larger id.
 3. For each file, download its chunks' data-channel messages, decrypt frame by frame, concatenate.

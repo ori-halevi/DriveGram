@@ -95,13 +95,62 @@ public sealed class SyncService : IAsyncDisposable
         return keys;
     }
 
+    readonly SemaphoreSlim _ctrlLock = new(1, 1);
+
+    /// <summary>This drive's control record, as stored now.</summary>
+    public Task<ControlState?> ReadControlAsync(CancellationToken ct) => ReadControlAsync(_remote, ct);
+
+    /// <summary>Read-modify-write of the control record, serialized within this PC (the lease heartbeat
+    /// rewrites it every minute: an unserialized edit could be overwritten by a stale copy).</summary>
+    async Task<ControlState> UpdateControlAsync(Func<ControlState, ControlState> change, CancellationToken ct)
+    {
+        await _ctrlLock.WaitAsync(ct);
+        try
+        {
+            var next = change((await ReadControlAsync(_remote, ct))!);
+            await _remote.WriteControlAsync(next.ToJson(), ct);
+            return next;
+        }
+        finally { _ctrlLock.Release(); }
+    }
+
+    /// <summary>Create (or replace) the drive's recovery key; returns its text, to show the user ONCE.
+    /// Only while this PC holds the lease. Backward compatible: older versions ignore the extra field.</summary>
+    public async Task<string> CreateRecoveryKeyAsync(Keys keys, CancellationToken ct)
+    {
+        if (!Writable) throw new InvalidOperationException("The drive is read-only on this PC.");
+        string text = "";
+        await UpdateControlAsync(c =>
+        {
+            (var vault, text) = keys.WithNewRecoveryKey(c.Vault);
+            return c with { Vault = vault };
+        }, ct);
+        Log.Info("recovery key created (a previous one, if any, no longer works)");
+        return text;
+    }
+
+    /// <summary>Change the drive's password: the same master key, re-wrapped — no file is touched. PCs
+    /// that remember the key keep working. Raises minReader to 2: versions before 1.0 cannot read the new
+    /// vault and stop safely instead of misreading it.</summary>
+    public async Task ChangePasswordAsync(Keys keys, string newPassword, CancellationToken ct)
+    {
+        if (!Writable) throw new InvalidOperationException("The drive is read-only on this PC.");
+        await UpdateControlAsync(c => c with
+        {
+            Vault = keys.WithNewPassword(c.Vault, newPassword),
+            MinReader = Math.Max(c.MinReader, 2),
+        }, ct);
+        Log.Info("drive password changed");
+    }
+
     /// <summary>Give a pre-0.7 drive its identity (only the PC holding the lease writes the control record).</summary>
     public async Task<DriveIdentity?> EnsureIdentityAsync(Func<DriveIdentity> make, CancellationToken ct)
     {
         var ctrl = (await ReadControlAsync(_remote, ct))!;
         if (ctrl.Drive is not null || !Writable) return ctrl.Drive;
         var id = make();
-        await _remote.WriteControlAsync((ctrl with { Drive = id }).ToJson(), ct);
+        ctrl = await UpdateControlAsync(c => c.Drive is null ? c with { Drive = id } : c, ct);
+        id = ctrl.Drive!;
         Log.Info($"drive identity recorded: {id.Name} ({id.Id}), data channel {id.DataChannel}");
         return id;
     }
@@ -155,9 +204,8 @@ public sealed class SyncService : IAsyncDisposable
 
     async Task WriteLeaseAsync(CancellationToken ct)
     {
-        var ctrl = (await ReadControlAsync(_remote, ct))!;
         var lease = new LeaseInfo(_db.DeviceId, _o.DeviceName, NowUnix + (long)_o.LeaseDuration.TotalSeconds);
-        await _remote.WriteControlAsync((ctrl with { Lease = lease }).ToJson(), ct);
+        await UpdateControlAsync(c => c with { Lease = lease }, ct);
     }
 
     void MarkNeedsUpdate(string why)
@@ -283,8 +331,7 @@ public sealed class SyncService : IAsyncDisposable
             int upto = _db.Applied;
             var payload = Envelope.Seal(_keys.JournalKey, _db.ExportSnapshot());
             int msg = await _remote.AppendJournalAsync($"s-{upto}.bin", payload, ct);
-            var ctrl = (await ReadControlAsync(_remote, ct))!;
-            await _remote.WriteControlAsync((ctrl with { Snap = new SnapInfo(msg, upto) }).ToJson(), ct);
+            await UpdateControlAsync(c => c with { Snap = new SnapInfo(msg, upto) }, ct);
             _opsSinceSnapshot = 0;
             _lastSnapshot = DateTime.UtcNow;
             Log.Info($"snapshot written (#{msg}, up to #{upto}, {payload.Length:N0} bytes)");
@@ -372,9 +419,7 @@ public sealed class SyncService : IAsyncDisposable
         await FlushAsync(ct);
         if (_db.OutboxCount() == 0 && _db.PendingNodes().Count == 0)
         {
-            var ctrl = (await ReadControlAsync(_remote, ct))!;
-            if (ctrl.Lease?.Dev == _db.DeviceId)
-                await _remote.WriteControlAsync((ctrl with { Lease = null }).ToJson(), ct);
+            await UpdateControlAsync(c => c.Lease?.Dev == _db.DeviceId ? c with { Lease = null } : c, ct);
         }
     }
 
@@ -388,9 +433,7 @@ public sealed class SyncService : IAsyncDisposable
         if (_opsSinceSnapshot > 0) await SnapshotAsync(ct);
         if (releaseLease && _db.OutboxCount() == 0 && _db.PendingNodes().Count == 0)
         {
-            var ctrl = (await ReadControlAsync(_remote, ct))!;
-            if (ctrl.Lease?.Dev == _db.DeviceId)
-                await _remote.WriteControlAsync((ctrl with { Lease = null }).ToJson(), ct);
+            await UpdateControlAsync(c => c.Lease?.Dev == _db.DeviceId ? c with { Lease = null } : c, ct);
             Log.Info("lease released");
         }
     }

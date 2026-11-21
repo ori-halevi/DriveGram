@@ -58,7 +58,10 @@ public sealed class DriveSession : IAsyncDisposable
     static bool LetterInUse(char letter) =>
         DriveInfo.GetDrives().Any(d => char.ToUpperInvariant(d.Name[0]) == char.ToUpperInvariant(letter));
 
-    DriveSession(AppState state, string mountPoint, IRemote remote, IndexDb db, ContentEngine engine, SyncService sync,
+    /// <summary>The unlocked drive keys (for recovery-key / password changes made while mounted).</summary>
+    public Keys Keys { get; }
+
+    DriveSession(AppState state, string mountPoint, IRemote remote, IndexDb db, ContentEngine engine, SyncService sync, Keys keys,
         Semaphore instance, EventWaitHandle stopEvent)
     {
         State = state;
@@ -67,6 +70,7 @@ public sealed class DriveSession : IAsyncDisposable
         Db = db;
         Engine = engine;
         Sync = sync;
+        Keys = keys;
         _instance = instance;
         _stopEvent = stopEvent;
         _host = new FileSystemHost(new DriveFileSystem(db, engine, sync, state.Config.VolumeLabel));
@@ -213,7 +217,7 @@ public sealed class DriveSession : IAsyncDisposable
             engine.Start();
 
             var stopEvent = new EventWaitHandle(false, EventResetMode.AutoReset, StopEventName(state));
-            var session = new DriveSession(state, mountPoint, remote, db, engine, sync, instance!, stopEvent);
+            var session = new DriveSession(state, mountPoint, remote, db, engine, sync, keys, instance!, stopEvent);
             int status = session._host.Mount(mountPoint, null, false, 0);
             if (status < 0)
             {
