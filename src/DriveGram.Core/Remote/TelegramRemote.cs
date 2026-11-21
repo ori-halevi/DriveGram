@@ -80,7 +80,14 @@ public sealed class TelegramRemote : IRemote
     /// </summary>
     public static async Task<User> ResumeAsync(Client client)
     {
-        await client.ConnectAsync();
+        try { await client.ConnectAsync(); }
+        catch
+        {
+            // WTelegram keeps the failed attempt and hands it back on every later call: clear it, so the
+            // next try (network back) really connects
+            try { await client.ResetAsync(resetUser: false, resetSessions: false); } catch { }
+            throw;
+        }
         if (client.UserId == 0) throw new NotSignedInException();
         try
         {

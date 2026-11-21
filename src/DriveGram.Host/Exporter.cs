@@ -53,6 +53,8 @@ public static class Exporter
                     }
                     var tmp = $"{to}.{Guid.NewGuid():N}.dgpart";
                     long copied = 0;
+                    try
+                    {
                     await using (var input = new FileStream(f, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 20, useAsync: true))
                     await using (var output = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20, useAsync: true))
                     {
@@ -72,6 +74,12 @@ public static class Exporter
                         throw new IOException("the file changed while it was being copied; run the export again");
                     }
                     File.Move(tmp, to, overwrite: true);
+                    }
+                    catch
+                    {
+                        try { File.Delete(tmp); } catch { }
+                        throw;
+                    }
                     File.SetLastWriteTimeUtc(to, mtime);
                     File.SetCreationTimeUtc(to, ctime);
                     files++;

@@ -12,8 +12,10 @@ public sealed class DrivePairingException() : Exception(L.T(
     "ערוץ הקבצים לא שייך ליומן של הכונן הזה (אולי ערוץ של כונן אחר עם אותו שם). פתח את 'הגדרות והתחברות' ובחר את הכונן מחדש.",
     "The data channel does not belong to this drive's journal (perhaps another drive's channel with the same name). Open 'Settings and sign-in' and choose the drive again."));
 public sealed class WinFspMissingException() : Exception(L.T(
-    "WinFsp לא מותקן, ובלעדיו הכונן לא יכול לעבוד. הפעל שוב את התקנת DriveGram (או התקן מ-https://winfsp.dev/rel), ואז לחץ 'התחבר'.",
+    "WinFsp לא מותקן, ובלעדיו הכונן לא יכול לעבוד. הפעל שוב את התקנת DriveGram (או התקן מ-https://winfsp.dev/rel), ואז לחץ 'חבר'.",
     "WinFsp is not installed, and the drive cannot work without it. Run the DriveGram installer again (or install it from https://winfsp.dev/rel), then click Connect."));
+/// <summary>Windows refused the drive letter / mount: retrying the same thing will not help by itself.</summary>
+public sealed class MountFailedException(string message) : Exception(message);
 public sealed class AlreadyMountedException() : Exception("DriveGram is already running for this drive on this PC.");
 
 /// <summary>An item in the drive's own trash.</summary>
@@ -178,7 +180,7 @@ public sealed class DriveSession : IAsyncDisposable
                 // e.g. a USB stick took the letter: use the next free one, and remember it
                 var taken = AppState.All().Where(a => a.Dir != state.Dir).Select(a => char.ToUpperInvariant(a.Config.MountPoint[0])).ToHashSet();
                 var free = "TUVWXYZSRQPONMLKJIHGFED".FirstOrDefault(c => !LetterInUse(c) && !taken.Contains(c));
-                if (free == default) throw new IOException(L.T("אין אות כונן פנויה.", "No free drive letter."));
+                if (free == default) throw new MountFailedException(L.T("אין אות כונן פנויה.", "No free drive letter."));
                 letterNote = $"{mountPoint} → {free}:";
                 try { ShellIntegration.ClearDriveIcon(mountPoint); } catch { } // the other device must not wear our icon
                 mountPoint = $"{free}:";
@@ -240,8 +242,8 @@ public sealed class DriveSession : IAsyncDisposable
                 await session.StopAsync(waitForUploads: false);
                 await session.DisposeAsync();            // host, stop event, engine, sync, index, remote, instance
                 sync = null; engine = null; db = null; remote = null; instance = null;
-                throw new IOException(L.T($"לא ניתן לחבר את {mountPoint} (NTSTATUS 0x{status:X8}). אולי האות תפוסה?",
-                                          $"Could not mount {mountPoint} (NTSTATUS 0x{status:X8}). Is the drive letter already in use?"));
+                throw new MountFailedException(L.T($"לא ניתן לחבר את {mountPoint} (NTSTATUS 0x{status:X8}). אולי האות תפוסה? אפשר לבחור אות אחרת ב'הגדרות והתחברות'.",
+                                          $"Could not mount {mountPoint} (NTSTATUS 0x{status:X8}). Is the drive letter already in use? Another letter can be chosen in 'Settings and sign-in'."));
             }
             session._mounted = true;
             session.LetterChanged = letterNote;
@@ -305,6 +307,9 @@ public sealed class DriveSession : IAsyncDisposable
             Task.Run(() => Sync.QuickReleaseAsync(cts.Token)).Wait(cts.Token);
         }
         catch (Exception ex) { Log.Warn($"shutdown stop: {ex.Message}"); }
+        // if the shutdown is cancelled, "Connect" must work at once (not "already open") —
+        // released exactly once (ReleaseInstance)
+        ReleaseInstance();
     }
 
     // ── trash ────────────────────────────────────────────────────────────────
@@ -429,7 +434,16 @@ public sealed class DriveSession : IAsyncDisposable
         await Sync.DisposeAsync();
         Db.Dispose();
         await _remote.DisposeAsync();
-        try { _instance.Release(); } catch (SemaphoreFullException) { }
+        ReleaseInstance();
         _instance.Dispose();
+    }
+
+    int _instanceReleased;
+
+    /// <summary>Exactly once: a second release could free the lock a NEW session of this drive holds.</summary>
+    void ReleaseInstance()
+    {
+        if (Interlocked.Exchange(ref _instanceReleased, 1) == 1) return;
+        try { _instance.Release(); } catch (SemaphoreFullException) { }
     }
 }

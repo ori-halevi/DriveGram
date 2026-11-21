@@ -23,6 +23,8 @@ sealed class DriveController
     public TrashForm? Trash;
     public BackupForm? Backup;
     public SecurityForm? Security;
+    /// <summary>The saved channels did not match: the next setup shows the list of drives.</summary>
+    public bool MustChooseDrive;
     public ExportForm? ExportWindow;
 
     public DriveController(AppState state) => State = state;
@@ -78,10 +80,11 @@ sealed class TrayApp : ApplicationContext
     /// asked "save changes?"), the process lives on: bring the drives back a minute later.</summary>
     void OnSessionEnding()
     {
-        foreach (var d in _drives)
+        var mounted = _drives.Where(x => x.Session is not null).ToList();
+        Parallel.ForEach(mounted.Select(x => x.Session!).ToList(), x => x.StopForShutdown());
+        foreach (var d in mounted)
         {
-            if (d.Session is not { } s) continue;
-            s.StopForShutdown();
+            var s = d.Session!;
             d.Session = null;
             d.Problem = L.T("נותק (כיבוי של וינדוס)", "disconnected (Windows shutdown)");
             _ui.Post(async _ =>
@@ -131,6 +134,8 @@ sealed class TrayApp : ApplicationContext
                 return;
             }
             d.Session = session;
+            StopRetrying(d);
+            d.RetryDelaySeconds = 15;
             d.RetryDelaySeconds = 15;
             session.StopRequested += () => _ui.Post(async _ => await StopAsync(d, ask: false), null);
             session.SignedOut += () => _ui.Post(async _ => await OnSignedOutAsync(d), null);
@@ -156,7 +161,12 @@ sealed class TrayApp : ApplicationContext
                 text += L.T($"\nהאות הקודמת הייתה תפוסה ({moved}).", $"\nThe usual letter was taken ({moved}).");
             Balloon(L.T("DriveGram מחובר", "DriveGram connected"), text);
         }
-        catch (OperationCanceledException) { d.Problem = L.T("לא הוזנה סיסמה", "no password entered"); }
+        catch (PasswordNotGivenException) { StopRetrying(d); d.Problem = L.T("לא הוזנה סיסמה", "no password entered"); }
+        catch (MountFailedException ex)
+        {
+            d.Problem = Short(ex.Message);
+            Balloon(L.T("לא ניתן לחבר את הכונן", "The drive could not be connected"), ex.Message, ToolTipIcon.Error);
+        }
         catch (NotSignedInException)
         {
             d.NeedsSetup = true;
@@ -193,6 +203,7 @@ sealed class TrayApp : ApplicationContext
         }
         catch (DrivePairingException ex)
         {
+            d.MustChooseDrive = true;
             d.NeedsSetup = true;
             d.Problem = L.T("צריך לבחור את הכונן מחדש", "the drive must be chosen again");
             OfferSetup(d, $"{d.Name}: {ex.Message}");
@@ -256,7 +267,7 @@ sealed class TrayApp : ApplicationContext
             while (d.Stopping) await Task.Delay(200); // let the stop already running finish
             return d.Session is null;
         }
-        d.RetryTimer?.Stop();
+        StopRetrying(d); // the user disconnects: it must not come back by itself (e.g. after sleep)
         if (d.Session is not { } session) return true;
         int pending = session.Status.PendingFiles;
         if (pending > 0 && ask && waitForUploads)
@@ -332,7 +343,7 @@ sealed class TrayApp : ApplicationContext
                 using var f = new PasswordForm(d.Name, error);
                 if (f.ShowDialog() == DialogResult.OK) input = (f.Password, f.Remember);
             }, null);
-            if (input is null) throw new OperationCanceledException();
+            if (input is null) throw new PasswordNotGivenException();
             try
             {
                 var keys = Keys.UnlockAny(ctrl.Vault, input.Value.pw); // the password, or the recovery key
@@ -361,6 +372,11 @@ sealed class TrayApp : ApplicationContext
         if (d is not null) StopRetrying(d);
         // the wizard edits a COPY: cancelling it leaves the live drive's settings untouched
         var state = d is null ? AppState.CreateNew() : AppState.Open(d.State.Id);
+        if (d?.MustChooseDrive == true)
+        {
+            state.Config.Channels = null; // its data channel did not match: show the drives to choose from
+            state.Config.DriveId = "";
+        }
         bool isNew = d is null;
         DialogResult result;
         using (_wizard = new Setup.SetupWizard(state, isNew))
@@ -462,6 +478,10 @@ sealed class TrayApp : ApplicationContext
         var accountKey = d.State.Config.AccountKey;
         d.State.Delete();
         _drives.Remove(d);
+        if (_drives.Count == 0)
+        {
+            try { ShellIntegration.SetAutostart(false); } catch (Exception ex) { Log.Warn($"autostart: {ex.Message}"); }
+        }
         if (_pendingSetup == d) _pendingSetup = null;
         // the account's last drive on this PC: sign it out too, so no stray "device" stays behind
         if (!string.IsNullOrEmpty(accountKey)) await TelegramAccounts.SignOutIfUnusedAsync(accountKey);
@@ -469,6 +489,8 @@ sealed class TrayApp : ApplicationContext
     }
 
     bool _deleting;
+
+    sealed class PasswordNotGivenException() : Exception("no password entered");
 
     /// <summary>
     /// Permanently delete a drive — its Telegram channels and everything on this PC. Shows what will be

@@ -164,6 +164,11 @@ sealed class LoginPage : WizardPage
     readonly TextBox _phoneBox = Theme.Input(240);
     readonly Button _sendCode = Theme.Primary(L.T("שלח קוד", "Send code"));
     readonly FlowLayoutPanel _codeRow = Theme.Row();
+    readonly LinkLabel _changeNumber = new()
+    {
+        Text = L.T("מספר אחר / קוד חדש", "Another number / a new code"), AutoSize = true,
+        Font = Theme.Small, LinkColor = Theme.Accent, Margin = new Padding(12, 10, 12, 0),
+    };
     readonly TextBox _codeBox = Theme.Input(140);
     readonly Button _verify = Theme.Primary(L.T("אמת", "Verify"));
 
@@ -232,7 +237,17 @@ sealed class LoginPage : WizardPage
         var phoneRow = Theme.Row();
         phoneRow.Controls.AddRange([_phoneBox, _sendCode]);
         _codeBox.PlaceholderText = "12345";
-        _codeRow.Controls.AddRange([_codeBox, _verify]);
+        _codeRow.Controls.AddRange([_codeBox, _verify, _changeNumber]);
+        _changeNumber.LinkClicked += (_, _) =>
+        {
+            Ctx.ResetClient(signOut: true); // a clean sign-in attempt (the old code is void anyway)
+            _phoneBox.ReadOnly = false;
+            _sendCode.Visible = true;
+            _sendCode.Enabled = true;
+            _codeRow.Visible = false;
+            _error.Text = "";
+            _phoneBox.Focus();
+        };
         _codeRow.Visible = false;
         _phone.Controls.Add(Theme.Label(L.T("מספר הטלפון של החשבון, בפורמט בינלאומי:", "The account's phone number, in international format:"), Theme.Small, Theme.Muted));
         _phone.Controls.Add(phoneRow);
@@ -256,7 +271,7 @@ sealed class LoginPage : WizardPage
         _known.Visible = false;
         col.Controls.AddRange([_account, _known, _signIn, _twoFa, _error, _enterRetry]);
         _enterRetry.Visible = false;
-        _enterRetry.Click += async (_, _) => await EnterAsync();
+        _enterRetry.Click += async (_, _) => { Ctx.ResetClient(signOut: false); await EnterAsync(); };
         SetContent(col);
 
         _tick.Tick += (_, _) =>
@@ -510,7 +525,15 @@ sealed class LoginPage : WizardPage
             _error.Text = L.T("הקלד מספר טלפון מלא, למשל ‎+972501234567‎.", "Enter the full phone number, e.g. +972501234567.");
             return;
         }
-        if (!phone.StartsWith('+') && phone.StartsWith('0')) phone = "+972" + phone[1..]; // local Israeli format
+        if (!phone.StartsWith('+') && phone.StartsWith('0'))
+        {
+            if (!L.Hebrew)
+            {
+                _error.Text = L.T("הקלד את המספר עם קידומת המדינה, למשל ‎+972501234567‎.", "Enter the number with its country code, e.g. +44 7700 900123.");
+                return;
+            }
+            phone = "+972" + phone[1..]; // local Israeli format
+        }
         await RunLoginStepAsync(_sendCode, phone);
     }
 
@@ -667,7 +690,7 @@ sealed class DrivePage : WizardPage
 
         col.Controls.AddRange([_checking, _driveRetry, _connected, _vanished, _choices, _form]);
         _driveRetry.Visible = false;
-        _driveRetry.Click += async (_, _) => await EnterAsync();
+        _driveRetry.Click += async (_, _) => { Ctx.ResetClient(signOut: false); await EnterAsync(); };
         SetContent(col);
 
         _show.CheckedChanged += (_, _) => _pw.UseSystemPasswordChar = _pw2.UseSystemPasswordChar = !_show.Checked;
@@ -983,7 +1006,8 @@ sealed class FinishPage : WizardPage
         char pick = free.Contains(current) ? current : "TUVWXYZSRQPONMLKJIHGFED".FirstOrDefault(free.Contains, 'T');
         _letter.SelectedItem = $"{pick}:";
         _label.Text = cfg.VolumeLabel;
-        _autostart.Checked = Ctx.IsNew || ShellIntegration.AutostartEnabled; // a new drive: on; otherwise keep the choice
+        // the first drive: on; otherwise keep the choice the user already made
+        _autostart.Checked = (Ctx.IsNew && AppState.All().Count == 0) || ShellIntegration.AutostartEnabled;
 
         var account = Ctx.State.Folder ?? (string.IsNullOrEmpty(cfg.AccountName) ? null : cfg.AccountName);
         _summary.Text = (account is null ? "" : L.T($"חשבון: {account}\n", $"Account: {account}\n")) +
