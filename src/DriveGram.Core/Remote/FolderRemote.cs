@@ -84,7 +84,7 @@ public sealed class FolderRemote : IRemote
         var items = Directory.GetFiles(_journal)
             .Select(Path.GetFileName)
             .Where(f => f!.Length > 11 && f[10] == '_' && !f.EndsWith(".tmp"))
-            .Select(f => new JournalItem(int.Parse(f![..10]), f[11..]))
+            .Select(f => new JournalItem(int.Parse(f![..10]), f[11..], new FileInfo(Path.Combine(_journal, f)).Length))
             .Where(j => j.Id > afterId)
             .OrderBy(j => j.Id)
             .ToList();
@@ -93,7 +93,8 @@ public sealed class FolderRemote : IRemote
 
     public Task<byte[]> ReadJournalAsync(int id, CancellationToken ct)
     {
-        var f = Directory.GetFiles(_journal, $"{id:D10}_*").Single();
+        var f = Directory.GetFiles(_journal, $"{id:D10}_*").SingleOrDefault()
+                ?? throw new FileNotFoundException($"journal message {id} is missing"); // as TelegramRemote
         return Task.FromResult(File.ReadAllBytes(f));
     }
 

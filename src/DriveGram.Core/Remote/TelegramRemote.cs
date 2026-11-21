@@ -530,8 +530,14 @@ public sealed class TelegramRemote : IRemote
             {
                 if (mb is Message { media: MessageMediaDocument { document: Document d } } m)
                 {
+                    if (m.fwd_from is not null)
+                    {
+                        // DriveGram never forwards: a forwarded copy of an old entry must not be replayed
+                        Log.Warn($"journal message {m.id} is a forwarded copy; ignored");
+                        continue;
+                    }
                     _jdocs[m.id] = d;
-                    items.Add(new JournalItem(m.id, d.Filename ?? ""));
+                    items.Add(new JournalItem(m.id, d.Filename ?? "", d.size));
                 }
             }
             offsetId = msgs.Min(m => m.ID);

@@ -1,6 +1,6 @@
 namespace DriveGram.Remote;
 
-public sealed record JournalItem(int Id, string Name);
+public sealed record JournalItem(int Id, string Name, long Size = 0);
 
 /// <summary>This account / folder holds no DriveGram drive yet (first run: `drivegram setup`).</summary>
 public sealed class NoDriveException() : Exception("No DriveGram drive yet. Run `drivegram setup`.");

@@ -97,6 +97,18 @@ public sealed class DriveSession : IAsyncDisposable
     public static string StopEventName(AppState state) => @"Local\DriveGram-stop-" + Path.GetFileName(state.Dir);
     static string InstanceName(AppState state) => @"Local\DriveGram-instance-" + Path.GetFileName(state.Dir);
 
+    /// <summary>Windows' own id of this installation (survives renames; differs on a cloned disk after sysprep).</summary>
+    static string? MachineId()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry64)
+                .OpenSubKey(@"SOFTWARE\Microsoft\Cryptography");
+            return key?.GetValue("MachineGuid") as string;
+        }
+        catch { return null; }
+    }
+
     public static bool WinFspInstalled()
     {
         try
@@ -205,6 +217,7 @@ public sealed class DriveSession : IAsyncDisposable
             var keys = await unlock(ctrl);
 
             db = IndexDb.Open(state.IndexPath);
+            if (MachineId() is { } machine) db.BindToMachine(machine);
             var cfg = state.Config;
             engine = new ContentEngine(db, remote, keys, state.Dir, new EngineOptions
             {

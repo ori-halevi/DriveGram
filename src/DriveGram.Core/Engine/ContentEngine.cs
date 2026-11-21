@@ -148,6 +148,12 @@ public sealed class ContentEngine : IAsyncDisposable
     public void Start()
     {
         ReconcileStaging(adjustCount: false); // before counting: the count starts from what is really staged
+        foreach (var node in _db.AllDirty().Where(r => r.Kind != 'U' || r.Staged).Select(r => r.Node).Distinct())
+            if (!_db.IsPending(node) && _db.Get(node) is not null)
+            {
+                Log.Warn($"local changes of {node} were not marked for upload (interrupted write); uploading them");
+                _db.SetPending(node);
+            }
         long staged = 0;
         foreach (var row in _db.AllDirty())
         {
@@ -296,7 +302,7 @@ public sealed class ContentEngine : IAsyncDisposable
             }
             else if (_db.CommittedChunk(id, idx) is { } c)
             {
-                var plain = _cache.TryGetPlain(c.ChunkId);
+                var plain = TrustedPlain(c.ChunkId, c.Hash);
                 seg = plain is not null
                     ? new StagedSeg(idx, inOff, done, len, plain)
                     : new RemoteSeg(idx, inOff, done, len, new ChunkLoc(c.ChunkId, c.Msg, c.Size, c.Hash));
@@ -458,6 +464,7 @@ public sealed class ContentEngine : IAsyncDisposable
         {
             if (initial is not null) fs.Write(initial, 0, Math.Min(initial.Length, len));
             fs.SetLength(len);
+            if (initial is not null) fs.Flush(flushToDisk: true);
         }
         Interlocked.Add(ref _stagingBytes, len);
         _db.PutDirty(new DirtyRow(id, idx, 'S', len, true));
@@ -469,13 +476,40 @@ public sealed class ContentEngine : IAsyncDisposable
         var plain = _cache.TryGetPlain(loc.ChunkId);
         if (plain is not null)
         {
-            try { return File.ReadAllBytes(plain); } catch (IOException) { }
+            try
+            {
+                var bytes = File.ReadAllBytes(plain);
+                // its content becomes part of an upload: verified every time, never trusted blindly
+                if (bytes.Length == loc.Size && Convert.ToHexStringLower(SHA256.HashData(bytes)) == loc.Hash) return bytes;
+                Log.Warn($"cached copy of chunk {loc.ChunkId[..12]} is damaged; fetching it again");
+                _cache.RemovePlain(loc.ChunkId);
+            }
+            catch (IOException) { }
         }
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
         cts.CancelAfter(_o.ReadTimeout); // a whole chunk (copy-on-write): always the full time
         byte[] whole = [];
         Remote(() => whole = _reader.ReadWholeAsync(loc, cts.Token).GetAwaiter().GetResult());
         return whole;
+    }
+
+    readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _verifiedPlain = new();
+
+    /// <summary>A cached plaintext chunk, checked against its hash the first time this session uses it
+    /// (a power cut can leave a cache file with zeros where data should be).</summary>
+    string? TrustedPlain(string chunkId, string hash)
+    {
+        var path = _cache.TryGetPlain(chunkId);
+        if (path is null || _verifiedPlain.ContainsKey(chunkId)) return path;
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            if (Convert.ToHexStringLower(SHA256.HashData(fs)) == hash) { _verifiedPlain[chunkId] = true; return path; }
+        }
+        catch (IOException) { return null; }
+        Log.Warn($"cached copy of chunk {chunkId[..12]} is damaged; it will be fetched again");
+        _cache.RemovePlain(chunkId);
+        return null;
     }
 
     long _lastReadFailure; // Environment.TickCount64; 0 = reads are working
@@ -739,7 +773,10 @@ public sealed class ContentEngine : IAsyncDisposable
                     {
                         var path = PiecePath(id, d.Idx);
                         long len = File.Exists(path) ? new FileInfo(path).Length : 0;
+                        try { using var f = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete); f.Flush(true); }
+                        catch (IOException) { }
                         _cache.AdoptPlain(d.ChunkId!, path);
+                        _verifiedPlain[d.ChunkId!] = true; // it is exactly what was hashed and uploaded
                         Interlocked.Add(ref _stagingBytes, -len);
                     }
                     st.LastWrite.Clear(); // PieceGen is kept: stamps must never repeat

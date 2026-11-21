@@ -48,7 +48,7 @@ public sealed class IndexDb : IDisposable
     long _usedCache = -1;
     long _usedAt;
 
-    public string DeviceId { get; }
+    public string DeviceId { get; private set; }
 
     IndexDb(SqliteConnection c)
     {
@@ -76,6 +76,8 @@ public sealed class IndexDb : IDisposable
             CREATE TABLE IF NOT EXISTS outbox(seq INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
             CREATE TABLE IF NOT EXISTS pending_gc(msg INTEGER PRIMARY KEY, since INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS own_appends(msg INTEGER PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS seen_entries(nonce TEXT PRIMARY KEY);
             """);
         // migration (0.5 → 0.6): which chunk rows this PC uploaded itself
         if (Scalar("SELECT 1 FROM pragma_table_info('chunks') WHERE name='local'") is null)
@@ -93,6 +95,44 @@ public sealed class IndexDb : IDisposable
             Exec("INSERT INTO nodes(id,parent,name,nkey,dir,attrs,ctime,mtime) VALUES(@id,NULL,'','',1,@a,@t,@t)",
                 ("@id", RootId), ("@a", FileAttributeDirectory), ("@t", now));
         }
+    }
+
+    /// <summary>
+    /// The device id belongs to this PC, not to the file: an index copied to another PC (disk clone,
+    /// restored profile) must not share an id with the original, or both would treat the same lease and
+    /// the same journal entries as their own.
+    /// </summary>
+    public void BindToMachine(string machineId)
+    {
+        var known = GetMeta("machine");
+        if (known is not null && known != machineId)
+        {
+            DeviceId = Guid.NewGuid().ToString("N");
+            SetMeta("device", DeviceId);
+            Exec("DELETE FROM own_appends");
+            Log.Warn("this index came from another PC: it now has its own device id");
+        }
+        SetMeta("machine", machineId);
+    }
+
+    // ── journal bookkeeping (survives restarts and crashes) ──────────────────
+    /// <summary>Remove sent ops and remember which journal message carried them, atomically.</summary>
+    public void Sent(IEnumerable<long> seqs, int msg, string nonce) => InTransaction(() =>
+    {
+        foreach (var s in seqs) Exec("DELETE FROM outbox WHERE seq=@s", ("@s", s));
+        Exec("INSERT OR IGNORE INTO own_appends(msg) VALUES(@m)", ("@m", msg));
+        Exec("INSERT OR IGNORE INTO seen_entries(nonce) VALUES(@n)", ("@n", nonce));
+    });
+
+    public bool IsOwnAppend(int msg) => Scalar("SELECT 1 FROM own_appends WHERE msg=@m", ("@m", msg)) is not null;
+    public bool SeenEntry(string nonce) => Scalar("SELECT 1 FROM seen_entries WHERE nonce=@n", ("@n", nonce)) is not null;
+    public void MarkSeen(string nonce) => Exec("INSERT OR IGNORE INTO seen_entries(nonce) VALUES(@n)", ("@n", nonce));
+
+    /// <summary>Apply ops of this PC's own journal entry again, in journal order (no conflict copies,
+    /// nothing queued): used when another PC's entry turned out to sit BEFORE it in the journal.</summary>
+    public void ApplyAsOwn(IReadOnlyList<Op> ops)
+    {
+        foreach (var op in ops) Apply(op, remote: false);
     }
 
     public static IndexDb Open(string path)
@@ -568,17 +608,19 @@ public sealed class IndexDb : IDisposable
     /// older readers refuse snapshots whose content they fully understand.</summary>
     public const int SnapshotFormat = 1;
 
-    sealed record Snap(List<Node> Nodes, List<string[]> FileChunks, List<StoredChunk> Chunks, int V = SnapshotFormat);
+    sealed record Snap(List<Node> Nodes, List<string[]> FileChunks, List<StoredChunk> Chunks, int V = SnapshotFormat, int Upto = 0);
 
-    public byte[] ExportSnapshot()
+    public byte[] ExportSnapshot(int upto = 0)
     {
         Snap snap;
         lock (_gate)
         {
             snap = new Snap(
+                Upto: upto,
+                Nodes: 
                 Query($"SELECT {NodeCols} FROM nodes", MapNode),
-                Query("SELECT node, idx, chunk FROM file_chunks", r => new[] { r.GetString(0), r.GetInt32(1).ToString(), r.GetString(2) }),
-                Query("SELECT id,msg,size,hash FROM chunks c WHERE EXISTS (SELECT 1 FROM file_chunks f WHERE f.chunk=c.id)",
+                FileChunks: Query("SELECT node, idx, chunk FROM file_chunks", r => new[] { r.GetString(0), r.GetInt32(1).ToString(), r.GetString(2) }),
+                Chunks: Query("SELECT id,msg,size,hash FROM chunks c WHERE EXISTS (SELECT 1 FROM file_chunks f WHERE f.chunk=c.id)",
                     r => new StoredChunk(r.GetString(0), r.GetInt32(1), r.GetInt32(2), r.GetString(3))));
         }
         using var ms = new MemoryStream();
@@ -587,7 +629,8 @@ public sealed class IndexDb : IDisposable
         return ms.ToArray();
     }
 
-    public void ImportSnapshot(byte[] data)
+    /// <summary>Load a snapshot; returns the journal position it covers if the snapshot itself says so.</summary>
+    public int? ImportSnapshot(byte[] data)
     {
         using var gz = new GZipStream(new MemoryStream(data), CompressionMode.Decompress);
         var snap = JsonSerializer.Deserialize<Snap>(gz, OpJson.Options)!;
@@ -607,5 +650,6 @@ public sealed class IndexDb : IDisposable
                 Exec("INSERT INTO file_chunks(node,idx,chunk) VALUES(@n,@i,@c)", ("@n", f[0]), ("@i", int.Parse(f[1])), ("@c", f[2]));
         });
         _usedCache = -1;
+        return snap.Upto > 0 ? snap.Upto : null;
     }
 }

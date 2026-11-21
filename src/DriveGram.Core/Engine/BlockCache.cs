@@ -57,6 +57,15 @@ public sealed class BlockCache
         lock (_gate) return _map.ContainsKey(WKey(msg, win));
     }
 
+    public void RemovePlain(string chunkId)
+    {
+        var key = "p/" + chunkId;
+        string? path;
+        lock (_gate) path = _map.TryGetValue(key, out var n) ? n.Value.Path : null;
+        Remove(key);
+        if (path is not null) TryDelete(path);
+    }
+
     public void RemoveWindow(int msg, int win)
     {
         var key = WKey(msg, win);

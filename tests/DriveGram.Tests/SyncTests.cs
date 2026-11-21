@@ -70,14 +70,18 @@ public class SyncTests
     public async Task StaleLeaseIsTakenOver()
     {
         await using var kit = await TestKit.CreateAsync();
-        var so = new SyncOptions { LeaseDuration = TimeSpan.FromSeconds(1), FlushInterval = TimeSpan.FromMilliseconds(100) };
+        var so = new SyncOptions { LeaseDuration = TimeSpan.FromSeconds(1), FlushInterval = TimeSpan.FromMilliseconds(100),
+                                   HeartbeatInterval = TimeSpan.FromMilliseconds(300) };
         var a = kit.Pc("a", so: so);
         await a.Sync.StartAsync(false, default);
         await a.Sync.DisposeAsync(); // "crashed": never releases the lease
         await Task.Delay(2500);
 
+        // expired, and unchanged while B watches it for two heartbeats: taken over (never on the expiry alone,
+        // since another PC's clock may differ)
         var b = kit.Pc("b", so: so);
         await b.Sync.StartAsync(false, default);
+        for (int i = 0; i < 100 && !b.Sync.Writable; i++) await Task.Delay(100);
         Assert.True(b.Sync.Writable);
     }
 
