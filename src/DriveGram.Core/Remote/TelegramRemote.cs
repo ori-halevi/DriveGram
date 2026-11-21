@@ -420,6 +420,9 @@ public sealed class TelegramRemote : IRemote
     async Task<Client> DcClient(int dcId) =>
         dcId == 0 || dcId == _client.TLConfig?.this_dc ? _client : await _client.GetClientForDC(-dcId, true);
 
+    long _bytesSent;
+    public long BytesSent => Interlocked.Read(ref _bytesSent);
+
     async Task<InputFileBase> UploadPartsAsync(byte[] payload, string name, CancellationToken ct)
     {
         int parts = Math.Max(1, (payload.Length + PartSize - 1) / PartSize);
@@ -436,6 +439,7 @@ public sealed class TelegramRemote : IRemote
                         : await _client.Upload_SaveFilePart(fileId, i, bytes);
                     return ok ? true : throw new IOException($"Telegram rejected part {i}");
                 }, token, PartTimeout);
+                Interlocked.Add(ref _bytesSent, bytes.Length);
             });
         return big
             ? new InputFileBig { id = fileId, parts = parts, name = name }

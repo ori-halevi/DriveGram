@@ -306,6 +306,7 @@ sealed class TrayApp : ApplicationContext
                     $"To change the settings of {d.Name} it must be disconnected for a moment. Disconnect?")) != DialogResult.Yes) return;
             if (!await StopAsync(d)) return;
         }
+        bool wasRetrying = d?.RetryTimer is not null;
         if (d is not null) StopRetrying(d);
         // the wizard edits a COPY: cancelling it leaves the live drive's settings untouched
         var state = d is null ? AppState.CreateNew() : AppState.Open(d.State.Id);
@@ -316,10 +317,13 @@ sealed class TrayApp : ApplicationContext
             result = _wizard.ShowDialog();
             _wizard = null;
         }
-        if (result != DialogResult.OK)
+        // The drive page saves a new binding (other channels / account) as soon as it is chosen, so a
+        // cancel AFTER that point cannot restore the old one: the profile on disk is the truth.
+        bool rebound = !isNew && Binding(AppState.Open(state.Id)) != Binding(d!.State);
+        if (result != DialogResult.OK && !rebound)
         {
             if (isNew) state.Delete();
-            else if (d is { Session: null, NeedsSetup: false }) ScheduleRetry(d); // it was retrying before
+            else if (wasRetrying && d is { Session: null }) ScheduleRetry(d);
             UpdateIcon();
             return;
         }
@@ -337,6 +341,10 @@ sealed class TrayApp : ApplicationContext
         }
         await MountAsync(d);
     }
+
+    /// <summary>Which drive a profile points at (account + channels + drive id).</summary>
+    static string Binding(AppState s) =>
+        System.Text.Json.JsonSerializer.Serialize(new { s.Config.AccountKey, s.Config.DriveId, s.Config.Channels });
 
     static void StopRetrying(DriveController d)
     {
@@ -373,6 +381,11 @@ sealed class TrayApp : ApplicationContext
     {
         var (pending, unsent) = DriveDeletion.LocalOnly(d.State);
         if (pending == 0 && unsent == 0) return true;
+        if (pending < 0)
+            return Ui.Ask(L.T(
+                    $"⚠  לא הצלחתי לבדוק אם ב־{d.Name} יש קבצים או שינויים שקיימים רק במחשב הזה. אם יש, הסרת הכונן תמחק אותם לצמיתות.\n\nלהסיר בכל זאת?",
+                    $"⚠  Could not check whether {d.Name} has files or changes that exist only on this PC. If it does, removing the drive deletes them for good.\n\nRemove anyway?"),
+                icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) == DialogResult.Yes;
         return Ui.Ask(L.T(
                 $"⚠  ב־{d.Name} יש {pending} קבצים שעוד לא עלו לטלגרם ו־{unsent} שינויים שעוד לא נשלחו. הם קיימים רק במחשב הזה.\n\n" +
                 "אם תסיר את הכונן עכשיו, הם יימחקו לצמיתות. כדי לשמור אותם: חבר את הכונן (אם צריך, התחבר מחדש לטלגרם) וחכה שיעלו.\n\nלהסיר בכל זאת?",

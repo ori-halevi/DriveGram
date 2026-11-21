@@ -137,11 +137,34 @@ public static class TelegramAccounts
         bool live;
         lock (Gate) live = Entries.ContainsKey(target);
         // a file left by a revoked or half-finished sign-in must not beat a fresh, valid one
-        bool existing = live || (File.Exists(target) && SignInWorks(info));
+        var probe = live ? Probe.Works : File.Exists(target) ? SignInWorks(info) : Probe.Revoked;
+        bool existing = probe == Probe.Works;
         if (!existing && File.Exists(target))
         {
-            try { File.Delete(target); } catch (IOException) { }
-            Log.Info($"the saved sign-in of {info.Name} no longer worked; replaced by the new one");
+            // revoked: it is gone on Telegram's side. Unknown (e.g. no network): keep the file aside, so a
+            // sign-in that may still be valid is not thrown away (it stays listed in Telegram's devices).
+            try
+            {
+                if (probe == Probe.Revoked) File.Delete(target);
+                else File.Move(target, target + ".retired", overwrite: true);
+            }
+            catch (IOException) { }
+            Log.Info($"the saved sign-in of {info.Name} {(probe == Probe.Revoked ? "no longer worked" : "could not be checked")}; replaced by the new one");
+        }
+        if (!existing)
+        {
+            lock (Gate)
+            {
+                // a drive of the same account may have signed in meanwhile: then that one is the account's
+                if (Entries.ContainsKey(target)) existing = true;
+                else
+                {
+                    Entries.Remove(lease.Entry.Path);
+                    lease.Entry.Stream.Relocate(target);
+                    lease.Entry.Path = target;
+                    Entries[target] = lease.Entry;
+                }
+            }
         }
         if (existing)
         {
@@ -155,13 +178,6 @@ public static class TelegramAccounts
             return Acquire(state);
         }
 
-        lock (Gate)
-        {
-            Entries.Remove(lease.Entry.Path);
-            lease.Entry.Stream.Relocate(target);
-            lease.Entry.Path = target;
-            Entries[target] = lease.Entry;
-        }
         state.Config.AccountKey = key;
         SaveInfo(info);
         Log.Info($"account {info.Name} signed in on this PC");
@@ -169,7 +185,9 @@ public static class TelegramAccounts
     }
 
     /// <summary>Does the account's saved sign-in still work? (Checked on a throw-away client.)</summary>
-    static bool SignInWorks(AccountInfo a)
+    enum Probe { Works, Revoked, Unknown }
+
+    static Probe SignInWorks(AccountInfo a)
     {
         var probe = AppState.Open("__probe-" + Guid.NewGuid().ToString("N")[..8]);
         try
@@ -178,13 +196,16 @@ public static class TelegramAccounts
             probe.Config.ApiId = a.ApiId;
             probe.Config.ApiHash = a.ApiHash;
             using var client = DriveSession.NewTelegramClient(probe, null, out _);
-            Task.Run(() => TelegramRemote.ResumeAsync(client)).GetAwaiter().GetResult();
-            return true;
+            var check = Task.Run(() => TelegramRemote.ResumeAsync(client));
+            if (!check.Wait(TimeSpan.FromSeconds(20))) { Log.Info($"saved sign-in of {a.Name}: no answer in 20 s"); return Probe.Unknown; }
+            return Probe.Works;
         }
         catch (Exception ex)
         {
-            Log.Info($"saved sign-in of {a.Name} does not work: {ex.Message}");
-            return false;
+            var e = ex is AggregateException ag ? ag.InnerException ?? ex : ex;
+            bool revoked = e is NotSignedInException || (e is TL.RpcException r && r.Code == 401);
+            Log.Info($"saved sign-in of {a.Name} {(revoked ? "was revoked" : "could not be checked")}: {e.Message}");
+            return revoked ? Probe.Revoked : Probe.Unknown;
         }
         finally { probe.Delete(); }
     }

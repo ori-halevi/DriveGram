@@ -281,11 +281,11 @@ public sealed class IndexDb : IDisposable
             case ContentOp c:
             {
                 if (Get(c.Id) is null) { Log.Warn($"content op for unknown node {c.Id} ignored"); return; }
-                if (remote && IsPending(c.Id))
+                if (remote && (IsPending(c.Id) || OutboxHasContent(c.Id)))
                 {
-                    // Both PCs changed this file. Never splice the two: the local version stays (it commits
-                    // as usual), and the other PC's version becomes a conflict copy next to it, journaled so
-                    // every PC ends up with both.
+                    // Both PCs changed this file. Never splice the two: the local version stays (it commits,
+                    // or its held-back ContentOp is journaled after this one), and the other PC's version
+                    // becomes a conflict copy next to it, journaled so every PC ends up with both.
                     var n = Get(c.Id)!;
                     var copyName = $"{Path.GetFileNameWithoutExtension(n.Name)} (conflict {DateTime.Now:yyyy-MM-dd HH-mm}){Path.GetExtension(n.Name)}";
                     var copyId = Guid.NewGuid().ToString("N");
@@ -294,8 +294,9 @@ public sealed class IndexDb : IDisposable
                     Log.Warn($"conflict on '{n.Name}': the other PC's version was kept as '{copyName}'");
                     return;
                 }
-                Exec("DELETE FROM file_chunks WHERE node=@n", ("@n", c.Id));
                 long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                TouchChunksOf(c.Id, now);
+                Exec("DELETE FROM file_chunks WHERE node=@n", ("@n", c.Id));
                 for (int i = 0; i < c.Chunks.Length; i++)
                 {
                     var k = c.Chunks[i];
@@ -329,8 +330,10 @@ public sealed class IndexDb : IDisposable
                     WITH RECURSIVE sub(id) AS (SELECT @id UNION ALL SELECT n.id FROM nodes n JOIN sub ON n.parent = sub.id)
                     SELECT id FROM sub
                     """, r => r.GetString(0), ("@id", p.Id));
+                long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 foreach (var id in ids)
                 {
+                    TouchChunksOf(id, now);
                     Exec("DELETE FROM file_chunks WHERE node=@n", ("@n", id));
                     Exec("DELETE FROM dirty WHERE node=@n", ("@n", id));
                     Exec("DELETE FROM pending WHERE node=@n", ("@n", id));
@@ -341,6 +344,42 @@ public sealed class IndexDb : IDisposable
             default:
                 throw new NotSupportedException(op.GetType().Name);
         }
+    }
+
+    /// <summary>
+    /// The grace period of garbage collection counts from when a chunk STOPPED being used here, not from
+    /// when it was first stored: another PC may still hold a change based on the old version (a pending
+    /// edit that keeps unchanged chunks, or a held-back ContentOp), and it gets the full grace to send it.
+    /// </summary>
+    void TouchChunksOf(string node, long now) =>
+        Exec("UPDATE chunks SET created=@t WHERE id IN (SELECT chunk FROM file_chunks WHERE node=@n)", ("@n", node), ("@t", now));
+
+    /// <summary>Does a change held back on this PC (not yet journaled) set this file's content?</summary>
+    bool OutboxHasContent(string id) =>
+        // serialized as {"t":"ct",...,"id":"<id>"} (the id comes last; chunk refs use "c", never "id")
+        Scalar("SELECT 1 FROM outbox WHERE op LIKE '{\"t\":\"ct\",%' AND op LIKE @p LIMIT 1", ("@p", "%\"id\":\"" + id + "\"%")) is not null;
+
+    /// <summary>
+    /// Other PCs' entries were applied while changes made here were still held back. Those changes will be
+    /// journaled AFTER them, so every other PC applies them last: replay them here on top as well, in order,
+    /// so this PC ends in the same state (ops carry full state, replaying is harmless).
+    /// </summary>
+    public int ReapplyOutbox()
+    {
+        int n = 0;
+        InTransaction(() =>
+        {
+            foreach (var (_, op) in PeekOutbox(int.MaxValue))
+            {
+                // a file being edited again keeps its local size; its committed chunks were never touched
+                // (another PC's content for it became a conflict copy instead)
+                if (op is ContentOp c && IsPending(c.Id)) continue;
+                Apply(op, remote: false);
+                n++;
+            }
+            SetMeta("rebase", null);
+        });
+        return n;
     }
 
     /// <summary>A name in `parent` that no other live node uses ("a.txt" -> "a (2).txt").</summary>
@@ -405,7 +444,7 @@ public sealed class IndexDb : IDisposable
     /// <summary>Chunks no file (live, trashed or pending) references, older than the grace period.</summary>
     public List<StoredChunk> GarbageChunks(TimeSpan grace, int limit = 500) => Query("""
         SELECT id,msg,size,hash FROM chunks c
-        WHERE created < @cut
+        WHERE created <= @cut
           AND NOT EXISTS (SELECT 1 FROM file_chunks f WHERE f.chunk = c.id)
           AND NOT EXISTS (SELECT 1 FROM dirty d WHERE d.chunk = c.id)
         LIMIT @lim
@@ -508,7 +547,11 @@ public sealed class IndexDb : IDisposable
     public int OutboxCount() => Convert.ToInt32(Scalar("SELECT COUNT(*) FROM outbox") ?? 0);
 
     // ── snapshots (full index image, stored encrypted in the journal channel) ─
-    sealed record Snap(List<Node> Nodes, List<string[]> FileChunks, List<StoredChunk> Chunks, int V = StorageFormat.Current);
+    /// <summary>The snapshot layout has its own version (unchanged since 0.1): tying it to StorageFormat made
+    /// older readers refuse snapshots whose content they fully understand.</summary>
+    public const int SnapshotFormat = 1;
+
+    sealed record Snap(List<Node> Nodes, List<string[]> FileChunks, List<StoredChunk> Chunks, int V = SnapshotFormat);
 
     public byte[] ExportSnapshot()
     {
@@ -531,7 +574,7 @@ public sealed class IndexDb : IDisposable
     {
         using var gz = new GZipStream(new MemoryStream(data), CompressionMode.Decompress);
         var snap = JsonSerializer.Deserialize<Snap>(gz, OpJson.Options)!;
-        if (snap.V > StorageFormat.Current) throw new NeedsUpdateException($"snapshot is format {snap.V}");
+        if (snap.V > SnapshotFormat) throw new NeedsUpdateException($"snapshot is format {snap.V}");
         long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         InTransaction(() =>
         {

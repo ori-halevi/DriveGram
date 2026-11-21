@@ -26,6 +26,9 @@ public interface IRemote : IAsyncDisposable
 
     Task<int> UploadChunkAsync(string name, byte[] payload, CancellationToken ct);
 
+    /// <summary>Bytes handed to the server so far, including parts of uploads still in progress.</summary>
+    long BytesSent => 0;
+
     /// <summary>Bytes [window*1MiB, (window+1)*1MiB) of a stored chunk message (shorter at the end).</summary>
     Task<byte[]> ReadWindowAsync(int msg, int window, CancellationToken ct);
 

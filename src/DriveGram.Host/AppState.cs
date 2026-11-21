@@ -57,13 +57,28 @@ public sealed class AppState
     public string LogDir => Path.Combine(Dir, "logs");
     public bool Exists => File.Exists(ConfigPath);
 
+    bool LoadBackup()
+    {
+        try
+        {
+            Config = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(ConfigPath + ".bak"), Json) ?? throw new JsonException("empty");
+            Save();
+            return true;
+        }
+        catch (Exception ex) when (ex is JsonException or IOException) { return false; }
+    }
+
     AppState(string dir)
     {
         Dir = dir;
         Directory.CreateDirectory(Dir);
         if (File.Exists(ConfigPath))
         {
-            try { Config = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(ConfigPath), Json) ?? new AppConfig(); }
+            try { Config = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(ConfigPath), Json) ?? throw new JsonException("empty"); }
+            catch (Exception ex) when ((ex is JsonException or IOException) && File.Exists(ConfigPath + ".bak") && LoadBackup())
+            {
+                Log.Warn($"profile {Path.GetFileName(dir)}: config.json was unreadable ({ex.Message}); restored the previous copy");
+            }
             catch (Exception ex) when (ex is JsonException or IOException)
             {
                 // e.g. a zero-length file after a power cut: never let one bad profile stop all drives
@@ -118,8 +133,13 @@ public sealed class AppState
     public void Save()
     {
         var tmp = ConfigPath + ".tmp";
-        File.WriteAllText(tmp, JsonSerializer.Serialize(Config, Json));
-        File.Move(tmp, ConfigPath, overwrite: true);
+        using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            fs.Write(System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(Config, Json)));
+            fs.Flush(flushToDisk: true); // on disk BEFORE the rename: a power cut never leaves an empty config
+        }
+        if (File.Exists(ConfigPath)) File.Replace(tmp, ConfigPath, ConfigPath + ".bak", ignoreMetadataErrors: true);
+        else File.Move(tmp, ConfigPath);
     }
 
     /// <summary>Remove this profile and everything this PC stored for it (not the files in Telegram).</summary>

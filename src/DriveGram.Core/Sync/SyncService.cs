@@ -183,14 +183,21 @@ public sealed class SyncService : IAsyncDisposable
         var ctrl = await ReadControlAsync(_remote, ct) ?? throw new InvalidOperationException("No drive on this remote.");
         if (ctrl.MinReader > StorageFormat.Current) throw new NeedsUpdateException($"needs format {ctrl.MinReader}");
         if (ctrl.MinWriter > StorageFormat.Current) MarkNeedsUpdate($"writing needs format {ctrl.MinWriter}");
-        if (_db.IsFresh && ctrl.Snap is { } snap)
+        // A snapshot replaces the whole index: only for an index that never held anything of its own
+        // (a PC that wrote but never received an entry still counted as "fresh", and loading another PC's
+        // snapshot then wiped its files waiting to upload and its unsent changes).
+        bool fresh = _db.IsFresh && _db.OutboxCount() == 0 && _db.PendingNodes().Count == 0 && _db.AllDirty().Count == 0;
+        if (fresh && ctrl.Snap is { } snap)
         {
             Log.Info($"loading snapshot (journal up to #{snap.Upto})");
-            var data = Envelope.Open(_keys.JournalKey, await _remote.ReadJournalAsync(snap.Msg, ct));
+            byte[] data;
+            try { data = Envelope.Open(_keys.JournalKey, await _remote.ReadJournalAsync(snap.Msg, ct)); }
+            catch (InvalidDataException ex) { throw new NeedsUpdateException($"snapshot #{snap.Msg}: {ex.Message}"); }
             _db.ImportSnapshot(data);
             _db.Applied = snap.Upto;
         }
         await CatchUpAsync(ct);
+        if (_db.IsFresh) _db.Applied = 0; // caught up with an empty journal: this index is in use from now on
         await TryAcquireLeaseAsync(takeOver, ct);
         _loop = Task.Run(RunAsync);
     }
@@ -211,14 +218,13 @@ public sealed class SyncService : IAsyncDisposable
             Log.Warn($"drive is open for writing on '{lease.Name}' (until {DateTimeOffset.FromUnixTimeSeconds(lease.Until).ToLocalTime():t}); mounting read-only");
             return;
         }
-        if (lease is not null && lease.Dev != _db.DeviceId)
-        {
-            // Someone else wrote before us: make sure we have everything they journaled.
-            await CatchUpAsync(ct);
-        }
+        // Another PC may have written and released the lease (null) since we last looked: take in
+        // everything it journaled BEFORE writing on top (held-back local changes are rebased there).
+        await CatchUpAsync(ct);
         await WriteLeaseAsync(ct);
         await Task.Delay(1500, ct);
         var check = (await ReadControlAsync(_remote, ct))!.Lease;
+        if (check?.Dev == _db.DeviceId) await CatchUpAsync(ct); // anything appended just before we took over
         SetWritable(check?.Dev == _db.DeviceId, check?.Name);
         if (Writable) _leaseConfirmedAt = DateTime.UtcNow;
     }
@@ -253,11 +259,21 @@ public sealed class SyncService : IAsyncDisposable
             int applied = 0;
             foreach (var item in await _remote.ListJournalAsync(_db.Applied, ct))
             {
-                if (item.Name.StartsWith("j-"))
+                if (!item.Name.StartsWith("j-"))
+                {
+                    if (!item.Name.StartsWith("s-") && OurNaming.IsMatch(item.Name))
+                    {
+                        // a record kind from a newer version: stop HERE (skip nothing, advance nothing)
+                        MarkNeedsUpdate($"journal #{item.Id}: unknown record '{item.Name}'");
+                        break;
+                    }
+                    if (!item.Name.StartsWith("s-")) Log.Warn($"journal #{item.Id}: '{item.Name}' is not a DriveGram record; ignored");
+                }
+                else
                 {
                     JournalEntry entry;
                     try { entry = OpJson.DeserializeEntry(Envelope.Open(_keys.JournalKey, await _remote.ReadJournalAsync(item.Id, ct))); }
-                    catch (Exception ex) when (ex is System.Text.Json.JsonException or NotSupportedException)
+                    catch (Exception ex) when (ex is System.Text.Json.JsonException or NotSupportedException or InvalidDataException)
                     {
                         // an op type / shape from a newer version: stop HERE (skip nothing, advance nothing)
                         MarkNeedsUpdate($"journal #{item.Id}: {ex.Message}");
@@ -274,6 +290,9 @@ public sealed class SyncService : IAsyncDisposable
                         {
                             foreach (var op in entry.Ops) _db.ApplyRemote(op);
                             _db.Applied = item.Id;
+                            // changes held back on this PC will be journaled AFTER this entry: mark that the
+                            // local index must replay them on top of it (same order as every other PC)
+                            if (_db.OutboxCount() > 0) _db.SetMeta("rebase", "1");
                         });
                         applied += entry.Ops.Length;
                         try { RemoteOpsApplied?.Invoke(entry.Ops); }
@@ -284,10 +303,17 @@ public sealed class SyncService : IAsyncDisposable
                 _db.Applied = item.Id;
             }
             if (applied > 0) Log.Info($"applied {applied} ops from other PCs");
+            if (_db.GetMeta("rebase") is not null)
+            {
+                int n = _db.ReapplyOutbox();
+                Log.Warn($"{n} local changes held back on this PC were replayed after the other PC's changes; they are sent once this PC can write");
+            }
             return applied;
         }
         finally { _io.Release(); }
     }
+
+    static readonly System.Text.RegularExpressions.Regex OurNaming = new(@"^[a-z]{1,8}-[^\\/]*\.bin$");
 
     DateTime _leaseConfirmedAt = DateTime.MinValue;
 
@@ -406,12 +432,14 @@ public sealed class SyncService : IAsyncDisposable
                 if (Writable)
                 {
                     var lease = (await ReadControlAsync(_remote, ct))!.Lease;
-                    if (lease is not null && lease.Dev != _db.DeviceId)
+                    if (lease?.Dev != _db.DeviceId)
                     {
-                        // Another PC took over (we were offline longer than the lease). Stop writing;
-                        // anything still in the outbox stays queued locally and is reported.
-                        SetWritable(false, lease.Name);
-                        Log.Error($"lease lost to '{lease.Name}'; {_db.OutboxCount()} local changes are held back");
+                        // Another PC took over (we were offline longer than the lease), or took over AND
+                        // released it (null): either way it may have written. Stop writing; re-acquiring goes
+                        // through a catch-up, which replays our held-back changes after its entries.
+                        SetWritable(false, lease?.Name);
+                        Log.Error($"lease lost{(lease is null ? "" : $" to '{lease.Name}'")}; {_db.OutboxCount()} local changes are held back");
+                        if (lease is null) await TryAcquireLeaseAsync(false, ct);
                         continue;
                     }
                     await WriteLeaseAsync(ct);
@@ -424,7 +452,7 @@ public sealed class SyncService : IAsyncDisposable
                 else
                 {
                     await CatchUpAsync(ct);
-                    if (_db.OutboxCount() == 0 && !NeedsUpdate) await TryAcquireLeaseAsync(false, ct);
+                    if (!NeedsUpdate) await TryAcquireLeaseAsync(false, ct);
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { }

@@ -78,7 +78,7 @@ public static class DriveDeletion
         catch (Exception ex)
         {
             Log.Warn($"cannot read the index of {state.Id}: {ex.Message}");
-            return (0, 0);
+            return (-1, -1); // unknown: callers warn as if there were local changes
         }
     }
 

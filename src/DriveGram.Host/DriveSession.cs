@@ -159,22 +159,26 @@ public sealed class DriveSession : IAsyncDisposable
         if (!instance.WaitOne(0)) { instance.Dispose(); throw new AlreadyMountedException(); }
 
         string? letterNote = null;
-        if (LetterInUse(mountPoint[0]))
+        try
         {
-            // e.g. a USB stick took the letter: use the next free one, and remember it
-            var taken = AppState.All().Where(a => a.Dir != state.Dir).Select(a => char.ToUpperInvariant(a.Config.MountPoint[0])).ToHashSet();
-            var free = "TUVWXYZSRQPONMLKJIHGFED".FirstOrDefault(c => !LetterInUse(c) && !taken.Contains(c));
-            if (free == default)
+            if (LetterInUse(mountPoint[0]))
             {
-                instance.Release();
-                instance.Dispose();
-                throw new IOException(L.T("אין אות כונן פנויה.", "No free drive letter."));
+                // e.g. a USB stick took the letter: use the next free one, and remember it
+                var taken = AppState.All().Where(a => a.Dir != state.Dir).Select(a => char.ToUpperInvariant(a.Config.MountPoint[0])).ToHashSet();
+                var free = "TUVWXYZSRQPONMLKJIHGFED".FirstOrDefault(c => !LetterInUse(c) && !taken.Contains(c));
+                if (free == default) throw new IOException(L.T("אין אות כונן פנויה.", "No free drive letter."));
+                letterNote = $"{mountPoint} → {free}:";
+                try { ShellIntegration.ClearDriveIcon(mountPoint); } catch { } // the other device must not wear our icon
+                mountPoint = $"{free}:";
+                state.Config.MountPoint = mountPoint;
+                state.Save();
             }
-            letterNote = $"{mountPoint} → {free}:";
-            try { ShellIntegration.ClearDriveIcon(mountPoint); } catch { } // the other device must not wear our icon
-            mountPoint = $"{free}:";
-            state.Config.MountPoint = mountPoint;
-            state.Save();
+        }
+        catch
+        {
+            instance.Release(); // never leave the drive "already open" for the rest of this run
+            instance.Dispose();
+            throw;
         }
 
         IRemote? remote = null;

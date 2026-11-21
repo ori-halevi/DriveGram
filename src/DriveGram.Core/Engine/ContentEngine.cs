@@ -128,8 +128,8 @@ public sealed class ContentEngine : IAsyncDisposable
                     }
                     catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
                 }
+                TryDeleteDir(dir);
             }
-            TryDeleteDir(dir);
         }
     }
 
@@ -725,13 +725,15 @@ public sealed class ContentEngine : IAsyncDisposable
     public async Task DrainAsync(Action<EngineStatus>? progress, CancellationToken ct, TimeSpan? stall = null)
     {
         foreach (var node in _db.PendingNodes()) _commitQueue.Writer.TryWrite(node);
-        var last = (Pending: -1, Up: -1L);
+        var last = (Pending: -1, Up: -1L, Sent: -1L);
         var movedAt = DateTime.UtcNow;
         while (_db.PendingNodes().Count > 0)
         {
             var s = Status;
             progress?.Invoke(s);
-            if ((s.PendingFiles, s.BytesUploaded) != last) { last = (s.PendingFiles, s.BytesUploaded); movedAt = DateTime.UtcNow; }
+            // progress = a file finished, a chunk finished, or even one 512 KiB part reached Telegram
+            var now = (s.PendingFiles, s.BytesUploaded, _remote.BytesSent);
+            if (now != last) { last = now; movedAt = DateTime.UtcNow; }
             else if (stall is { } limit && DateTime.UtcNow - movedAt > limit)
             {
                 Log.Warn($"uploads made no progress for {limit.TotalMinutes:0} min; {s.PendingFiles} files stay pending on this PC");
