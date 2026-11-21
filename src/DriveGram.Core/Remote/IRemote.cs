@@ -5,6 +5,9 @@ public sealed record JournalItem(int Id, string Name);
 /// <summary>This account / folder holds no DriveGram drive yet (first run: `drivegram setup`).</summary>
 public sealed class NoDriveException() : Exception("No DriveGram drive yet. Run `drivegram setup`.");
 
+/// <summary>This PC has no signed-in Telegram session (or it was revoked from another device).</summary>
+public sealed class NotSignedInException() : Exception("Telegram is not signed in on this PC. Open DriveGram setup (or run `drivegram login`).");
+
 /// <summary>
 /// Where the bytes live. Two logical areas:
 ///  - Data: encrypted chunks (one stored message per chunk), addressed by message id, read in

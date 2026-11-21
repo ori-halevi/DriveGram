@@ -8,7 +8,6 @@ using Fsp.Interop;
 
 namespace DriveGram.Host;
 
-public sealed class NeedsLoginException() : Exception("Telegram is not signed in on this PC. Run `drivegram login` first.");
 public sealed class AlreadyMountedException() : Exception("DriveGram is already running for this drive on this PC.");
 
 /// <summary>An item in the drive's own trash.</summary>
@@ -64,29 +63,38 @@ public sealed class DriveSession : IAsyncDisposable
         catch { return false; }
     }
 
-    /// <summary>Create the Telegram client. `ask` answers login questions (phone, code, 2FA);
-    /// pass null when no one can answer (tray) — a missing login then throws NeedsLoginException.</summary>
-    public static WTelegram.Client NewTelegramClient(AppState state, Func<string, string?>? ask)
+    /// <summary>
+    /// Create the Telegram client for this PC's saved session. Interactive sign-in is done by the
+    /// setup wizard / `drivegram login` through client.Login(...) or LoginWithQRCode; here "phone_number"
+    /// is always null, so resuming accepts the saved account without asking (the bug that made the
+    /// tray think it was signed out). `askPassword` answers a 2FA prompt during a QR sign-in.
+    /// </summary>
+    public static WTelegram.Client NewTelegramClient(AppState state, Func<string?>? askPassword = null)
     {
         var cfg = state.Config;
-        if (cfg.ApiId == 0 || string.IsNullOrEmpty(cfg.ApiHash)) throw new NeedsLoginException();
+        if (cfg.ApiId == 0 || string.IsNullOrEmpty(cfg.ApiHash)) throw new NotSignedInException();
         string? Config(string what) => what switch
         {
             "api_id" => cfg.ApiId.ToString(),
             "api_hash" => cfg.ApiHash,
             "device_model" => "DriveGram on " + Environment.MachineName,
-            "app_version" => "DriveGram 0.2",
-            "phone_number" or "verification_code" or "password" or "first_name" or "last_name" or "email" =>
-                ask is null ? throw new NeedsLoginException() : ask(what),
-            _ => null,
+            "system_version" => Environment.OSVersion.VersionString,
+            "app_version" => "DriveGram 0.4",
+            "password" => askPassword is null ? throw new NotSignedInException() : askPassword(),
+            "verification_code" or "first_name" or "last_name" or "email" or "email_verification_code" =>
+                throw new NotSignedInException(),
+            _ => null, // includes "phone_number": accept the account the session belongs to
         };
         return new WTelegram.Client(Config, new DpapiSessionStream(state.SessionPath));
     }
 
-    public static async Task<IRemote> OpenRemoteAsync(AppState state, Func<string, string?>? ask, bool create)
+    public static async Task<IRemote> OpenRemoteAsync(AppState state, bool create)
     {
         if (state.Folder is not null) return new FolderRemote(state.Folder);
-        var remote = await TelegramRemote.OpenAsync(NewTelegramClient(state, ask), state.Config.Channels, create);
+        var client = NewTelegramClient(state);
+        TelegramRemote remote;
+        try { remote = await TelegramRemote.OpenAsync(client, state.Config.Channels, create); }
+        catch { client.Dispose(); throw; }
         if (state.Config.Channels != remote.Channels)
         {
             state.Config.Channels = remote.Channels;
@@ -96,7 +104,7 @@ public sealed class DriveSession : IAsyncDisposable
     }
 
     /// <summary>Open everything and mount. `unlock` turns the vault header into keys (remembered key or a prompt).</summary>
-    public static async Task<DriveSession> StartAsync(AppState state, Func<string, string?>? ask,
+    public static async Task<DriveSession> StartAsync(AppState state,
         Func<ControlState, Task<Keys>> unlock, string? mountPoint, bool takeOver, CancellationToken ct = default)
     {
         if (!WinFspInstalled()) throw new InvalidOperationException("WinFsp is not installed (https://winfsp.dev/rel/, version 2.1).");
@@ -113,7 +121,7 @@ public sealed class DriveSession : IAsyncDisposable
         SyncService? sync = null;
         try
         {
-            remote = await OpenRemoteAsync(state, ask, create: false);
+            remote = await OpenRemoteAsync(state, create: false);
             var ctrl = await SyncService.ReadControlAsync(remote, ct)
                        ?? throw new NoDriveException();
             var keys = await unlock(ctrl);

@@ -23,6 +23,13 @@ static class Program
         Application.ThreadException += (_, e) => Log.Error("tray: unhandled", e.Exception);
         AppDomain.CurrentDomain.UnhandledException += (_, e) => Log.Error("tray: fatal", e.ExceptionObject as Exception);
         SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
+        int snap = Array.IndexOf(args, "--snapshot-setup");
+        if (snap >= 0 && snap + 1 < args.Length)
+        {
+            Application.Run(new Setup.SetupWizard(state)
+                { SnapshotDir = args[snap + 1], StartPosition = FormStartPosition.Manual, Location = new Point(-4000, -4000), ShowInTaskbar = false });
+            return;
+        }
         // Lets the installer see that the app is running (Inno Setup AppMutex) before it replaces files.
         using var running = new Mutex(false, "DriveGramTrayRunning");
         Application.Run(new TrayApp(state));

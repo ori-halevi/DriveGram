@@ -34,6 +34,8 @@ sealed class TrayApp : ApplicationContext
         _busy = new Icon(Path.Combine(dir, "drivegram-busy.ico"), SystemInformation.SmallIconSize);
 
         var logs = new ToolStripMenuItem("פתח את תיקיית היומן");
+        var settings = new ToolStripMenuItem("הגדרות והתחברות...");
+        settings.Click += async (_, _) => await ShowWizardAsync();
         var exit = new ToolStripMenuItem("יציאה");
         _open.Font = new Font(_open.Font, FontStyle.Bold);
         _open.Click += (_, _) => OpenDrive();
@@ -46,7 +48,7 @@ sealed class TrayApp : ApplicationContext
 
         var menu = new ContextMenuStrip { RightToLeft = RightToLeft.Yes, Font = Ui.Font };
         menu.Items.AddRange([_status, new ToolStripSeparator(), _open, _trash, new ToolStripSeparator(),
-            _toggle, _autostart, logs, new ToolStripSeparator(), exit]);
+            _toggle, settings, _autostart, logs, new ToolStripSeparator(), exit]);
         menu.Opening += (_, _) => UpdateUi();
 
         _icon = new NotifyIcon { Icon = _idle, Text = "DriveGram", ContextMenuStrip = menu, Visible = true };
@@ -61,22 +63,30 @@ sealed class TrayApp : ApplicationContext
     // ── mount / unmount ──────────────────────────────────────────────────────
     bool firstRunDone;
 
-    /// <summary>First use on this PC: open the guided console setup (Telegram QR login + drive
-    /// password), then try to mount again.</summary>
-    async Task RunSetupAsync()
+    /// <summary>The setup wizard (first use, or "settings and sign-in" from the menu); mounts when it finishes.</summary>
+    async Task ShowWizardAsync()
     {
         firstRunDone = true;
-        Balloon("ברוך הבא ל־DriveGram", "נפתח חלון הגדרה: התחברות לטלגרם בסריקת QR, ואז סיסמה לכונן.", ToolTipIcon.Info);
-        try
+        if (_session is not null)
         {
-            var args = _state.Folder is null ? "setup" : $"setup --folder \"{_state.Folder}\"";
-            using var p = Process.Start(new ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, "drivegram.exe"), args)
-                { UseShellExecute = true });
-            if (p is not null) await p.WaitForExitAsync();
+            if (MessageBox.Show("כדי לשנות הגדרות צריך לנתק את הכונן לרגע. לנתק?", "DriveGram", MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question, MessageBoxDefaultButton.Button1, MessageBoxOptions.RightAlign | MessageBoxOptions.RtlReading)
+                != DialogResult.Yes) return;
+            await StopAsync(exitApp: false);
+            if (_session is not null) return;
         }
-        catch (Exception ex) { Fail("לא ניתן לפתוח את חלון ההגדרה", ex.Message); return; }
+        if (_wizard is { IsDisposed: false }) { _wizard.Activate(); return; }
+        using (_wizard = new Setup.SetupWizard(_state))
+        {
+            var result = _wizard.ShowDialog();
+            _wizard = null;
+            _autostart.Checked = ShellIntegration.AutostartEnabled;
+            if (result != DialogResult.OK) { UpdateUi(); return; }
+        }
         await MountAsync();
     }
+
+    Setup.SetupWizard? _wizard;
 
     async Task MountAsync()
     {
@@ -86,7 +96,7 @@ sealed class TrayApp : ApplicationContext
         UpdateUi();
         try
         {
-            _session = await Task.Run(() => DriveSession.StartAsync(_state, ask: null, UnlockAsync, null, takeOver: false));
+            _session = await Task.Run(() => DriveSession.StartAsync(_state, UnlockAsync, null, takeOver: false));
             _session.StopRequested += () => _ui.Post(async _ => await StopAsync(exitApp: true, ask: false), null);
             _session.Sync.WritableChanged += () => _ui.Post(_ => Balloon(
                 _session?.Writable == true ? "הכונן ניתן לכתיבה" : "הכונן במצב קריאה בלבד",
@@ -97,10 +107,11 @@ sealed class TrayApp : ApplicationContext
                 : $"הכונן זמין ב־{_session.MountPoint} לקריאה בלבד: הוא פתוח לכתיבה במחשב {_session.Sync.LeaseHolder}.");
         }
         catch (OperationCanceledException) { _lastError = "לא הוזנה סיסמה"; }
-        catch (Exception ex) when (ex is NeedsLoginException or DriveGram.Remote.NoDriveException)
+        catch (Exception ex) when (ex is DriveGram.Remote.NotSignedInException or DriveGram.Remote.NoDriveException)
         {
-            if (!firstRunDone) _ui.Post(async _ => await RunSetupAsync(), null);
-            else Fail("ההגדרה לא הושלמה", "בחר 'חבר את הכונן' כדי לנסות שוב.");
+            _lastError = ex is DriveGram.Remote.NoDriveException ? "עדיין אין כונן" : "לא מחובר לטלגרם";
+            if (!firstRunDone) _ui.Post(async _ => await ShowWizardAsync(), null);
+            else Balloon("נדרשת הגדרה", "פתח 'הגדרות והתחברות...' מהתפריט.", ToolTipIcon.Info);
         }
         catch (AlreadyMountedException)
         {

@@ -102,13 +102,7 @@ static string Ask(string prompt, bool secret = false)
     return new string(chars.ToArray());
 }
 
-static string? TelegramAsk(string what) => what switch
-{
-    "phone_number" => Ask("Phone number (international format, e.g. +972...): "),
-    "verification_code" => Ask("Login code Telegram just sent you: "),
-    "password" => Ask("Telegram two-step verification password: ", secret: true),
-    _ => throw new InvalidOperationException("This phone number has no Telegram account."),
-};
+static string TwoFactor() => Ask("Telegram two-step verification password: ", secret: true);
 
 /// <summary>Everything a new PC needs, in one guided run (the tray opens this on first use).</summary>
 async Task<int> Setup()
@@ -151,39 +145,45 @@ async Task<int> Login()
     }
     state.Save();
     Console.WriteLine("Tip: use a dedicated Telegram account for DriveGram, not your personal one.");
-    using var client = DriveSession.NewTelegramClient(state, TelegramAsk);
+    using var client = DriveSession.NewTelegramClient(state, TwoFactor);
     TL.User user;
+    try
+    {
+        user = await DriveGram.Remote.TelegramRemote.ResumeAsync(client);
+        Console.WriteLine($"Already signed in as {user.first_name} {user.last_name} (@{user.username}).");
+        return 0;
+    }
+    catch (DriveGram.Remote.NotSignedInException) { }
+
     if (usePhone)
     {
         Console.WriteLine("The code arrives INSIDE the Telegram app (chat \"Telegram\" with the blue tick), usually not by SMS.");
-        Console.WriteLine("Each new attempt cancels the previous code — always use the newest one.");
-        user = await client.LoginUserIfNeeded();
+        string? next = await client.Login(Ask("Phone number (international format, e.g. +972...): "));
+        while (next is not null)
+        {
+            next = next switch
+            {
+                "verification_code" => await client.Login(Ask("Login code: ")),
+                "password" => await client.Login(TwoFactor()),
+                _ => throw new InvalidOperationException($"Telegram asked for '{next}' (no account for this number?)."),
+            };
+        }
+        user = client.User!;
     }
-    else
-    {
-        await client.ConnectAsync();
-        user = client.User ?? await client.LoginWithQRCode(ShowQr, logoutFirst: false);
-        File.Delete(Path.Combine(state.Dir, "login-qr.png"));
-    }
+    else user = await client.LoginWithQRCode(ShowQr, logoutFirst: false);
     Console.WriteLine($"Signed in as {user.first_name} {user.last_name} (@{user.username}). The session is stored encrypted for this Windows user only.");
     return 0;
 }
 
 // Called again with a fresh token every ~30 s until the phone scans it.
-void ShowQr(string url)
+static void ShowQr(string url)
 {
     using var gen = new QRCoder.QRCodeGenerator();
     using var data = gen.CreateQrCode(url, QRCoder.QRCodeGenerator.ECCLevel.L);
-    var png = Path.Combine(state.Dir, "login-qr.png");
-    File.WriteAllBytes(png, new QRCoder.PngByteQRCode(data).GetGraphic(10));
     Console.WriteLine();
     Console.WriteLine(new QRCoder.AsciiQRCode(data).GetGraphicSmall());
-    Console.WriteLine("""
-        Scan with your phone: Telegram -> Settings -> Devices -> Link Desktop Device.
-        (The code refreshes every ~30 seconds. If the console picture does not scan, use the image that just opened.)
-        """);
-    try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(png) { UseShellExecute = true }); }
-    catch (Exception ex) { Log.Debug($"could not open {png}: {ex.Message}"); }
+    Console.WriteLine("Scan with your phone: Telegram -> Settings -> Devices -> Link Desktop Device. (Refreshes every ~30 s.)");
+    Console.WriteLine("Tip: the DriveGram tray app has a setup window that shows this as a proper picture.");
 }
 
 Task<Keys> Unlock(ControlState ctrl)
@@ -215,7 +215,7 @@ void OfferRemember(Keys keys)
 
 async Task<int> Init()
 {
-    await using var remote = await DriveSession.OpenRemoteAsync(state, TelegramAsk, create: true);
+    await using var remote = await DriveSession.OpenRemoteAsync(state, create: true);
     var ctrl = await SyncService.ReadControlAsync(remote, default);
     if (ctrl is null)
     {
@@ -256,7 +256,7 @@ async Task<int> Init()
 
 async Task<int> Status()
 {
-    await using var remote = await DriveSession.OpenRemoteAsync(state, TelegramAsk, create: false);
+    await using var remote = await DriveSession.OpenRemoteAsync(state, create: false);
     var ctrl = await SyncService.ReadControlAsync(remote, default) ?? throw new DriveGram.Remote.NoDriveException();
     using var db = IndexDb.Open(state.IndexPath);
     var (files, dirs) = db.Counts();
@@ -307,7 +307,7 @@ async Task<int> Mount(string? mountPoint)
         return 3;
     }
     Console.WriteLine("Syncing the folder tree...");
-    await using var session = await DriveSession.StartAsync(state, TelegramAsk, Unlock, mountPoint, takeOver);
+    await using var session = await DriveSession.StartAsync(state, Unlock, mountPoint, takeOver);
     if (!session.Writable)
         Console.WriteLine($"Read-only: the drive is open for writing on '{session.Sync.LeaseHolder}'. Close it there (or use --take-over if that PC is gone).");
     Console.WriteLine($"DriveGram is mounted at {session.MountPoint}  — press Ctrl+C to unmount.");

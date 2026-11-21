@@ -41,11 +41,38 @@ public sealed class TelegramRemote : IRemote
         _down = new Governor("download", downloadParallel);
     }
 
-    /// <summary>Log in (prompting through `ask` if needed) and open — or create — the drive's channels.</summary>
+    /// <summary>
+    /// Resume the saved session without ever starting an interactive login (LoginUserIfNeeded insists
+    /// on a phone number even for a valid saved session — the bug that made the tray think it was
+    /// signed out). Asks Telegram "who am I" directly; NotSignedInException if there is no session
+    /// or it was revoked (e.g. "terminate other sessions" on the phone).
+    /// </summary>
+    public static async Task<User> ResumeAsync(Client client)
+    {
+        await client.ConnectAsync();
+        if (client.UserId == 0) throw new NotSignedInException();
+        try
+        {
+            var users = await client.Users_GetUsers(InputUser.Self);
+            return users.FirstOrDefault() as User ?? throw new NotSignedInException();
+        }
+        catch (RpcException e) when (e.Code == 401) { throw new NotSignedInException(); }
+    }
+
+    /// <summary>Does this account hold a DriveGram drive (both channels)?</summary>
+    public static async Task<bool> DriveExistsAsync(Client client, TelegramChannels? known)
+    {
+        await ResumeAsync(client);
+        var all = (await client.Messages_GetAllChats()).chats.Values.OfType<Channel>().ToList();
+        bool Has(long? id, string title) => all.Any(c => c.id == id || c.title == title);
+        return Has(known?.DataId, DataTitle) && Has(known?.JournalId, JournalTitle);
+    }
+
+    /// <summary>Open — or create — the drive's channels on the signed-in account.</summary>
     public static async Task<TelegramRemote> OpenAsync(Client client, TelegramChannels? known, bool createIfMissing,
         int uploadParallel = 8, int downloadParallel = 8)
     {
-        await client.LoginUserIfNeeded();
+        await ResumeAsync(client);
         var all = (await client.Messages_GetAllChats()).chats.Values.OfType<Channel>().ToList();
 
         Channel? Find(long? id, string title) =>
