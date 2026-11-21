@@ -18,7 +18,9 @@ public sealed record SnapInfo(int Msg, int Upto);
 public sealed record DriveIdentity(string Id, string Name, long DataChannel);
 
 /// <summary>The one editable record of a drive (Telegram: the pinned text message of the journal channel).</summary>
-public sealed record ControlState(int V, VaultHeader Vault, LeaseInfo? Lease, SnapInfo? Snap, DriveIdentity? Drive = null)
+/// <param name="MinReader">/<param name="MinWriter">oldest StorageFormat that may read / write this drive (see StorageFormat).</param>
+public sealed record ControlState(int V, VaultHeader Vault, LeaseInfo? Lease, SnapInfo? Snap, DriveIdentity? Drive = null,
+    int MinReader = 1, int MinWriter = 1)
 {
     public string ToJson() => JsonSerializer.Serialize(this, OpJson.Options);
     public static ControlState? FromJson(string? json) =>
@@ -62,6 +64,8 @@ public sealed class SyncService : IAsyncDisposable
     DateTime _lastSnapshot = DateTime.UtcNow, _lastGc = DateTime.MinValue;
 
     public bool Writable { get; private set; }
+    /// <summary>A newer DriveGram changed this drive's format: this version only reads, and asks to be updated.</summary>
+    public bool NeedsUpdate { get; private set; }
     /// <summary>False while the content engine is uploading (set by the host); garbage collection waits.</summary>
     public Func<bool>? CanCollectGarbage { get; set; }
     public string? LeaseHolder { get; private set; }
@@ -107,6 +111,8 @@ public sealed class SyncService : IAsyncDisposable
     public async Task StartAsync(bool takeOver, CancellationToken ct)
     {
         var ctrl = await ReadControlAsync(_remote, ct) ?? throw new InvalidOperationException("No drive on this remote.");
+        if (ctrl.MinReader > StorageFormat.Current) throw new NeedsUpdateException($"needs format {ctrl.MinReader}");
+        if (ctrl.MinWriter > StorageFormat.Current) MarkNeedsUpdate($"writing needs format {ctrl.MinWriter}");
         if (_db.IsFresh && ctrl.Snap is { } snap)
         {
             Log.Info($"loading snapshot (journal up to #{snap.Upto})");
@@ -122,6 +128,11 @@ public sealed class SyncService : IAsyncDisposable
     async Task TryAcquireLeaseAsync(bool force, CancellationToken ct)
     {
         var ctrl = (await ReadControlAsync(_remote, ct))!;
+        if (NeedsUpdate || ctrl.MinWriter > StorageFormat.Current)
+        {
+            SetWritable(false, null); // never write a format we do not fully understand
+            return;
+        }
         var lease = ctrl.Lease;
         bool free = lease is null || lease.Dev == _db.DeviceId || lease.Until < NowUnix;
         if (!free && !force)
@@ -148,6 +159,13 @@ public sealed class SyncService : IAsyncDisposable
         await _remote.WriteControlAsync((ctrl with { Lease = lease }).ToJson(), ct);
     }
 
+    void MarkNeedsUpdate(string why)
+    {
+        if (!NeedsUpdate) Log.Error($"this drive was written by a newer DriveGram ({why}); read-only until DriveGram is updated");
+        NeedsUpdate = true;
+        SetWritable(false, null);
+    }
+
     void SetWritable(bool writable, string? holder)
     {
         bool changed = Writable != writable;
@@ -167,7 +185,19 @@ public sealed class SyncService : IAsyncDisposable
             {
                 if (item.Name.StartsWith("j-"))
                 {
-                    var entry = OpJson.DeserializeEntry(Envelope.Open(_keys.JournalKey, await _remote.ReadJournalAsync(item.Id, ct)));
+                    JournalEntry entry;
+                    try { entry = OpJson.DeserializeEntry(Envelope.Open(_keys.JournalKey, await _remote.ReadJournalAsync(item.Id, ct))); }
+                    catch (Exception ex) when (ex is System.Text.Json.JsonException or NotSupportedException)
+                    {
+                        // an op type / shape from a newer version: stop HERE (skip nothing, advance nothing)
+                        MarkNeedsUpdate($"journal #{item.Id}: {ex.Message}");
+                        break;
+                    }
+                    if (entry.V > StorageFormat.Current)
+                    {
+                        MarkNeedsUpdate($"journal #{item.Id} is format {entry.V}");
+                        break;
+                    }
                     if (entry.Dev != _db.DeviceId)
                     {
                         _db.InTransaction(() =>
@@ -294,7 +324,7 @@ public sealed class SyncService : IAsyncDisposable
                 else
                 {
                     await CatchUpAsync(ct);
-                    if (_db.OutboxCount() == 0) await TryAcquireLeaseAsync(false, ct);
+                    if (_db.OutboxCount() == 0 && !NeedsUpdate) await TryAcquireLeaseAsync(false, ct);
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { }

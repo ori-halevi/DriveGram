@@ -495,7 +495,7 @@ public sealed class IndexDb : IDisposable
     public int OutboxCount() => Convert.ToInt32(Scalar("SELECT COUNT(*) FROM outbox") ?? 0);
 
     // ── snapshots (full index image, stored encrypted in the journal channel) ─
-    sealed record Snap(List<Node> Nodes, List<string[]> FileChunks, List<StoredChunk> Chunks);
+    sealed record Snap(List<Node> Nodes, List<string[]> FileChunks, List<StoredChunk> Chunks, int V = StorageFormat.Current);
 
     public byte[] ExportSnapshot()
     {
@@ -518,6 +518,7 @@ public sealed class IndexDb : IDisposable
     {
         using var gz = new GZipStream(new MemoryStream(data), CompressionMode.Decompress);
         var snap = JsonSerializer.Deserialize<Snap>(gz, OpJson.Options)!;
+        if (snap.V > StorageFormat.Current) throw new NeedsUpdateException($"snapshot is format {snap.V}");
         long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         InTransaction(() =>
         {

@@ -93,6 +93,10 @@ sealed class TrayApp : ApplicationContext
             d.RetryDelaySeconds = 15;
             session.StopRequested += () => _ui.Post(async _ => await StopAsync(d, ask: false), null);
             session.SignedOut += () => _ui.Post(async _ => await OnSignedOutAsync(d), null);
+            if (session.Sync.NeedsUpdate)
+                Balloon(L.T("צריך לעדכן את DriveGram", "Update DriveGram"),
+                    L.T($"{session.MountPoint} נכתב בגרסה חדשה יותר. הוא פתוח לקריאה בלבד עד שתתקין את הגרסה החדשה.",
+                        $"{session.MountPoint} was written by a newer version. It is read-only until you install it."), ToolTipIcon.Warning);
             session.Sync.WritableChanged += () => _ui.Post(_ => Balloon(
                 d.Session?.Writable == true ? L.T($"{d.Letter} ניתן לכתיבה", $"{d.Letter} is writable") : L.T($"{d.Letter} לקריאה בלבד", $"{d.Letter} is read-only"),
                 d.Session?.Writable == true
@@ -129,6 +133,13 @@ sealed class TrayApp : ApplicationContext
                 L.T($"הערוצים של {d.Name} נמחקו מהחשבון. פתח את 'הגדרות והתחברות' כדי להחליט מה לעשות.",
                     $"The channels of {d.Name} were deleted from the account. Open 'Settings and sign-in' to decide what to do."),
                 ToolTipIcon.Error);
+        }
+        catch (NeedsUpdateException)
+        {
+            d.Problem = L.T("צריך לעדכן את DriveGram", "DriveGram needs an update");
+            Balloon(L.T("צריך לעדכן את DriveGram", "Update DriveGram"),
+                L.T($"{d.Name} נכתב בגרסה חדשה יותר של DriveGram. התקן את הגרסה החדשה כדי לפתוח אותו.",
+                    $"{d.Name} was written by a newer DriveGram. Install the new version to open it."), ToolTipIcon.Warning);
         }
         catch (AlreadyMountedException) { d.Problem = L.T("פתוח כבר בחלון אחר", "already open in another window"); }
         catch (WrongPasswordException) { d.Problem = L.T("סיסמה שגויה", "wrong password"); }
@@ -441,6 +452,7 @@ sealed class TrayApp : ApplicationContext
         if (d.Stopping) return L.T("מתנתק…", "disconnecting…");
         if (d.Session is not { } s) return d.Problem is null ? L.T("לא מחובר", "not connected") : d.Problem;
         var st = s.Status;
+        if (s.Sync.NeedsUpdate) return L.T("קריאה בלבד: צריך לעדכן את DriveGram", "read-only: DriveGram needs an update");
         if (!s.Writable) return L.T($"קריאה בלבד (פתוח לכתיבה ב־{s.Sync.LeaseHolder})", $"read-only (open for writing on {s.Sync.LeaseHolder})");
         if (st.PendingFiles > 0 || st.UploadsInFlight > 0)
             return L.T($"מעלה: {st.PendingFiles} קבצים, {Ui.Size(st.StagedBytes)}", $"uploading: {st.PendingFiles} files, {Ui.Size(st.StagedBytes)}");

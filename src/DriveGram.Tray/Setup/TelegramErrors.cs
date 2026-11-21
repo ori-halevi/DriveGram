@@ -46,6 +46,8 @@ static class TelegramErrors
             "The account is not signed in to Telegram on this PC. Open the drive's \"Settings and sign-in\"."),
         DriveGram.Remote.DriveVanishedException => L.T("הערוצים של הכונן כבר לא קיימים בטלגרם (נמחקו, או שהחשבון יצא מהם).",
             "The drive's channels no longer exist in Telegram (deleted, or the account left them)."),
+        NeedsUpdateException => L.T("הכונן הזה נכתב בגרסה חדשה יותר של DriveGram. התקן את הגרסה החדשה כדי לפתוח אותו.",
+            "This drive was written by a newer version of DriveGram. Install it to open the drive."),
         DriveGram.Remote.NoDriveException => L.T("ההגדרה של הכונן הזה לא הושלמה.", "This drive's setup is not finished."),
         TimeoutException or System.Net.Sockets.SocketException or IOException =>
             L.T("אין חיבור לשרתי טלגרם. בדוק את החיבור לאינטרנט ונסה שוב.", "Cannot reach Telegram. Check the internet connection and try again."),
