@@ -58,6 +58,7 @@ public sealed class TelegramRemote : IRemote
         _journal = journal;
         _up = up;
         _down = down;
+        _ctl.SignedOut += OnSignedOut;
         _up.SignedOut += OnSignedOut;
         _down.SignedOut += OnSignedOut;
     }
@@ -424,8 +425,16 @@ public sealed class TelegramRemote : IRemote
     long _bytesSent;
     public long BytesSent => Interlocked.Read(ref _bytesSent);
 
-    async Task<InputFileBase> UploadPartsAsync(byte[] payload, string name, CancellationToken ct)
+    /// <summary>Journal entries and the control record (lease heartbeat): small, and they must not wait
+    /// behind megabytes of chunk parts, or a slow line lets the lease expire while uploading.</summary>
+    readonly Governor _ctl = new("control", 2);
+
+    /// <summary>When Telegram asked this account to wait (flood), until when.</summary>
+    public DateTime? WaitingUntil => new[] { _up.WaitingUntil, _down.WaitingUntil, _ctl.WaitingUntil }.Max();
+
+    async Task<InputFileBase> UploadPartsAsync(byte[] payload, string name, CancellationToken ct, Governor? lane = null)
     {
+        var gov = lane ?? _up;
         int parts = Math.Max(1, (payload.Length + PartSize - 1) / PartSize);
         bool big = payload.Length > SmallFileLimit;
         long fileId = Random.Shared.NextInt64();
@@ -433,7 +442,7 @@ public sealed class TelegramRemote : IRemote
             new ParallelOptions { MaxDegreeOfParallelism = 16, CancellationToken = ct }, async (i, token) =>
             {
                 var bytes = payload.AsSpan(i * PartSize, Math.Min(PartSize, payload.Length - i * PartSize)).ToArray();
-                await _up.RunAsync(async () =>
+                await gov.RunAsync(async () =>
                 {
                     bool ok = big
                         ? await _client.Upload_SaveBigFilePart(fileId, i, parts, bytes)
@@ -448,10 +457,11 @@ public sealed class TelegramRemote : IRemote
     }
 
     async Task<int> SendDocumentAsync(Channel channel, ConcurrentDictionary<int, Document> docs, string name,
-        byte[] payload, CancellationToken ct)
+        byte[] payload, CancellationToken ct, Governor? lane = null)
     {
-        var file = await UploadPartsAsync(payload, name, ct);
-        var msg = await _up.RunAsync(() => _client.SendMediaAsync(channel, "", file, "application/octet-stream"), ct, PartTimeout);
+        var gov = lane ?? _up;
+        var file = await UploadPartsAsync(payload, name, ct, gov);
+        var msg = await gov.RunAsync(() => _client.SendMediaAsync(channel, "", file, "application/octet-stream"), ct, PartTimeout);
         if (msg.media is MessageMediaDocument { document: Document d }) docs[msg.id] = d;
         return msg.id;
     }
@@ -460,7 +470,7 @@ public sealed class TelegramRemote : IRemote
         SendDocumentAsync(_data, _docs, name, payload, ct);
 
     public Task<int> AppendJournalAsync(string name, byte[] payload, CancellationToken ct) =>
-        SendDocumentAsync(_journal, _jdocs, name, payload, ct);
+        SendDocumentAsync(_journal, _jdocs, name, payload, ct, _ctl);
 
     async Task<Document> GetDocAsync(Channel channel, ConcurrentDictionary<int, Document> docs, int msg, CancellationToken ct)
     {
@@ -534,7 +544,7 @@ public sealed class TelegramRemote : IRemote
     async Task<int> ControlIdAsync(CancellationToken ct)
     {
         if (_controlId != 0) return _controlId;
-        var full = await _down.RunAsync(() => _client.Channels_GetFullChannel(_journal), ct, ReadTimeout);
+        var full = await _ctl.RunAsync(() => _client.Channels_GetFullChannel(_journal), ct, ReadTimeout);
         return _controlId = full.full_chat is ChannelFull cf ? cf.pinned_msg_id : 0;
     }
 
@@ -542,7 +552,7 @@ public sealed class TelegramRemote : IRemote
     {
         int id = await ControlIdAsync(ct);
         if (id == 0) return null;
-        var r = await _down.RunAsync(() => _client.Channels_GetMessages(_journal, [new InputMessageID { id = id }]), ct, ReadTimeout);
+        var r = await _ctl.RunAsync(() => _client.Channels_GetMessages(_journal, [new InputMessageID { id = id }]), ct, ReadTimeout);
         return r.Messages.FirstOrDefault() is Message m ? m.message : null;
     }
 
@@ -551,14 +561,14 @@ public sealed class TelegramRemote : IRemote
         int id = await ControlIdAsync(ct);
         if (id == 0)
         {
-            var m = await _up.RunAsync(() => _client.SendMessageAsync(_journal, text), ct, ReadTimeout);
-            await _up.RunAsync(() => _client.Messages_UpdatePinnedMessage(_journal, m.id, silent: true), ct, ReadTimeout);
+            var m = await _ctl.RunAsync(() => _client.SendMessageAsync(_journal, text), ct, ReadTimeout);
+            await _ctl.RunAsync(() => _client.Messages_UpdatePinnedMessage(_journal, m.id, silent: true), ct, ReadTimeout);
             _controlId = m.id;
             return;
         }
         try
         {
-            await _up.RunAsync(() => _client.Messages_EditMessage(_journal, id, message: text), ct, ReadTimeout);
+            await _ctl.RunAsync(() => _client.Messages_EditMessage(_journal, id, message: text), ct, ReadTimeout);
         }
         catch (RpcException e) when (e.Message == "MESSAGE_NOT_MODIFIED") { }
     }
@@ -566,6 +576,7 @@ public sealed class TelegramRemote : IRemote
     public ValueTask DisposeAsync()
     {
         _up.SignedOut -= OnSignedOut;
+        _ctl.SignedOut -= OnSignedOut;
         _down.SignedOut -= OnSignedOut;
         if (_ownsClient) _client.Dispose();
         Interlocked.Exchange(ref _release, null)?.Dispose();

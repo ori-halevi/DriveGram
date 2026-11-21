@@ -32,6 +32,9 @@ public sealed class DriveSession : IAsyncDisposable
     public SyncService Sync { get; }
 
     readonly IRemote _remote;
+
+    /// <summary>Telegram asked the account to wait (rate limit) until this time; null if not.</summary>
+    public DateTime? WaitingUntil => _remote.WaitingUntil;
     readonly FileSystemHost _host;
     readonly Semaphore _instance;
     readonly EventWaitHandle _stopEvent;
@@ -77,6 +80,7 @@ public sealed class DriveSession : IAsyncDisposable
         _instance = instance;
         _stopEvent = stopEvent;
         _host = new FileSystemHost(new DriveFileSystem(db, engine, sync, state.Config.VolumeLabel));
+        sync.RemoteOpsApplying += NoteOldPaths;
         sync.RemoteOpsApplied += NotifyExplorer;
         new Thread(() =>
         {
@@ -340,7 +344,7 @@ public sealed class DriveSession : IAsyncDisposable
     public string Restore(string id)
     {
         if (!Writable) throw new InvalidOperationException(L.T("הכונן במצב קריאה בלבד במחשב הזה כרגע.", "The drive is read-only on this PC right now."));
-        var n = Db.Get(id) ?? throw new FileNotFoundException(id);
+        var n = Db.Get(id) ?? throw new FileNotFoundException(L.T("הפריט כבר נמחק לצמיתות (אולי במחשב אחר).", "The item was already deleted for good (perhaps on another PC)."));
         var parent = n.Parent is not null && IsLive(n.Parent) ? n.Parent : IndexDb.RootId;
         var ops = new List<Op> { new RestoreOp(n.Id, parent, n.Name) };
         if (n.Dir)
@@ -370,7 +374,16 @@ public sealed class DriveSession : IAsyncDisposable
     }
 
     // ── Explorer change notifications ────────────────────────────────────────
-    void Notify(string path, NotifyAction action, bool dir)
+    readonly Dictionary<string, string> _oldPaths = new();
+
+    void NoteOldPaths(IReadOnlyList<Op> ops)
+    {
+        _oldPaths.Clear();
+        foreach (var op in ops)
+            if (op is UpsertOp or RestoreOp && Db.Get(op.Id) is { Trashed: 0 }) _oldPaths[op.Id] = PathOf(op.Id);
+    }
+
+    void Notify(string path, NotifyAction action, bool dir, NotifyFilter? filter = null)
     {
         if (!_mounted) return;
         try
@@ -382,7 +395,7 @@ public sealed class DriveSession : IAsyncDisposable
                 {
                     FileName = path,
                     Action = action,
-                    Filter = dir ? NotifyFilter.ChangeDirName : NotifyFilter.ChangeFileName,
+                    Filter = filter ?? (dir ? NotifyFilter.ChangeDirName : NotifyFilter.ChangeFileName),
                 }]);
             }
             finally { _host.NotifyEnd(); }
@@ -397,13 +410,13 @@ public sealed class DriveSession : IAsyncDisposable
         {
             var n = Db.Get(op.Id);
             if (n is null) continue;
-            var action = op switch
-            {
-                TrashOp or PurgeOp => NotifyAction.Removed,
-                ContentOp => NotifyAction.Modified,
-                _ => NotifyAction.Added,
-            };
-            Notify(PathOf(n.Id), action, n.Dir);
+            var path = PathOf(n.Id);
+            if (_oldPaths.TryGetValue(op.Id, out var old) && !string.Equals(old, path, StringComparison.Ordinal))
+                Notify(old, NotifyAction.Removed, n.Dir); // renamed / moved: the old name must go away
+            if (op is ContentOp)
+                Notify(path, NotifyAction.Modified, false, NotifyFilter.ChangeSize | NotifyFilter.ChangeLastWrite);
+            else
+                Notify(path, op is TrashOp or PurgeOp ? NotifyAction.Removed : NotifyAction.Added, n.Dir);
         }
     }
 

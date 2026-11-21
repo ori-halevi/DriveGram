@@ -16,6 +16,8 @@ public sealed class ClientHealer : IDisposable
     readonly string _name;
     readonly CancellationTokenSource _cts = new();
     int _healing, _strikes;
+    readonly SemaphoreSlim _wake = new(0);
+    Task _heal = Task.CompletedTask;
 
     public ClientHealer(WTelegram.Client client, string name)
     {
@@ -36,7 +38,9 @@ public sealed class ClientHealer : IDisposable
 
     void OnNetwork(object? sender, System.Net.NetworkInformation.NetworkAvailabilityEventArgs e)
     {
-        if (e.IsAvailable) _ = CheckSoonAsync();
+        if (!e.IsAvailable) return;
+        if (_healing == 1) _wake.Release(); // a heal is waiting out its back-off: try now
+        else _ = CheckSoonAsync();
     }
 
     async Task CheckSoonAsync()
@@ -45,8 +49,24 @@ public sealed class ClientHealer : IDisposable
         if (_client.UserId != 0 && _client.Disconnected) Kick("network is back");
     }
 
-    /// <summary>The PC woke up, or the caller saw the connection fail: check now.</summary>
-    public void Poke() => _ = CheckSoonAsync();
+    /// <summary>The PC woke up: check now. After sleep the socket often still LOOKS connected while it is
+    /// dead, so ask the server something small and reconnect if it does not answer.</summary>
+    public void Poke()
+    {
+        if (_healing == 1) { _wake.Release(); return; }
+        _ = ProbeAsync();
+    }
+
+    async Task ProbeAsync()
+    {
+        try { await Task.Delay(3000, _cts.Token); } catch (OperationCanceledException) { return; }
+        if (_client.UserId == 0) return;
+        if (_client.Disconnected) { Kick("the PC woke up"); return; }
+        try { await TL.SchemaExtensions.Updates_GetState(_client).WaitAsync(TimeSpan.FromSeconds(15), _cts.Token); }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
+        catch (TimeoutException) { Kick("no answer after the PC woke up"); }
+        catch (Exception) { } // an answer, even an error, means the connection is alive
+    }
 
     async Task WatchAsync(CancellationToken ct)
     {
@@ -62,7 +82,7 @@ public sealed class ClientHealer : IDisposable
     void Kick(string why)
     {
         if (_cts.IsCancellationRequested || Interlocked.Exchange(ref _healing, 1) == 1) return;
-        _ = Task.Run(() => HealAsync(why));
+        _heal = Task.Run(() => HealAsync(why));
     }
 
     async Task HealAsync(string why)
@@ -87,7 +107,9 @@ public sealed class ClientHealer : IDisposable
                 catch (Exception ex)
                 {
                     if (attempt == 1 || attempt % 10 == 0) Log.Warn($"telegram ({_name}): reconnect failed ({ex.Message}); retrying");
-                    try { await Task.Delay(delay, ct); } catch (OperationCanceledException) { return; }
+                    try { await Task.WhenAny(Task.Delay(delay, ct), _wake.WaitAsync(ct)); }
+                    catch (OperationCanceledException) { return; }
+                    if (ct.IsCancellationRequested) return;
                     delay = TimeSpan.FromSeconds(Math.Min(60, delay.TotalSeconds * 2));
                 }
             }
@@ -98,6 +120,7 @@ public sealed class ClientHealer : IDisposable
     public void Dispose()
     {
         _cts.Cancel();
+        try { _heal.Wait(TimeSpan.FromSeconds(3)); } catch { } // never dispose the client under a running reconnect
         NetworkChange.NetworkAvailabilityChanged -= OnNetwork;
         _client.OnOther -= OnOther;
     }

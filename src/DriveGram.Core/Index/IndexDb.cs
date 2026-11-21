@@ -548,6 +548,16 @@ public sealed class IndexDb : IDisposable
 
     public void DeleteOutboxUpTo(long seq) => Exec("DELETE FROM outbox WHERE seq<=@s", ("@s", seq));
 
+    public void DeleteOutbox(IEnumerable<long> seqs) => InTransaction(() =>
+    {
+        foreach (var s in seqs) Exec("DELETE FROM outbox WHERE seq=@s", ("@s", s));
+    });
+
+    /// <summary>Files with local changes that were never committed (new files still uploading).</summary>
+    public HashSet<string> UncommittedNewFiles() => Query(
+        "SELECT p.node FROM pending p WHERE NOT EXISTS (SELECT 1 FROM file_chunks f WHERE f.node = p.node)",
+        r => r.GetString(0)).ToHashSet();
+
     public int OutboxCount() => Convert.ToInt32(Scalar("SELECT COUNT(*) FROM outbox") ?? 0);
 
     // ── snapshots (full index image, stored encrypted in the journal channel) ─

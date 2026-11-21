@@ -138,17 +138,20 @@ sealed class TrayApp : ApplicationContext
                 Balloon(L.T("צריך לעדכן את DriveGram", "Update DriveGram"),
                     L.T($"{session.MountPoint} נכתב בגרסה חדשה יותר. הוא פתוח לקריאה בלבד עד שתתקין את הגרסה החדשה.",
                         $"{session.MountPoint} was written by a newer version. It is read-only until you install it."), ToolTipIcon.Warning);
-            session.Sync.WritableChanged += () => _ui.Post(_ => Balloon(
-                d.Session?.Writable == true ? L.T($"{d.Letter} ניתן לכתיבה", $"{d.Letter} is writable") : L.T($"{d.Letter} לקריאה בלבד", $"{d.Letter} is read-only"),
-                d.Session?.Writable == true
-                    ? L.T("אפשר לשמור קבצים שוב.", "You can save files again.")
-                    : L.T($"הכונן פתוח לכתיבה במחשב {d.Session?.Sync.LeaseHolder}.", $"The drive is open for writing on {d.Session?.Sync.LeaseHolder}."),
-                ToolTipIcon.Warning), null);
+            bool? shown = session.Writable;
+            session.Sync.WritableChanged += () => _ui.Post(async _ =>
+            {
+                await Task.Delay(TimeSpan.FromSeconds(8));
+                if (d.Session is not { } s || s.Writable == shown) return; // flipped back meanwhile
+                shown = s.Writable;
+                Balloon(s.Writable ? L.T($"{d.Letter} ניתן לכתיבה", $"{d.Letter} is writable") : L.T($"{d.Letter} לקריאה בלבד", $"{d.Letter} is read-only"),
+                    s.Writable ? L.T("אפשר לשמור קבצים שוב.", "You can save files again.") : ReadOnlyWhy(s),
+                    ToolTipIcon.Warning);
+            }, null);
 
             string text = session.Writable
                 ? L.T($"הכונן זמין ב־{session.MountPoint}", $"The drive is available as {session.MountPoint}")
-                : L.T($"{session.MountPoint} זמין לקריאה בלבד: הוא פתוח לכתיבה במחשב {session.Sync.LeaseHolder}.",
-                      $"{session.MountPoint} is read-only: it is open for writing on {session.Sync.LeaseHolder}.");
+                : $"{session.MountPoint}: {ReadOnlyWhy(session)}";
             if (session.LetterChanged is { } moved)
                 text += L.T($"\nהאות הקודמת הייתה תפוסה ({moved}).", $"\nThe usual letter was taken ({moved}).");
             Balloon(L.T("DriveGram מחובר", "DriveGram connected"), text);
@@ -377,6 +380,7 @@ sealed class TrayApp : ApplicationContext
             return;
         }
         if (_pendingSetup == d) _pendingSetup = null;
+        var account = state.Config.AccountKey;
         if (isNew)
         {
             d = new DriveController(AppState.Open(state.Id));
@@ -389,6 +393,13 @@ sealed class TrayApp : ApplicationContext
             d = fresh;
         }
         await MountAsync(d);
+        if (!string.IsNullOrEmpty(account))
+            foreach (var other in _drives.Where(o => o != d && o.NeedsSetup && o.Session is null && o.State.Config.AccountKey == account).ToList())
+            {
+                other.NeedsSetup = false; // same account, signed in again just now
+                if (_pendingSetup == other) _pendingSetup = null;
+                _ = MountAsync(other);
+            }
     }
 
     /// <summary>Which drive a profile points at (account + channels + drive id).</summary>
@@ -457,13 +468,13 @@ sealed class TrayApp : ApplicationContext
         UpdateIcon();
     }
 
+    bool _deleting;
+
     /// <summary>
     /// Permanently delete a drive — its Telegram channels and everything on this PC. Shows what will be
     /// lost and requires ticking "I understand" plus typing the drive's name. Drives this account does
     /// not own (a backup admin) can only be removed from this PC.
     /// </summary>
-    bool _deleting;
-
     async Task DeleteForeverAsync(DriveController d)
     {
         if (_deleting) return;
@@ -595,11 +606,20 @@ sealed class TrayApp : ApplicationContext
         if (s.Sync.NeedsUpdate) return L.T("קריאה בלבד: צריך לעדכן את DriveGram", "read-only: DriveGram needs an update");
         if (s.Sync.HeldBackChanges is > 0 and var held)
             return L.T($"⚠ {held} שינויים מוחזקים: הכונן נפתח לכתיבה ב־{s.Sync.LeaseHolder}", $"⚠ {held} changes held back: the drive was opened for writing on {s.Sync.LeaseHolder}");
-        if (!s.Writable) return L.T($"קריאה בלבד (פתוח לכתיבה ב־{s.Sync.LeaseHolder})", $"read-only (open for writing on {s.Sync.LeaseHolder})");
+        if (!s.Writable) return s.Sync.LeaseHolder is { } h
+            ? L.T($"קריאה בלבד (פתוח לכתיבה ב־{h})", $"read-only (open for writing on {h})")
+            : L.T("קריאה בלבד כרגע (בודק…)", "read-only for now (checking…)");
+        var wait = s.WaitingUntil is { } until ? L.T($" · טלגרם ביקש להמתין עד {until:HH:mm}", $" · Telegram asked to wait until {until:HH:mm}") : "";
         if (st.PendingFiles > 0 || st.UploadsInFlight > 0)
-            return L.T($"מעלה: {st.PendingFiles} קבצים, {Ui.Size(st.StagedBytes)}", $"uploading: {st.PendingFiles} files, {Ui.Size(st.StagedBytes)}");
+            return L.T($"מעלה: {st.PendingFiles} קבצים, {Ui.Size(st.StagedBytes)}", $"uploading: {st.PendingFiles} files, {Ui.Size(st.StagedBytes)}") + wait;
+        if (s.Sync.UnsentChanges is > 0 and var unsent)
+            return L.T($"{unsent} שינויים ממתינים לשליחה לטלגרם", $"{unsent} changes waiting to be sent to Telegram") + wait;
         return L.T("הכל שמור בטלגרם ✓", "everything is saved in Telegram ✓");
     }
+
+    static string ReadOnlyWhy(DriveSession s) => s.Sync.LeaseHolder is { } h
+        ? L.T($"הכונן פתוח לכתיבה במחשב {h}. כאן אפשר רק לקרוא.", $"The drive is open for writing on {h}. Here it can only be read.")
+        : L.T("הכונן זמין כרגע לקריאה בלבד; DriveGram בודק אם אפשר לכתוב.", "The drive is read-only for now; DriveGram is checking whether it can write.");
 
     string Summary() => _drives.Count == 0
         ? L.T("אין עדיין כוננים", "no drives yet")

@@ -75,6 +75,8 @@ public sealed class SyncService : IAsyncDisposable
     public event Action? WritableChanged;
     /// <summary>Ops from another PC were applied to the local index (so open folder views can refresh).</summary>
     public event Action<IReadOnlyList<Op>>? RemoteOpsApplied;
+    /// <summary>Raised just BEFORE other PCs' ops are applied (so listeners can note old paths).</summary>
+    public event Action<IReadOnlyList<Op>>? RemoteOpsApplying;
 
     public SyncService(IndexDb db, IRemote remote, Keys keys, SyncOptions? options = null)
     {
@@ -287,6 +289,8 @@ public sealed class SyncService : IAsyncDisposable
                     }
                     if (entry.Dev != _db.DeviceId)
                     {
+                        try { RemoteOpsApplying?.Invoke(entry.Ops); }
+                        catch (Exception ex) { Log.Warn($"remote-ops listener failed: {ex.Message}"); }
                         _db.InTransaction(() =>
                         {
                             foreach (var op in entry.Ops) _db.ApplyRemote(op);
@@ -351,6 +355,9 @@ public sealed class SyncService : IAsyncDisposable
     /// <summary>Changes made on this PC that cannot be sent because another PC holds the drive.</summary>
     public int HeldBackChanges => Writable ? 0 : _db.OutboxCount();
 
+    /// <summary>Local changes not in the journal yet (offline, retrying, or a new file still uploading).</summary>
+    public int UnsentChanges => _db.OutboxCount();
+
     /// <summary>Send queued local ops as journal entries.</summary>
     public async Task FlushAsync(CancellationToken ct)
     {
@@ -360,7 +367,10 @@ public sealed class SyncService : IAsyncDisposable
         {
             while (true)
             {
-                var batch = _db.PeekOutbox(500);
+                // Ops of a NEW file still uploading wait (in order) for its content: sent now, other PCs
+                // would show it as an empty file for minutes, and copying it there gives an empty copy.
+                var held = _db.UncommittedNewFiles();
+                var batch = _db.PeekOutbox(5000).Where(b => !held.Contains(b.Op.Id)).Take(500).ToList();
                 if (batch.Count == 0) return;
                 var entry = new JournalEntry(1, _db.DeviceId, NowUnix, batch.Select(b => b.Op).ToArray());
                 var payload = Envelope.Seal(_keys.JournalKey, OpJson.SerializeEntry(entry));
@@ -372,7 +382,7 @@ public sealed class SyncService : IAsyncDisposable
                     return await _remote.AppendJournalAsync($"j-{_db.DeviceId[..8]}.bin", payload, ct);
                 }, "journal append", ct);
                 _ownAppends.Add(msgId);
-                _db.DeleteOutboxUpTo(batch[^1].Seq);
+                _db.DeleteOutbox(batch.Select(b => b.Seq));
                 _opsSinceSnapshot += batch.Count;
             }
         }
@@ -435,6 +445,7 @@ public sealed class SyncService : IAsyncDisposable
     {
         var ct = _cts.Token;
         var nextBeat = DateTime.UtcNow + _o.HeartbeatInterval;
+        int failures = 0;
         while (!ct.IsCancellationRequested)
         {
             try
@@ -478,7 +489,14 @@ public sealed class SyncService : IAsyncDisposable
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
-            catch (Exception ex) { Log.Error("sync loop", ex); }
+            catch (Exception ex)
+            {
+                Log.Error("sync loop", ex);
+                failures++;
+                nextBeat = DateTime.UtcNow + TimeSpan.FromSeconds(Math.Min(_o.HeartbeatInterval.TotalSeconds, 5 * failures));
+                continue;
+            }
+            failures = 0;
         }
     }
 
