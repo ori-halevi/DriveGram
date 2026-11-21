@@ -127,7 +127,7 @@ public sealed partial class SyncService : IAsyncDisposable
         var (proposed, text) = keys.WithNewRecoveryKey((await ReadControlAsync(_remote, ct))!.Vault);
         var wrap = proposed.Recovery!;
         await ChangeVaultAsync(v => v with { Recovery = wrap }, v => v.Recovery?.Wrapped == wrap.Wrapped, ct);
-        Log.Info("recovery key created (a previous one, if any, no longer works)");
+        Log.Info("recovery key created (it replaces the previous one in the drive's record)");
         return text;
     }
 

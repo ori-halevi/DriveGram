@@ -65,8 +65,8 @@ sealed class BackupForm : Form
         noName.Font = new Font(Theme.Body, FontStyle.Bold);
         col.Controls.Add(noName);
         Para(col, L.T(
-            "צור שני קישורי הצטרפות, אחד לכל ערוץ, ושלח את שניהם לחשבון הגיבוי בכל דרך. פתח את שני הקישורים מהחשבון ההוא כדי להצטרף, ואז לחץ \"בדוק מי הצטרף\" והפוך אותו למנהל. כל קישור עובד פעם אחת בלבד ופג אחרי 24 שעות, כך שקישור שדלף לא שווה כלום.",
-            "Create two invite links, one per channel, and send both to the backup account any way you like. Open both links from that account to join, then click \"Check who joined\" and make it an admin. Each link works once only and expires after 24 hours, so a leaked link is worthless."));
+            "צור שני קישורי הצטרפות, אחד לכל ערוץ, ושלח את שניהם לחשבון הגיבוי בכל דרך. פתח את שני הקישורים מהחשבון ההוא כדי להצטרף, ואז לחץ \"בדוק מי הצטרף\" והפוך אותו למנהל. כל קישור עובד פעם אחת בלבד ופג אחרי 24 שעות. אם קישור דלף, מי שפותח אותו ראשון מצטרף (בלי הרשאות ניהול): לכן ב\"בדוק מי הצטרף\" ודא שזה באמת החשבון שלך לפני שאתה הופך אותו למנהל.",
+            "Create two invite links, one per channel, and send both to the backup account any way you like. Open both links from that account to join, then click \"Check who joined\" and make it an admin. Each link works once only and expires after 24 hours. If a link leaks, whoever opens it first joins (without admin rights): so in \"Check who joined\" make sure it really is your account before making it an admin."));
         col.Controls.Add(_makeLinks);
         col.Controls.Add(_links);
         col.Controls.Add(_checkJoined);
@@ -92,6 +92,8 @@ sealed class BackupForm : Form
             L.T("לחץ על שם הערוץ ← מנהלים ← חשבון הגיבוי.", "Tap the channel name → Administrators → the backup account."),
             L.T("בתחתית: \"העבר בעלות על הערוץ\", ואשר עם סיסמת האימות הדו־שלבי.", "At the bottom: \"Transfer channel ownership\", and confirm with the two-step password."),
             L.T("DriveGram ימשיך לעבוד כרגיל: החשבון הנוכחי נשאר מנהל עם כל ההרשאות.", "DriveGram keeps working as before: the current account stays an admin with all rights."),
+            L.T("⚠  חשוב: הבעלים יכול להסיר מנהלים ולמחוק את הערוצים. העבר בעלות רק לחשבון שהוא שלך, ושמוגן באימות דו־שלבי לפחות כמו החשבון הנוכחי.",
+                "⚠  Important: the owner can remove admins and delete the channels. Transfer ownership only to an account that is yours and protected (two-step verification) at least as well as the current one."),
         }) Para(col, "•  " + step);
 
         Section(col, L.T("4. הוספה ידנית (במקום שלב 1, אם מעדיפים)", "4. Adding it by hand (instead of step 1)"));
@@ -280,7 +282,20 @@ sealed class BackupForm : Form
             string name;
             var username = _username.Text; // read on the UI thread
             using (var lease = TelegramAccounts.Acquire(_state))
-                name = await Task.Run(() => TelegramRemote.AddBackupAdminAsync(lease.Client, ch, username));
+            {
+                var user = await Task.Run(() => TelegramRemote.ResolveUserAsync(lease.Client, username));
+                var who = $"{user.first_name} {user.last_name}".Trim();
+                // a typo or a look-alike name would hand a stranger full control: show exactly who it is
+                if (Ui.Ask(L.T(
+                        $"להפוך את החשבון הזה למנהל מלא של שני הערוצים של הכונן?\n\n{who}\n@{user.username}   (מזהה {user.id})\n\nמנהל יכול לקרוא את רשומת הכונן, לשנות ואף למחוק את כל הערוצים. ודא שזה באמת החשבון שלך.",
+                        $"Make this account a full admin of both of the drive's channels?\n\n{who}\n@{user.username}   (id {user.id})\n\nAn admin can read the drive's record, change, and even delete both channels. Make sure it really is your account."),
+                        icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+                {
+                    _addResult.Text = "";
+                    return;
+                }
+                name = await Task.Run(() => TelegramRemote.AddBackupAdminAsync(lease.Client, ch, user));
+            }
             _addResult.ForeColor = Theme.Success;
             _addResult.Text = L.T($"✓  {name} מנהל עכשיו את שני הערוצים, עם כל ההרשאות.", $"✓  {name} now administers both channels, with every permission.");
             await LoadAdminsAsync();

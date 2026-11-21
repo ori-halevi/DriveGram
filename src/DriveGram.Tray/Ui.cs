@@ -33,6 +33,25 @@ static class Ui
         MessageBoxIcon icon = MessageBoxIcon.Question, MessageBoxDefaultButton def = MessageBoxDefaultButton.Button1) =>
         MessageBox.Show(text, "DriveGram", buttons, icon, def, Options);
 
+    /// <summary>Copy a secret: kept out of Windows clipboard history and cloud clipboard, and cleared after a minute.</summary>
+    public static void CopySecret(string text)
+    {
+        var data = new DataObject();
+        data.SetText(text);
+        static MemoryStream Zero() => new(BitConverter.GetBytes(0));
+        data.SetData("ExcludeClipboardContentFromMonitorProcessing", Zero());
+        data.SetData("CanIncludeInClipboardHistory", Zero());
+        data.SetData("CanUploadToCloudClipboard", Zero());
+        try { Clipboard.SetDataObject(data, copy: true); } catch (Exception ex) { Error(ex.Message); return; }
+        var timer = new System.Windows.Forms.Timer { Interval = 60_000 };
+        timer.Tick += (_, _) =>
+        {
+            timer.Dispose();
+            try { if (Clipboard.ContainsText() && Clipboard.GetText() == text) Clipboard.Clear(); } catch { }
+        };
+        timer.Start();
+    }
+
     public static void Error(string text) =>
         MessageBox.Show(text, "DriveGram", MessageBoxButtons.OK, MessageBoxIcon.Error, MessageBoxDefaultButton.Button1, Options);
 }

@@ -235,13 +235,19 @@ public sealed class TelegramRemote : IRemote
     /// keeps access if this account is blocked or deleted (Telegram keeps a channel whose creator is
     /// gone; its admins keep their rights). The files stay encrypted: it still needs the drive password.
     /// </summary>
-    public static async Task<string> AddBackupAdminAsync(Client client, TelegramChannels ch, string username)
+    /// <summary>Find the account behind a username (to show the user who exactly is about to become admin).</summary>
+    public static async Task<User> ResolveUserAsync(Client client, string username)
     {
         await ResumeAsync(client);
         username = username.Trim().TrimStart('@');
         if (username.Length == 0) throw new ArgumentException("empty username");
         var resolved = await Patiently(() => client.Contacts_ResolveUsername(username));
-        if (resolved.User is not User u) throw new RpcException(400, "USERNAME_NOT_OCCUPIED");
+        return resolved.User as User ?? throw new RpcException(400, "USERNAME_NOT_OCCUPIED");
+    }
+
+    public static async Task<string> AddBackupAdminAsync(Client client, TelegramChannels ch, User u)
+    {
+        await ResumeAsync(client);
         return await PromoteAsync(client, ch, u);
     }
 
@@ -315,6 +321,20 @@ public sealed class TelegramRemote : IRemote
     {
         await ResumeAsync(client);
         var all = (await Patiently(() => client.Messages_GetAllChats())).chats.Values.OfType<Channel>().ToList();
+        // a damaged or altered record must never turn "delete this drive" into "delete another drive"
+        var journal = all.FirstOrDefault(c => c.id == ch.JournalId);
+        var data = all.FirstOrDefault(c => c.id == ch.DataId);
+        if (journal is not null && !IsJournal(journal))
+            throw new InvalidOperationException($"'{journal.title}' is not a DriveGram journal channel; nothing was deleted.");
+        if (data is not null && !data.title.StartsWith(DataTitle))
+            throw new InvalidOperationException($"'{data.title}' is not a DriveGram data channel; nothing was deleted.");
+        if (journal is not null)
+        {
+            Sync.ControlState? ctrl = null;
+            try { ctrl = Sync.ControlState.FromJson(await ReadPinnedTextAsync(client, journal)); } catch { }
+            if (ctrl?.Drive is { } identity && identity.DataChannel != ch.DataId)
+                throw new InvalidOperationException("The drive's journal names a different data channel; nothing was deleted.");
+        }
         foreach (var id in new[] { ch.JournalId, ch.DataId })
         {
             if (all.FirstOrDefault(c => c.id == id) is not { } c) continue;
@@ -377,8 +397,9 @@ public sealed class TelegramRemote : IRemote
     /// <summary>A channel of ours that holds nothing at all (only the "channel created" service message).</summary>
     static async Task<bool> IsEmptyAsync(Client client, Channel c)
     {
+        if (c.date > DateTime.UtcNow.AddHours(-1)) return false; // maybe another PC is creating a drive now
         var h = await Patiently(() => client.Messages_GetHistory(c, limit: 5));
-        return !h.Messages.OfType<Message>().Any();
+        return h.Count <= 2 && !h.Messages.OfType<Message>().Any();
     }
 
     /// <summary>

@@ -31,6 +31,14 @@ DriveGram.Sync.DriveIdentity? newIdentity = null; // set when `init` creates a b
 var driveSel = Opt("--drive");
 Log.Open(Path.Combine(AppState.Root, "logs"));
 var command0 = argv.Count > 0 ? argv[0].ToLowerInvariant() : "help";
+if (folder is null && command0 is "setup" or "login" or "init" or "mount" or "export"
+    && System.Threading.Mutex.TryOpenExisting("DriveGramTrayRunning", out var trayRunning))
+{
+    trayRunning.Dispose();
+    Console.Error.WriteLine("DriveGram is running in the notification area. Exit it first (tray icon > Exit): two programs must not use the same Telegram sign-in at once.");
+    return 3;
+}
+
 AppState state;
 try { state = folder is not null ? AppState.ForFolder(folder) : SelectDrive(driveSel, command0); }
 catch (ArgumentException e) { Console.Error.WriteLine(e.Message); return 2; }

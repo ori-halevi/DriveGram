@@ -50,7 +50,7 @@ sealed class SecurityForm : Form
         _keyPanel.Visible = false;
         var keyButtons = Theme.Row();
         var copy = Theme.Secondary(L.T("העתק", "Copy"));
-        copy.Click += (_, _) => Clipboard.SetText(_keyBox.Text);
+        copy.Click += (_, _) => Ui.CopySecret(_keyBox.Text);
         var save = Theme.Secondary(L.T("שמור לקובץ…", "Save to a file…"));
         save.Click += (_, _) => SaveKey();
         keyButtons.Controls.AddRange([copy, save]);
@@ -108,7 +108,7 @@ sealed class SecurityForm : Form
             bool has = ctrl?.Vault.Recovery is not null;
             _recoveryState.ForeColor = has ? Theme.Success : Color.FromArgb(0xB4, 0x6A, 0x00);
             _recoveryState.Text = has
-                ? L.T("✓  לכונן יש מפתח שחזור. יצירת מפתח חדש מבטלת את הקודם.", "✓  The drive has a recovery key. Creating a new one cancels the old one.")
+                ? L.T("✓  לכונן יש מפתח שחזור. יצירת מפתח חדש מחליפה אותו (מי שראה בעבר את רשומת הכונן ושמר גם את המפתח הישן עדיין יכול לפתוח איתו).", "✓  The drive has a recovery key. Creating a new one replaces it (someone who once saw the drive's record and also kept the old key can still open it).")
                 : L.T("לכונן עדיין אין מפתח שחזור. מומלץ מאוד ליצור אחד.", "The drive has no recovery key yet. Creating one is strongly recommended.");
             _makeKey.Text = has ? L.T("צור מפתח שחזור חדש", "Create a new recovery key") : L.T("צור מפתח שחזור", "Create a recovery key");
         }
