@@ -67,14 +67,18 @@ public sealed class IndexDb : IDisposable
             CREATE INDEX IF NOT EXISTS ix_fc_chunk ON file_chunks(chunk);
             CREATE TABLE IF NOT EXISTS chunks(
                 id TEXT PRIMARY KEY, msg INTEGER NOT NULL, size INTEGER NOT NULL, hash TEXT NOT NULL,
-                created INTEGER NOT NULL);
+                created INTEGER NOT NULL, local INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS dirty(
                 node TEXT NOT NULL, idx INTEGER NOT NULL, kind TEXT NOT NULL, size INTEGER NOT NULL,
                 staged INTEGER NOT NULL, chunk TEXT, msg INTEGER, hash TEXT, PRIMARY KEY(node, idx));
             CREATE TABLE IF NOT EXISTS pending(node TEXT PRIMARY KEY, since INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS outbox(seq INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
+            CREATE TABLE IF NOT EXISTS pending_gc(msg INTEGER PRIMARY KEY, since INTEGER NOT NULL);
             """);
+        // migration (0.5 → 0.6): which chunk rows this PC uploaded itself
+        if (Scalar("SELECT 1 FROM pragma_table_info('chunks') WHERE name='local'") is null)
+            Exec("ALTER TABLE chunks ADD COLUMN local INTEGER NOT NULL DEFAULT 0");
         var dev = GetMeta("device");
         if (dev is null)
         {
@@ -284,8 +288,14 @@ public sealed class IndexDb : IDisposable
                 for (int i = 0; i < c.Chunks.Length; i++)
                 {
                     var k = c.Chunks[i];
-                    Exec("INSERT INTO chunks(id,msg,size,hash,created) VALUES(@id,@m,@z,@h,@t) ON CONFLICT(id) DO NOTHING",
-                        ("@id", k.C), ("@m", k.M), ("@z", k.Z), ("@h", k.H), ("@t", now));
+                    // The latest record wins: identical bytes re-uploaded after an old copy was
+                    // garbage-collected get a NEW message, and replay must follow it (keeping the
+                    // first-seen mapping left other PCs pointing at the deleted message).
+                    Exec("""
+                        INSERT INTO chunks(id,msg,size,hash,created) VALUES(@id,@m,@z,@h,@t)
+                        ON CONFLICT(id) DO UPDATE SET msg=excluded.msg, size=excluded.size, hash=excluded.hash,
+                            local = CASE WHEN chunks.msg = excluded.msg THEN chunks.local ELSE 0 END
+                        """, ("@id", k.C), ("@m", k.M), ("@z", k.Z), ("@h", k.H), ("@t", now));
                     Exec("INSERT INTO file_chunks(node,idx,chunk) VALUES(@n,@i,@c)", ("@n", c.Id), ("@i", i), ("@c", k.C));
                 }
                 Exec("UPDATE nodes SET size=@s, mtime=@m WHERE id=@id", ("@id", c.Id), ("@s", c.Size), ("@m", c.Mtime));
@@ -354,13 +364,24 @@ public sealed class IndexDb : IDisposable
         r => new ChunkRow(r.GetInt32(0), r.GetString(1), r.GetInt32(2), r.GetInt32(3), r.GetString(4)),
         ("@n", node), ("@i", idx)).FirstOrDefault();
 
+    /// <summary>
+    /// A stored chunk that new content may safely reuse (dedup): one a file still references (garbage
+    /// collection never deletes those), or one this PC uploaded itself (an interrupted upload resuming).
+    /// An unreferenced row learned from the journal may already have been deleted by another PC.
+    /// </summary>
+    public StoredChunk? FindReusableChunk(string chunkId) => Query("""
+        SELECT id,msg,size,hash FROM chunks c WHERE id=@id AND (local=1
+            OR EXISTS (SELECT 1 FROM file_chunks f WHERE f.chunk=c.id)
+            OR EXISTS (SELECT 1 FROM dirty d WHERE d.chunk=c.id))
+        """, r => new StoredChunk(r.GetString(0), r.GetInt32(1), r.GetInt32(2), r.GetString(3)), ("@id", chunkId)).FirstOrDefault();
+
     public StoredChunk? FindChunk(string chunkId) => Query("SELECT id,msg,size,hash FROM chunks WHERE id=@id",
         r => new StoredChunk(r.GetString(0), r.GetInt32(1), r.GetInt32(2), r.GetString(3)), ("@id", chunkId)).FirstOrDefault();
 
     /// <summary>Register an uploaded chunk immediately (before any file references it), so a crash
     /// or a retry dedups against it instead of uploading again (lesson from InfiDrive 6.3).</summary>
     public void AddChunk(StoredChunk c) => Exec(
-        "INSERT INTO chunks(id,msg,size,hash,created) VALUES(@id,@m,@z,@h,@t) ON CONFLICT(id) DO NOTHING",
+        "INSERT INTO chunks(id,msg,size,hash,created,local) VALUES(@id,@m,@z,@h,@t,1) ON CONFLICT(id) DO UPDATE SET msg=excluded.msg, local=1",
         ("@id", c.ChunkId), ("@m", c.Msg), ("@z", c.Size), ("@h", c.Hash), ("@t", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
 
     /// <summary>Chunks no file (live, trashed or pending) references, older than the grace period.</summary>
@@ -373,10 +394,52 @@ public sealed class IndexDb : IDisposable
         """, r => new StoredChunk(r.GetString(0), r.GetInt32(1), r.GetInt32(2), r.GetString(3)),
         ("@cut", DateTimeOffset.UtcNow.Add(-grace).ToUnixTimeMilliseconds()), ("@lim", limit));
 
-    public void DeleteChunkRows(IEnumerable<string> ids) => InTransaction(() =>
+    /// <summary>
+    /// Atomically take unreferenced chunks out of the index and queue their messages for deletion.
+    /// The reference check and the removal happen in ONE transaction, so a file that starts using a
+    /// chunk (dedup) can never end up pointing at a message being deleted (InfiDrive lost 107 of 111
+    /// thumbnails to a sweep that judged "unreferenced" by a rule that missed a user).
+    /// The queue is on disk, so a crash between here and Telegram never forgets a deletion.
+    /// </summary>
+    public int ClaimGarbage(TimeSpan grace, int limit = 500)
     {
-        foreach (var id in ids) Exec("DELETE FROM chunks WHERE id=@id", ("@id", id));
+        int n = 0;
+        InTransaction(() =>
+        {
+            foreach (var c in GarbageChunks(grace, limit))
+            {
+                Exec("INSERT INTO pending_gc(msg,since) VALUES(@m,@t) ON CONFLICT(msg) DO NOTHING",
+                    ("@m", c.Msg), ("@t", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
+                Exec("DELETE FROM chunks WHERE id=@id", ("@id", c.ChunkId));
+                n++;
+            }
+        });
+        return n;
+    }
+
+    public List<int> PendingDeletions(int limit = 500) =>
+        Query("SELECT msg FROM pending_gc ORDER BY since LIMIT @l", r => r.GetInt32(0), ("@l", limit));
+
+    public void DeletionsDone(IEnumerable<int> msgs) => InTransaction(() =>
+    {
+        foreach (var m in msgs) Exec("DELETE FROM pending_gc WHERE msg=@m", ("@m", m));
     });
+
+    /// <summary>Keep the index file small: flush the WAL, and compact when much of it is free space.</summary>
+    public void Maintain()
+    {
+        lock (_gate)
+        {
+            Exec("PRAGMA wal_checkpoint(TRUNCATE);");
+            long pages = Convert.ToInt64(Scalar("PRAGMA page_count") ?? 0L);
+            long free = Convert.ToInt64(Scalar("PRAGMA freelist_count") ?? 0L);
+            if (pages > 256 && free * 4 > pages) // over 25% unused
+            {
+                Exec("VACUUM;");
+                Log.Info($"index compacted ({free:N0} of {pages:N0} pages were free)");
+            }
+        }
+    }
 
     // ── local overlay (dirty pieces) ─────────────────────────────────────────
     static DirtyRow MapDirty(SqliteDataReader r) => new(r.GetString(0), r.GetInt32(1), r.GetString(2)[0], r.GetInt32(3),

@@ -141,6 +141,28 @@ public class EngineTests
     }
 
     [Fact]
+    public async Task ShortReadsFromStorageAreRetriedAndNeverCached()
+    {
+        await using var kit = await TestKit.CreateAsync();
+        var a = kit.Pc("a");
+        await a.Sync.StartAsync(false, default);
+        var data = TestKit.RandomBytes(CS + 777, 11);
+        var id = a.NewFile("photo.jpg");
+        a.WriteFile(id, data);
+        await a.SettleAsync();
+
+        var b = kit.Pc("b");                     // empty cache: every byte comes from storage
+        await b.Sync.StartAsync(false, default);
+        kit.Remote.TruncateNextReads = 3;        // storage silently cuts the first reads short
+        Assert.Equal(data, b.ReadFile(id));
+        Assert.True(kit.Remote.TruncateNextReads < 0);
+
+        kit.Remote.TruncateNextReads = 1000;     // a poisoned cache would now return broken bytes
+        Assert.Equal(data, b.ReadFile(id));
+        kit.Remote.TruncateNextReads = 0;
+    }
+
+    [Fact]
     public async Task HugeCopyStaysWithinTheStagingQuota()
     {
         await using var kit = await TestKit.CreateAsync();

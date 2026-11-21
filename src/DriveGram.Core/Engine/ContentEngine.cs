@@ -91,6 +91,9 @@ public sealed class ContentEngine : IAsyncDisposable
         _uploadSlots = new SemaphoreSlim(Math.Max(1, _o.UploadConcurrency));
     }
 
+    /// <summary>Nothing is waiting to upload or uploading (garbage collection may run).</summary>
+    public bool Idle => _uploadsInFlight == 0 && _db.PendingNodes().Count == 0;
+
     public EngineStatus Status => new(_db.PendingNodes().Count, Interlocked.Read(ref _stagingBytes), _uploadsInFlight,
         Interlocked.Read(ref _bytesUploaded), Interlocked.Read(ref _reader.BytesDownloaded), _cache.Bytes);
 
@@ -479,13 +482,13 @@ public sealed class ContentEngine : IAsyncDisposable
         var hash = SHA256.HashData(data);
         var hashHex = Convert.ToHexStringLower(hash);
         var chunkId = _keys.ChunkId(hash);
-        if (_db.FindChunk(chunkId) is { } known) return new ChunkLoc(known.ChunkId, known.Msg, known.Size, known.Hash);
+        if (_db.FindReusableChunk(chunkId) is { } known) return new ChunkLoc(known.ChunkId, known.Msg, known.Size, known.Hash);
 
         var gate = _chunkLocks.GetOrAdd(chunkId, _ => new SemaphoreSlim(1));
         await gate.WaitAsync(ct);
         try
         {
-            if (_db.FindChunk(chunkId) is { } again) return new ChunkLoc(again.ChunkId, again.Msg, again.Size, again.Hash);
+            if (_db.FindReusableChunk(chunkId) is { } again) return new ChunkLoc(again.ChunkId, again.Msg, again.Size, again.Hash);
             var payload = ChunkCipher.Encrypt(data, _keys.ChunkKey(hash), Convert.FromHexString(chunkId), _keys.FrameSize);
             await _uploadSlots.WaitAsync(ct);
             Interlocked.Increment(ref _uploadsInFlight);
@@ -542,6 +545,8 @@ public sealed class ContentEngine : IAsyncDisposable
             if (st.PieceGen.GetValueOrDefault(idx) != gen) return false;
             var cur = _db.GetDirty(id, idx);
             if (cur is null || cur.Kind == 'U' || cur.Size != data.Length) return false;
+            // a deduplicated chunk may have just been taken by garbage collection: re-upload instead
+            if (_db.FindChunk(loc.ChunkId) is null) return false;
             _db.PutDirty(new DirtyRow(id, idx, 'U', data.Length, cur.Staged, loc.ChunkId, loc.Msg, loc.Hash));
         }
         _room.Release();

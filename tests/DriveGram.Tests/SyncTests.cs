@@ -82,6 +82,82 @@ public class SyncTests
     }
 
     [Fact]
+    public async Task ContentWrittenAgainAfterItsChunksWereCollectedIsStoredFresh()
+    {
+        await using var kit = await TestKit.CreateAsync();
+        var so = new SyncOptions { TrashRetention = TimeSpan.Zero, GarbageGrace = TimeSpan.Zero, FlushInterval = TimeSpan.FromMilliseconds(100) };
+        var a = kit.Pc("a", so: so);
+        await a.Sync.StartAsync(false, default);
+        var content = TestKit.RandomBytes(TestKit.ChunkSize + 5, 12);
+        var old = a.NewFile("old.bin");
+        a.WriteFile(old, content);
+        await a.SettleAsync();
+        a.Db.ApplyLocal(new TrashOp(old, DateTime.UtcNow.AddDays(-1).ToFileTimeUtc()));
+        await Task.Delay(50);
+
+        // the sweep takes the chunks out of the index first ...
+        a.Db.ApplyLocal(new PurgeOp(old));
+        await Task.Delay(50);
+        Assert.Equal(2, a.Db.ClaimGarbage(TimeSpan.Zero));
+        // ... the same bytes are written again before the messages are actually deleted ...
+        var again = a.NewFile("again.bin");
+        a.WriteFile(again, content);
+        await a.SettleAsync();
+        // ... and deleting the old messages must not break the new file
+        await a.Sync.CollectGarbageAsync(default);
+        var fresh = kit.Pc("fresh");
+        await fresh.Sync.StartAsync(false, default);
+        Assert.Equal(content, fresh.ReadFile(again));
+    }
+
+    [Fact]
+    public async Task AnotherPcNeverReusesAChunkTheWriterAlreadyDeleted()
+    {
+        await using var kit = await TestKit.CreateAsync();
+        var so = new SyncOptions { TrashRetention = TimeSpan.Zero, GarbageGrace = TimeSpan.Zero, FlushInterval = TimeSpan.FromMilliseconds(100) };
+        var content = TestKit.RandomBytes(5000, 14);
+
+        var a = kit.Pc("a", so: so);
+        await a.Sync.StartAsync(false, default);
+        var f = a.NewFile("x.bin");
+        a.WriteFile(f, content);
+        await a.SettleAsync();
+        a.Db.ApplyLocal(new PurgeOp(f));
+        await Task.Delay(50);
+        await a.Sync.CollectGarbageAsync(default);       // A deletes the chunk's message
+        Assert.Equal(0, kit.Remote.StoredChunkCount);
+        await a.Sync.StopAsync(releaseLease: true, default);
+
+        var b = kit.Pc("b", so: so);                      // B learned about the chunk from the journal
+        await b.Sync.StartAsync(false, default);
+        var g = b.NewFile("same-bytes.bin");
+        b.WriteFile(g, content);                          // must upload again, not point at the deleted message
+        await b.SettleAsync();
+        Assert.Equal(1, kit.Remote.StoredChunkCount);
+        Assert.Equal(content, b.ReadFile(g));
+    }
+
+    [Fact]
+    public async Task GarbageCollectionWaitsForUploads()
+    {
+        await using var kit = await TestKit.CreateAsync();
+        var so = new SyncOptions { TrashRetention = TimeSpan.Zero, GarbageGrace = TimeSpan.Zero, FlushInterval = TimeSpan.FromMilliseconds(100) };
+        var a = kit.Pc("a", so: so);
+        await a.Sync.StartAsync(false, default);
+        var f = a.NewFile("x.bin");
+        a.WriteFile(f, TestKit.RandomBytes(1000, 13));
+        await a.SettleAsync();
+        a.Db.ApplyLocal(new PurgeOp(f));
+        await Task.Delay(50);
+        a.Sync.CanCollectGarbage = () => false;   // e.g. an upload is in flight
+        await a.Sync.CollectGarbageAsync(default);
+        Assert.Equal(1, kit.Remote.StoredChunkCount);
+        a.Sync.CanCollectGarbage = () => true;
+        await a.Sync.CollectGarbageAsync(default);
+        Assert.Equal(0, kit.Remote.StoredChunkCount);
+    }
+
+    [Fact]
     public async Task GarbageIsCollectedOnlyAfterTrashIsPurged()
     {
         await using var kit = await TestKit.CreateAsync();

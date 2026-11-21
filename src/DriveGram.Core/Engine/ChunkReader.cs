@@ -32,23 +32,49 @@ public sealed class ChunkReader
         _keys = keys;
     }
 
-    Task<byte[]> Window(int msg, int win, CancellationToken ct)
+    /// <summary>Exact length window `win` of a stored chunk must have (the last one is shorter).</summary>
+    int ExpectedWindowLength(ChunkLoc c, int win)
     {
-        var cached = _cache.TryGetWindow(msg, win);
-        if (cached is not null) return Task.FromResult(cached);
-        var lazy = _inflight.GetOrAdd((msg, win), key => new Lazy<Task<byte[]>>(async () =>
+        long enc = ChunkCipher.EncryptedSize(c.Size, _keys.FrameSize);
+        return (int)Math.Clamp(enc - (long)win * IRemote.WindowSize, 0, IRemote.WindowSize);
+    }
+
+    /// <summary>
+    /// One 1 MiB window, from cache or Telegram. Lesson from InfiDrive (fadbfa5/04d5e58): storage
+    /// can return a read cut short with no error at all. A short window is never trusted or cached —
+    /// it is fetched again, a bounded number of times — so one bad read cannot poison the cache and
+    /// leave a file permanently broken. (GCM would still reject the bytes; this keeps it healable.)
+    /// </summary>
+    Task<byte[]> Window(ChunkLoc c, int win, CancellationToken ct)
+    {
+        int expected = ExpectedWindowLength(c, win);
+        var cached = _cache.TryGetWindow(c.Msg, win);
+        if (cached is not null && cached.Length == expected) return Task.FromResult(cached);
+        var lazy = _inflight.GetOrAdd((c.Msg, win), key => new Lazy<Task<byte[]>>(async () =>
         {
             try
             {
-                var data = await _remote.ReadWindowAsync(key.Item1, key.Item2, CancellationToken.None);
-                Interlocked.Add(ref BytesDownloaded, data.Length);
-                _cache.PutWindow(key.Item1, key.Item2, data);
-                return data;
+                for (int attempt = 1; ; attempt++)
+                {
+                    var data = await _remote.ReadWindowAsync(key.Item1, key.Item2, CancellationToken.None);
+                    Interlocked.Add(ref BytesDownloaded, data.Length);
+                    if (data.Length == expected)
+                    {
+                        _cache.PutWindow(key.Item1, key.Item2, data);
+                        return data;
+                    }
+                    Log.Warn($"chunk {c.ChunkId[..12]} window {key.Item2}: got {data.Length:N0} of {expected:N0} bytes (attempt {attempt})");
+                    if (attempt >= MaxShortReads)
+                        throw new IOException($"Telegram keeps returning a short read for message {key.Item1} (window {key.Item2}).");
+                    await Task.Delay(500 * attempt);
+                }
             }
             finally { _inflight.TryRemove(key, out _); }
         }));
         return lazy.Value.WaitAsync(ct);
     }
+
+    const int MaxShortReads = 4;
 
     /// <summary>Read plaintext [offset, offset+dst.Length) of a chunk into dst.</summary>
     public async Task ReadAsync(ChunkLoc c, long offset, Memory<byte> dst, bool sequential, CancellationToken ct)
@@ -65,7 +91,7 @@ public sealed class ChunkReader
         int w0 = (int)(cStart / W), w1 = (int)((cEnd - 1) / W);
 
         var tasks = new Task<byte[]>[w1 - w0 + 1];
-        for (int w = w0; w <= w1; w++) tasks[w - w0] = Window(c.Msg, w, ct);
+        for (int w = w0; w <= w1; w++) tasks[w - w0] = Window(c, w, ct);
         var windows = await Task.WhenAll(tasks);
 
         if (sequential) Prefetch(c, w1 + 1);
@@ -124,7 +150,7 @@ public sealed class ChunkReader
             int win = w;
             _ = Task.Run(async () =>
             {
-                try { await Window(c.Msg, win, CancellationToken.None); }
+                try { await Window(c, win, CancellationToken.None); }
                 catch (Exception ex) { Log.Debug($"prefetch {c.Msg}/{win} failed: {ex.Message}"); }
                 finally { _prefetchSlots.Release(); }
             });

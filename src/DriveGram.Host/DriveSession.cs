@@ -89,7 +89,7 @@ public sealed class DriveSession : IAsyncDisposable
             "api_hash" => cfg.ApiHash,
             "device_model" => "DriveGram on " + Environment.MachineName,
             "system_version" => Environment.OSVersion.VersionString,
-            "app_version" => "DriveGram 0.5",
+            "app_version" => "DriveGram 0.6",
             "password" => askPassword is null ? throw new NotSignedInException() : askPassword(),
             "verification_code" or "first_name" or "last_name" or "email" or "email_verification_code" =>
                 throw new NotSignedInException(),
@@ -162,6 +162,8 @@ public sealed class DriveSession : IAsyncDisposable
                 UploadConcurrency = cfg.UploadConcurrency,
             });
             sync = new SyncService(db, remote, keys);
+            var engineRef = engine;
+            sync.CanCollectGarbage = () => engineRef.Idle;
             sync.WritableChanged += () => Log.Warn(sync.Writable ? "the drive is now writable" : $"the drive is now READ-ONLY (open on {sync.LeaseHolder})");
             await sync.StartAsync(takeOver, ct);
             engine.Start();

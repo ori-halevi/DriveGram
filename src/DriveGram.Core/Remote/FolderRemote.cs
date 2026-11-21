@@ -10,6 +10,8 @@ public sealed class FolderRemote : IRemote
     readonly string _root, _data, _journal;
     readonly object _gate = new();
     public int Latency { get; set; } // ms, to simulate a slow network in tests
+    /// <summary>Tests: the next N window reads come back cut in half, with no error (as Telegram can do).</summary>
+    public int TruncateNextReads;
 
     public FolderRemote(string root)
     {
@@ -59,6 +61,7 @@ public sealed class FolderRemote : IRemote
         var buf = new byte[(int)Math.Min(IRemote.WindowSize, fs.Length - off)];
         fs.Position = off;
         await fs.ReadExactlyAsync(buf, ct);
+        if (Interlocked.Decrement(ref TruncateNextReads) >= 0 && buf.Length > 1) return buf[..(buf.Length / 2)];
         return buf;
     }
 

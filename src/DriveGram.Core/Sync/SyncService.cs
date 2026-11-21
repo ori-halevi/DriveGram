@@ -54,6 +54,8 @@ public sealed class SyncService : IAsyncDisposable
     DateTime _lastSnapshot = DateTime.UtcNow, _lastGc = DateTime.MinValue;
 
     public bool Writable { get; private set; }
+    /// <summary>False while the content engine is uploading (set by the host); garbage collection waits.</summary>
+    public Func<bool>? CanCollectGarbage { get; set; }
     public string? LeaseHolder { get; private set; }
     public event Action? WritableChanged;
     /// <summary>Ops from another PC were applied to the local index (so open folder views can refresh).</summary>
@@ -220,14 +222,22 @@ public sealed class SyncService : IAsyncDisposable
             _db.ApplyLocal(expired.Select(n => (Op)new PurgeOp(n.Id)).ToList());
             Log.Info($"trash: purged {expired.Count} items older than {_o.TrashRetention.TotalDays:0} days");
         }
+        // rail (from InfiDrive's gc_orphan_blobs): never sweep while uploads are in flight
+        if (CanCollectGarbage?.Invoke() == false)
+        {
+            Log.Debug("gc: skipped, uploads in progress");
+            return;
+        }
+        int claimed = _db.ClaimGarbage(_o.GarbageGrace);
         while (true)
         {
-            var garbage = _db.GarbageChunks(_o.GarbageGrace);
-            if (garbage.Count == 0) break;
-            await _remote.DeleteChunksAsync(garbage.Select(g => g.Msg).ToList(), ct);
-            _db.DeleteChunkRows(garbage.Select(g => g.ChunkId));
-            Log.Info($"gc: deleted {garbage.Count} unreferenced chunks");
+            var msgs = _db.PendingDeletions();
+            if (msgs.Count == 0) break;
+            await _remote.DeleteChunksAsync(msgs, ct);
+            _db.DeletionsDone(msgs);
+            Log.Info($"gc: deleted {msgs.Count} unreferenced chunk messages");
         }
+        if (claimed > 0) _db.Maintain();
         _lastGc = DateTime.UtcNow;
     }
 
