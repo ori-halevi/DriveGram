@@ -23,6 +23,9 @@ static class Program
         Application.ThreadException += (_, e) => Log.Error("tray: unhandled", e.Exception);
         AppDomain.CurrentDomain.UnhandledException += (_, e) => Log.Error("tray: fatal", e.ExceptionObject as Exception);
         SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
+        // Lets the installer see that the app is running (Inno Setup AppMutex) before it replaces files.
+        using var running = new Mutex(false, "DriveGramTrayRunning");
         Application.Run(new TrayApp(state));
+        GC.KeepAlive(running);
     }
 }

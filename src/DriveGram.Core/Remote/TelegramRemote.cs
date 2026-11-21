@@ -55,7 +55,7 @@ public sealed class TelegramRemote : IRemote
         var journal = Find(known?.JournalId, JournalTitle);
         if (data is null || journal is null)
         {
-            if (!createIfMissing) throw new InvalidOperationException("The DriveGram channels were not found on this Telegram account. Run `drivegram init` first.");
+            if (!createIfMissing) throw new NoDriveException();
             data ??= await CreateChannel(client, DataTitle, "DriveGram encrypted storage. Do not post or delete here.");
             journal ??= await CreateChannel(client, JournalTitle, "DriveGram journal. Do not post, pin or delete here.");
         }

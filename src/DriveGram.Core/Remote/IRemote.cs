@@ -2,6 +2,9 @@ namespace DriveGram.Remote;
 
 public sealed record JournalItem(int Id, string Name);
 
+/// <summary>This account / folder holds no DriveGram drive yet (first run: `drivegram setup`).</summary>
+public sealed class NoDriveException() : Exception("No DriveGram drive yet. Run `drivegram setup`.");
+
 /// <summary>
 /// Where the bytes live. Two logical areas:
 ///  - Data: encrypted chunks (one stored message per chunk), addressed by message id, read in

@@ -115,7 +115,7 @@ public sealed class DriveSession : IAsyncDisposable
         {
             remote = await OpenRemoteAsync(state, ask, create: false);
             var ctrl = await SyncService.ReadControlAsync(remote, ct)
-                       ?? throw new InvalidOperationException("No drive yet. Run `drivegram init`.");
+                       ?? throw new NoDriveException();
             var keys = await unlock(ctrl);
 
             db = IndexDb.Open(state.IndexPath);

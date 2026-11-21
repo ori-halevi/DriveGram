@@ -59,6 +59,25 @@ sealed class TrayApp : ApplicationContext
     }
 
     // ── mount / unmount ──────────────────────────────────────────────────────
+    bool firstRunDone;
+
+    /// <summary>First use on this PC: open the guided console setup (Telegram QR login + drive
+    /// password), then try to mount again.</summary>
+    async Task RunSetupAsync()
+    {
+        firstRunDone = true;
+        Balloon("ברוך הבא ל־DriveGram", "נפתח חלון הגדרה: התחברות לטלגרם בסריקת QR, ואז סיסמה לכונן.", ToolTipIcon.Info);
+        try
+        {
+            var args = _state.Folder is null ? "setup" : $"setup --folder \"{_state.Folder}\"";
+            using var p = Process.Start(new ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, "drivegram.exe"), args)
+                { UseShellExecute = true });
+            if (p is not null) await p.WaitForExitAsync();
+        }
+        catch (Exception ex) { Fail("לא ניתן לפתוח את חלון ההגדרה", ex.Message); return; }
+        await MountAsync();
+    }
+
     async Task MountAsync()
     {
         if (_session is not null || _starting) return;
@@ -78,7 +97,11 @@ sealed class TrayApp : ApplicationContext
                 : $"הכונן זמין ב־{_session.MountPoint} לקריאה בלבד: הוא פתוח לכתיבה במחשב {_session.Sync.LeaseHolder}.");
         }
         catch (OperationCanceledException) { _lastError = "לא הוזנה סיסמה"; }
-        catch (NeedsLoginException) { Fail("צריך להתחבר לטלגרם", "הרץ פעם אחת: drivegram login"); }
+        catch (Exception ex) when (ex is NeedsLoginException or DriveGram.Remote.NoDriveException)
+        {
+            if (!firstRunDone) _ui.Post(async _ => await RunSetupAsync(), null);
+            else Fail("ההגדרה לא הושלמה", "בחר 'חבר את הכונן' כדי לנסות שוב.");
+        }
         catch (AlreadyMountedException)
         {
             Balloon("DriveGram כבר פועל", "הכונן כבר מחובר במחשב הזה (בחלון אחר).", ToolTipIcon.Info);

@@ -37,6 +37,7 @@ try
 {
     return command switch
     {
+        "setup" => await Setup(),
         "login" => await Login(),
         "init" => await Init(),
         "mount" => await Mount(arg1),
@@ -60,6 +61,7 @@ int Help()
     Console.WriteLine("""
         DriveGram — a Windows drive whose files live (encrypted) in your Telegram.
 
+          drivegram setup                  First run: sign in to Telegram + create/connect the drive.
           drivegram login [--env <file>] [--phone]
                                            Sign in to Telegram on this PC (once), by scanning a QR
                                            code with your phone. --phone: use a login code instead.
@@ -107,6 +109,26 @@ static string? TelegramAsk(string what) => what switch
     "password" => Ask("Telegram two-step verification password: ", secret: true),
     _ => throw new InvalidOperationException("This phone number has no Telegram account."),
 };
+
+/// <summary>Everything a new PC needs, in one guided run (the tray opens this on first use).</summary>
+async Task<int> Setup()
+{
+    Console.WriteLine("""
+        === DriveGram setup ===
+        Step 1 of 2: sign in to Telegram (scan a QR code with your phone).
+
+        """);
+    await Login();
+    Console.WriteLine("""
+
+        Step 2 of 2: the drive itself.
+
+        """);
+    await Init();
+    Console.WriteLine("\nAll set. Press Enter to close this window; DriveGram will mount the drive.");
+    if (!Console.IsInputRedirected) Console.ReadLine();
+    return 0;
+}
 
 async Task<int> Login()
 {
@@ -215,6 +237,16 @@ async Task<int> Init()
     }
     else
     {
+        if (state.RememberedMaster() is { } master)
+        {
+            try
+            {
+                Keys.FromMaster(ctrl.Vault, master);
+                Console.WriteLine("This PC is already connected to the drive.");
+                return 0;
+            }
+            catch (WrongPasswordException) { state.ForgetMaster(); }
+        }
         Console.WriteLine("This account already has a DriveGram drive. Enter its password to connect this PC.");
         await Unlock(ctrl);
         Console.WriteLine("Connected. Next: drivegram-tray (or: drivegram mount)");
@@ -225,7 +257,7 @@ async Task<int> Init()
 async Task<int> Status()
 {
     await using var remote = await DriveSession.OpenRemoteAsync(state, TelegramAsk, create: false);
-    var ctrl = await SyncService.ReadControlAsync(remote, default) ?? throw new InvalidOperationException("No drive yet. Run `drivegram init`.");
+    var ctrl = await SyncService.ReadControlAsync(remote, default) ?? throw new DriveGram.Remote.NoDriveException();
     using var db = IndexDb.Open(state.IndexPath);
     var (files, dirs) = db.Counts();
     Console.WriteLine($"Files: {files:N0}   Folders: {dirs:N0}   Size: {db.UsedBytes() / 1048576.0:N1} MiB (as of this PC's last sync)");
