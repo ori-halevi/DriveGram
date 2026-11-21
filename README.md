@@ -16,11 +16,11 @@
 dotnet build -c Release
 $dg = "src\DriveGram\bin\Release\net10.0-windows\drivegram.exe"
 
-& $dg login --env ..\..\FullStack\Infinoom\backend\.env   # פעם אחת לכל מחשב: מספר טלפון + קוד
-& $dg init                                                # יצירת הכונן וסיסמה (או חיבור מחשב נוסף לכונן קיים)
-& $dg mount T:                                            # הכונן מופיע ב-This PC. ‏Ctrl+C לניתוק
-& $dg status
-& $dg unmount                                             # ניתוק נקי מחלון אחר
+.drivegram login --env ..\..\FullStack\Infinoom\backend\.env   # פעם אחת לכל מחשב: מספר טלפון + קוד
+.drivegram init                                                # יצירת הכונן וסיסמה (או חיבור מחשב נוסף לכונן קיים)
+.drivegram mount T:                                            # הכונן מופיע ב-This PC. ‏Ctrl+C לניתוק
+.drivegram status
+.drivegram unmount                                             # ניתוק נקי מחלון אחר
 ```
 
 **ניסיון בלי טלגרם:** מוסיפים `--folder <תיקייה>` ל־init, mount, status ו־unmount. הכונן נשמר אז בתיקייה מקומית.
