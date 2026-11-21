@@ -58,6 +58,13 @@ public sealed class TelegramRemote : IRemote
         _journal = journal;
         _up = up;
         _down = down;
+        if (client.TLConfig?.date is { } serverDate && serverDate.Year > 2000)
+        {
+            var off = serverDate.ToUniversalTime() - DateTime.UtcNow;
+            // a config fetched long ago only makes the offset smaller (safe side: less eager to take over)
+            _serverOffset = off > TimeSpan.Zero ? off : TimeSpan.Zero;
+            if (Math.Abs(off.TotalMinutes) > 2) Log.Warn($"this PC's clock differs from Telegram's by {off.TotalMinutes:0} minutes");
+        }
         _ctl.SignedOut += OnSignedOut;
         _up.SignedOut += OnSignedOut;
         _down.SignedOut += OnSignedOut;
@@ -597,6 +604,11 @@ public sealed class TelegramRemote : IRemote
     }
 
     public DateTime? ControlEditedAtUtc { get; private set; }
+
+    /// <summary>Telegram's clock: the local clock corrected by the offset seen when the connection
+    /// received the server configuration (a PC with a wrong clock still judges server times right).</summary>
+    public DateTime ServerNowUtc => DateTime.UtcNow + _serverOffset;
+    TimeSpan _serverOffset;
 
     public async Task WriteControlAsync(string text, CancellationToken ct)
     {

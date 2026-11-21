@@ -126,4 +126,31 @@ public class SevereFixTests
         await b.Sync.TakeDriveAsync(force: false, default);
         Assert.True(b.Sync.Writable);
     }
+
+    [Fact]
+    public async Task APurgeOnAnotherPcNeverDestroysAFileStillWaitingToUploadHere()
+    {
+        await using var kit = await TestKit.CreateAsync();
+        var a = kit.Pc("a", so: Fast("PC-A"));
+        await a.Sync.StartAsync(false, default);
+        var drafts = a.NewDir("Drafts");
+        await a.SettleAsync();
+
+        var doc = a.NewFile("doc.txt", drafts);                  // new, still open in an app: held back on A
+        a.Engine.Opened(doc, true);
+        a.Engine.Write(doc, 0, "unsent work"u8);
+
+        var b = kit.Pc("b", so: Fast("PC-B"));
+        await b.Sync.StartAsync(false, default);
+        await b.Sync.TakeDriveAsync(force: true, default);       // B takes the drive...
+        b.Db.ApplyLocal(new PurgeOp(drafts));                    // ...and deletes the (to it: empty) folder for good
+        await b.SettleAsync();
+
+        await a.Sync.CatchUpAsync(default);
+        var kept = a.Db.Get(doc);
+        Assert.NotNull(kept);                                    // not destroyed
+        Assert.Equal(IndexDb.RootId, kept!.Parent);              // moved to the root
+        Assert.True(a.Db.IsPending(doc));                        // and still waiting to upload
+        a.Engine.Closed(doc, true);
+    }
 }

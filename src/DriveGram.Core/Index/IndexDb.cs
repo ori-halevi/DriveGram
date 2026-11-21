@@ -306,12 +306,18 @@ public sealed class IndexDb : IDisposable
 
     public void ApplyLocal(IReadOnlyList<Op> ops) => InTransaction(() =>
     {
-        foreach (var op in ops)
+        foreach (var original in ops)
         {
+            var op = original is PurgeOp { Ids: null } pg ? pg with { Ids = SubtreeIds(pg.Id) } : original;
             Apply(op, remote: false);
             Exec("INSERT INTO outbox(op) VALUES(@o)", ("@o", OpJson.Serialize(op)));
         }
     });
+
+    string[] SubtreeIds(string id) => Query("""
+        WITH RECURSIVE sub(id) AS (SELECT @id UNION SELECT n.id FROM nodes n JOIN sub ON n.parent = sub.id)
+        SELECT id FROM sub
+        """, r => r.GetString(0), ("@id", id)).ToArray();
 
     /// <summary>Apply an op that came from the journal (another PC, or a replay).</summary>
     public void ApplyRemote(Op op) => InTransaction(() => Apply(op, remote: true));
@@ -320,8 +326,9 @@ public sealed class IndexDb : IDisposable
     {
         switch (op)
         {
-            case UpsertOp u:
+            case UpsertOp u0:
             {
+                var u = Get(u0.Parent) is null ? u0 with { Parent = RootId } : u0;
                 var name = UniqueName(u.Parent, u.Name, u.Id);
                 uint attrs = u.Dir ? u.Attrs | FileAttributeDirectory : u.Attrs & ~FileAttributeDirectory;
                 if (Get(u.Id) is null)
@@ -372,8 +379,9 @@ public sealed class IndexDb : IDisposable
             case TrashOp t:
                 Exec("UPDATE nodes SET trashed=@t WHERE id=@id AND id<>@root", ("@id", t.Id), ("@t", t.At), ("@root", RootId));
                 break;
-            case RestoreOp r:
+            case RestoreOp r0:
             {
+                var r = Get(r0.Parent) is null ? r0 with { Parent = RootId } : r0;
                 var name = UniqueName(r.Parent, r.Name, r.Id);
                 Exec("UPDATE nodes SET trashed=0, parent=@p, name=@n, nkey=@k WHERE id=@id",
                     ("@id", r.Id), ("@p", r.Parent), ("@n", name), ("@k", NameKey(name)));
@@ -385,11 +393,38 @@ public sealed class IndexDb : IDisposable
                 // set-based: a folder of 500,000 files is a handful of statements, not millions
                 long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 Exec("DROP TABLE IF EXISTS temp.purge_ids");
-                Exec("""
-                    CREATE TEMP TABLE purge_ids AS
-                    WITH RECURSIVE sub(id) AS (SELECT @id UNION SELECT n.id FROM nodes n JOIN sub ON n.parent = sub.id)
-                    SELECT id FROM sub
-                    """, ("@id", p.Id)); // UNION: a folder cycle (two writers) cannot loop forever
+                if (p.Ids is { Length: > 0 } listed)
+                {
+                    Exec("CREATE TEMP TABLE purge_ids(id TEXT PRIMARY KEY)");
+                    foreach (var x in listed) Exec("INSERT OR IGNORE INTO purge_ids(id) VALUES(@i)", ("@i", x));
+                }
+                else
+                    Exec("""
+                        CREATE TEMP TABLE purge_ids AS
+                        WITH RECURSIVE sub(id) AS (SELECT @id UNION SELECT n.id FROM nodes n JOIN sub ON n.parent = sub.id)
+                        SELECT id FROM sub
+                        """, ("@id", p.Id)); // UNION: a folder cycle (two writers) cannot loop forever
+                if (remote)
+                {
+                    // another PC deleted for good what THIS PC still changes (a file waiting to upload): keep it,
+                    // in the root, and tell every PC (the purge then removes everything but it)
+                    foreach (var keep in Query("SELECT p.node FROM pending p WHERE p.node IN (SELECT id FROM temp.purge_ids)", x => x.GetString(0)))
+                    {
+                        Exec("DELETE FROM temp.purge_ids WHERE id=@i", ("@i", keep));
+                        if (Get(keep) is { } kn)
+                        {
+                            ApplyLocal([new RestoreOp(kn.Id, RootId, kn.Name)]);
+                            Log.Warn($"'{kn.Name}' was deleted for good on another PC while it had changes here: kept, in the root");
+                        }
+                    }
+                }
+                // anything under a deleted folder that is NOT deleted itself (moved there meanwhile) goes to the root
+                foreach (var orphan in Query($"SELECT {NodeCols} FROM nodes WHERE parent IN (SELECT id FROM temp.purge_ids) AND id NOT IN (SELECT id FROM temp.purge_ids)", MapNode))
+                {
+                    var oname = UniqueName(RootId, orphan.Name, orphan.Id);
+                    Exec("UPDATE nodes SET parent=@p, name=@n, nkey=@k WHERE id=@id",
+                        ("@id", orphan.Id), ("@p", RootId), ("@n", oname), ("@k", NameKey(oname)));
+                }
                 Exec("UPDATE chunks SET created=@t WHERE id IN (SELECT chunk FROM file_chunks WHERE node IN (SELECT id FROM temp.purge_ids))", ("@t", now));
                 Exec("DELETE FROM file_chunks WHERE node IN (SELECT id FROM temp.purge_ids)");
                 Exec("DELETE FROM dirty WHERE node IN (SELECT id FROM temp.purge_ids)");
@@ -538,6 +573,12 @@ public sealed class IndexDb : IDisposable
     });
 
     /// <summary>Keep the index file small: flush the WAL, and compact when much of it is free space.</summary>
+    /// <summary>Everything committed so far is on disk (the WAL is synced into the database file).</summary>
+    public void Durable()
+    {
+        lock (_gate) Exec("PRAGMA wal_checkpoint(FULL);");
+    }
+
     public void Maintain()
     {
         lock (_gate)

@@ -84,6 +84,11 @@ public sealed class DriveFileSystem : FileSystemBase
     }
 
     bool ReadOnly => !_sync.Writable || _sync.HandingOver; // handing over: no new changes here
+
+    /// <summary>Read-only for NEW changes; a handle that was already open for writing keeps working (Windows
+    /// may deliver an app's saved data later, and the app was already told it is saved). Such changes stay
+    /// on this PC and are sent when it can write again.</summary>
+    bool ReadOnlyFor(object fileNode) => ReadOnly && fileNode is not Handle { CanWrite: true };
     static long Now => DateTime.UtcNow.ToFileTimeUtc();
 
     public override int Init(object host0)
@@ -172,6 +177,8 @@ public sealed class DriveFileSystem : FileSystemBase
     {
         "MsMpEng", "MpDefenderCoreService", "NisSrv", "MpCopyAccelerator",
         "SearchProtocolHost", "SearchIndexer", "SearchFilterHost",
+        "bztransmit", "bzfilelist", "bzserv", "CrashPlanService", "IDrive", "CarboniteService",
+        "AvastSvc", "AvgSvc", "avp", "ekrn", "MBAMService", "vsserv", "bdservicehost", "NortonSecurity", "mcshield",
     };
     static readonly System.Collections.Concurrent.ConcurrentDictionary<uint, (bool Scanner, long At)> ProcessKinds = new();
 
@@ -345,7 +352,7 @@ public sealed class DriveFileSystem : FileSystemBase
             _db.ApplyLocal(new TrashOp(n.Id, Now));
             Log.Debug($"deleted (to trash) {fileName}");
         }
-        else if ((flags & CleanupSetLastWriteTime) != 0 && !ReadOnly && _db.Get(h.Id) is { Dir: false } w)
+        else if ((flags & CleanupSetLastWriteTime) != 0 && !ReadOnlyFor(fileNode) && _db.Get(h.Id) is { Dir: false } w)
         {
             // Written through this handle and the app did not set the time itself: "modified now". Done
             // here, not on every write: Windows delivers cached data AFTER a copy has set the original time.
@@ -377,7 +384,7 @@ public sealed class DriveFileSystem : FileSystemBase
     {
         bytesTransferred = 0;
         fileInfo = default;
-        if (ReadOnly) return StatusWriteProtected;
+        if (ReadOnlyFor(fileNode)) return StatusWriteProtected;
         var h = (Handle)fileNode;
         var n = _db.Get(h.Id) ?? throw new FileNotFoundException();
         ulong size = (ulong)n.Size;
@@ -389,7 +396,7 @@ public sealed class DriveFileSystem : FileSystemBase
         else if (writeToEndOfFile) offset = size;
 
         BecomeWriter(fileNode);
-        _engine.Write(h.Id, (long)offset, new ReadOnlySpan<byte>((void*)buffer, (int)length));
+        _engine.Write(h.Id, (long)offset, new ReadOnlySpan<byte>((void*)buffer, (int)length), mayExceedQuota: constrainedIo);
         bytesTransferred = length;
         fileInfo = Info(_db.Get(h.Id)!);
         return STATUS_SUCCESS;
@@ -397,8 +404,9 @@ public sealed class DriveFileSystem : FileSystemBase
 
     public override int Flush(object fileNode, object fileDesc, out FileInfo fileInfo)
     {
+        if (fileNode is Handle { Dir: false } fh) _engine.FlushToDisk(fh.Id); // the app wants it on disk: really
         fileInfo = fileNode is Handle h && _db.Get(h.Id) is { } n ? Info(n) : default;
-        return STATUS_SUCCESS; // data is already on the local disk; upload follows on close
+        return STATUS_SUCCESS;
     }
 
     public override int GetFileInfo(object fileNode, object fileDesc, out FileInfo fileInfo)
@@ -427,7 +435,7 @@ public sealed class DriveFileSystem : FileSystemBase
     public override int SetFileSize(object fileNode, object fileDesc, ulong newSize, bool setAllocationSize, out FileInfo fileInfo)
     {
         fileInfo = default;
-        if (ReadOnly) return StatusWriteProtected;
+        if (ReadOnlyFor(fileNode)) return StatusWriteProtected;
         var n = NodeOf(fileNode);
         // An allocation-size request only matters when it cuts the file; we never preallocate.
         if (!setAllocationSize || (ulong)n.Size > newSize)

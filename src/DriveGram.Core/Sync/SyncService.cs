@@ -131,6 +131,7 @@ public sealed partial class SyncService : IAsyncDisposable
             if (!ControlTrusted)
                 throw new ControlNotTrustedException();
             var next = change(current);
+            if (ReferenceEquals(next, current)) return current;
             // signed, and from now on only versions that sign may write it (older ones would drop the mac)
             next = (next with { MinWriter = Math.Max(next.MinWriter, StorageFormat.Current) }).Signed(_keys.ControlKey);
             await _remote.WriteControlAsync(next.ToJson(), ct);
@@ -358,7 +359,7 @@ public sealed partial class SyncService : IAsyncDisposable
         if (l.Until >= NowUnix) return false;
         // the record's last edit, stamped by Telegram's server: untouched for a whole lease (plus margin
         // for this PC's own clock) means the holder is gone — at once, also right after this PC starts
-        if (_remote.ControlEditedAtUtc is { } edited && DateTime.UtcNow - edited > _o.LeaseDuration + TimeSpan.FromMinutes(2))
+        if (_remote.ControlEditedAtUtc is { } edited && _remote.ServerNowUtc - edited > _o.LeaseDuration + TimeSpan.FromMinutes(2))
             return true;
         return now - _seenLeaseAt >= 2 * _o.HeartbeatInterval.TotalMilliseconds;
     }
@@ -498,6 +499,8 @@ public sealed partial class SyncService : IAsyncDisposable
         for (int attempt = 0; ; attempt++)
         {
             var raw = await _remote.ReadJournalAsync(item.Id, ct);
+            if (item.Size > 0 && raw.Length != item.Size)
+                throw new IOException($"journal #{item.Id}: incomplete download ({raw.Length} of {item.Size} bytes); trying again later");
             if (raw.Length >= 4 && raw[0] == 'D' && raw[1] == 'G' && raw[2] == 'E' && raw[3] != '1')
             {
                 Log.Warn($"journal #{item.Id}: envelope version {(char)raw[3]} is unknown here; ignored");
@@ -530,7 +533,7 @@ public sealed partial class SyncService : IAsyncDisposable
     async Task<bool> StillHoldLeaseAsync(CancellationToken ct)
     {
         if (!Writable || ShutdownPause) return false; // after a shutdown release: append nothing without the lease
-        if (DateTime.UtcNow - _leaseConfirmedAt < _o.HeartbeatInterval) return true;
+        if (DateTime.UtcNow - _leaseConfirmedAt < TimeSpan.FromSeconds(Math.Min(10, _o.HeartbeatInterval.TotalSeconds))) return true;
         var lease = (await ReadTrustedAsync(ct))?.Lease;
         if (lease is not null && lease.Dev == _db.DeviceId && lease.Until > NowUnix)
         {
@@ -597,6 +600,7 @@ public sealed partial class SyncService : IAsyncDisposable
         await _io.WaitAsync(ct);
         try
         {
+            if (_db.OutboxCount() > 0 || _db.PendingNodes().Count > 0) return; // changed meanwhile
             int upto = _db.Applied;
             var payload = Envelope.Seal(_keys.JournalKey, _db.ExportSnapshot(upto));
             int msg = await _remote.AppendJournalAsync($"s-{upto}.bin", payload, ct);
@@ -663,6 +667,12 @@ public sealed partial class SyncService : IAsyncDisposable
                 if (Writable)
                 {
                     var lease = (await ReadTrustedAsync(ct))!.Lease;
+                    if (lease is null && _releasedForShutdown)
+                    {
+                        _releasedForShutdown = false;
+                        await TryAcquireLeaseAsync(false, ct); // the shutdown was cancelled: take it back
+                        continue;
+                    }
                     if (lease?.Dev != _db.DeviceId)
                     {
                         // Another PC took over (we were offline longer than the lease), or took over AND
@@ -725,10 +735,12 @@ public sealed partial class SyncService : IAsyncDisposable
             // the lease is taken back properly (catch-up first) once this pause is over
             _leaseConfirmedAt = DateTime.MinValue;
             _shutdownPauseUntil = DateTime.UtcNow.AddMinutes(2);
+            _releasedForShutdown = true;
         }
     }
 
     DateTime _shutdownPauseUntil;
+    bool _releasedForShutdown;
     bool ShutdownPause => DateTime.UtcNow < _shutdownPauseUntil;
 
     /// <summary>The Windows session ends: stop the loop for good.</summary>

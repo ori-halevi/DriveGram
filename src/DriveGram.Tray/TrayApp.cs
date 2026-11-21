@@ -102,6 +102,7 @@ sealed class TrayApp : ApplicationContext
         _quitting = true;
         var sessions = _drives.Select(x => x.Session).OfType<DriveSession>().ToList();
         Parallel.ForEach(sessions, s => s.EndForShutdown());
+        Environment.Exit(0); // nothing is left running half-stopped (Restart Manager waits for this)
     }
 
     void RetryWaitingDrivesNow()

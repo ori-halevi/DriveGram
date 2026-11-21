@@ -33,7 +33,10 @@ public sealed record TrashOp(string Id, long At) : Op(Id);
 public sealed record RestoreOp(string Id, string Parent, string Name) : Op(Id);
 
 /// <summary>Permanent delete of a (trashed) subtree. Its chunks become garbage.</summary>
-public sealed record PurgeOp(string Id) : Op(Id);
+/// <param name="Ids">exactly what the purging PC deleted (1.0.3+). Every PC deletes only these; anything
+/// else it finds under them (moved there meanwhile, or not sent yet) goes to the root instead of being lost.
+/// Null in older entries: the whole subtree, as before.</param>
+public sealed record PurgeOp(string Id, string[]? Ids = null) : Op(Id);
 
 public sealed record JournalEntry(int V, string Dev, long Ts, Op[] Ops);
 

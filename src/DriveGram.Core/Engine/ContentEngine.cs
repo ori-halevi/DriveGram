@@ -358,14 +358,19 @@ public sealed class ContentEngine : IAsyncDisposable
     }
 
     // ── write / resize ───────────────────────────────────────────────────────
-    public void Write(string id, long offset, ReadOnlySpan<byte> src)
+    public void Write(string id, long offset, ReadOnlySpan<byte> src) => Write(id, offset, src, mayExceedQuota: false);
+
+    /// <param name="mayExceedQuota">Windows flushing data an app already wrote (the app was told it is saved):
+    /// never refused or delayed for staging room — losing it would be worse than a full staging area.</param>
+    public void Write(string id, long offset, ReadOnlySpan<byte> src, bool mayExceedQuota)
     {
         if (src.IsEmpty) return;
-        WaitForRoom(NewRoomFor(id, offset, src.Length));
+        if (!mayExceedQuota) WaitForRoom(NewRoomFor(id, offset, src.Length));
         var st = State(id);
         lock (st.Lock)
         {
             var node = _db.Get(id) ?? throw new FileNotFoundException(id);
+            _db.SetPending(id);
             long end = offset + src.Length;
             long size = Math.Max(node.Size, end);
             if (end > node.Size) ResizeLocked(st, id, node.Size, end);
@@ -493,8 +498,8 @@ public sealed class ContentEngine : IAsyncDisposable
             }
             catch (IOException) { }
         }
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
-        cts.CancelAfter(_o.ReadTimeout); // a whole chunk (copy-on-write): always the full time
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, _waits.Token);
+        cts.CancelAfter(ReadBudget);
         byte[] whole = [];
         Remote(() => whole = _reader.ReadWholeAsync(loc, cts.Token).GetAwaiter().GetResult());
         return whole;
@@ -833,6 +838,7 @@ public sealed class ContentEngine : IAsyncDisposable
                         _db.DeleteAllDirty(id);
                         _db.ClearPending(id);
                     });
+                    _db.Durable(); // the commit is on disk BEFORE its pieces move into the cache
                     foreach (var d in dirty.Values.Where(d => d.Staged))
                     {
                         var path = PiecePath(id, d.Idx);
@@ -915,6 +921,23 @@ public sealed class ContentEngine : IAsyncDisposable
             catch (OperationCanceledException) { }
             catch (Exception ex) { Log.Error("seal loop", ex); }
         }
+    }
+
+    /// <summary>An app asked for its data to be on disk (FlushFileBuffers): this file's staged pieces and the
+    /// index are made durable.</summary>
+    public void FlushToDisk(string id)
+    {
+        var st = State(id);
+        lock (st.Lock)
+        {
+            foreach (var row in _db.DirtyRows(id).Where(r => r.Staged))
+            {
+                var path = PiecePath(id, row.Idx);
+                try { using var f = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete); f.Flush(true); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            }
+        }
+        _db.Durable();
     }
 
     /// <summary>Files with local changes that are still open for writing (an app is editing them).</summary>

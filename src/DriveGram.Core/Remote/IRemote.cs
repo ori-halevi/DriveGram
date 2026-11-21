@@ -32,6 +32,9 @@ public interface IRemote : IAsyncDisposable
     /// <summary>When the control record was last changed, by the SERVER's clock (from the last read); null if unknown.</summary>
     DateTime? ControlEditedAtUtc => null;
 
+    /// <summary>The server's current time (as far as known): compare server timestamps with this.</summary>
+    DateTime ServerNowUtc => DateTime.UtcNow;
+
     /// <summary>When the server asked this account to wait (rate limit), until when; null if not.</summary>
     DateTime? WaitingUntil => null;
 
