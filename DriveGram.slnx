@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DriveGram.Core/DriveGram.Core.csproj" />
+    <Project Path="src/DriveGram/DriveGram.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DriveGram.Tests/DriveGram.Tests.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,384 @@
+using System.Security.AccessControl;
+using DriveGram.Engine;
+using DriveGram.Index;
+using DriveGram.Sync;
+using Fsp;
+using FileInfo = Fsp.Interop.FileInfo;
+using VolumeInfo = Fsp.Interop.VolumeInfo;
+
+namespace DriveGram.App;
+
+/// <summary>
+/// The Windows side: WinFsp calls these for every Explorer / application file operation, and
+/// they map onto the index (tree, metadata) and the content engine (bytes). Metadata answers
+/// come from the local SQLite index only, so browsing never waits on Telegram; only reading
+/// file bytes that are not cached locally does.
+/// </summary>
+public sealed class DriveFileSystem : FileSystemBase
+{
+    sealed class Handle(string id, bool dir, bool writer)
+    {
+        public string Id { get; } = id;
+        public bool Dir { get; } = dir;
+        public bool Writer { get; } = writer;
+    }
+
+    sealed class DirEnum(List<(string Name, FileInfo Info)> entries, int index)
+    {
+        public readonly List<(string Name, FileInfo Info)> Entries = entries;
+        public int Index = index;
+    }
+
+    const uint AttrDirectory = (uint)FileAttributes.Directory;
+    const uint AttrArchive = (uint)FileAttributes.Archive;
+    const uint AttrNormal = (uint)FileAttributes.Normal;
+    const uint WriteAccess = 0x0002 | 0x0004; // FILE_WRITE_DATA | FILE_APPEND_DATA
+    const ulong TotalSize = 1UL << 50;          // 1 PiB: Telegram has no fixed quota; never block a copy
+    const int StatusDiskFull = unchecked((int)0xC000007F);
+    const int StatusIoTimeout = unchecked((int)0xC00000B5);
+    const int StatusUnexpectedIo = unchecked((int)0xC00000E9);
+    const int StatusWriteProtected = unchecked((int)0xC00000A2);
+
+    readonly IndexDb _db;
+    readonly ContentEngine _engine;
+    readonly SyncService _sync;
+    readonly string _label;
+    readonly byte[] _sd;
+
+    public DriveFileSystem(IndexDb db, ContentEngine engine, SyncService sync, string label)
+    {
+        _db = db;
+        _engine = engine;
+        _sync = sync;
+        _label = label;
+        var sd = new RawSecurityDescriptor("O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;WD)");
+        _sd = new byte[sd.BinaryLength];
+        sd.GetBinaryForm(_sd, 0);
+    }
+
+    bool ReadOnly => !_sync.Writable;
+    static long Now => DateTime.UtcNow.ToFileTimeUtc();
+
+    public override int Init(object host0)
+    {
+        var host = (FileSystemHost)host0;
+        host.SectorSize = 4096;
+        host.SectorsPerAllocationUnit = 1;
+        host.MaxComponentLength = 255;
+        host.FileInfoTimeout = 1000;
+        host.CaseSensitiveSearch = false;
+        host.CasePreservedNames = true;
+        host.UnicodeOnDisk = true;
+        host.PersistentAcls = true;
+        host.PostCleanupWhenModifiedOnly = true;
+        host.PassQueryDirectoryPattern = false;
+        host.FlushAndPurgeOnCleanup = false;
+        host.VolumeCreationTime = (ulong)new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc).ToFileTimeUtc();
+        host.VolumeSerialNumber = 0x0D17E6A4;
+        host.FileSystemName = "DriveGram";
+        return STATUS_SUCCESS;
+    }
+
+    public override int ExceptionHandler(Exception ex)
+    {
+        switch (ex)
+        {
+            case FileNotFoundException: return STATUS_OBJECT_NAME_NOT_FOUND;
+            case TimeoutException or OperationCanceledException:
+                Log.Warn($"fs: timed out ({ex.Message})");
+                return StatusIoTimeout;
+            case IOException io when io.Message.Contains("staging area is full"):
+                Log.Warn(io.Message);
+                return StatusDiskFull;
+            default:
+                Log.Error("fs: unexpected error", ex);
+                return StatusUnexpectedIo;
+        }
+    }
+
+    FileInfo Info(Node n)
+    {
+        uint attrs = n.Dir ? (n.Attrs | AttrDirectory) : (n.Attrs & ~AttrDirectory);
+        if (attrs == 0) attrs = AttrNormal;
+        if (attrs != AttrNormal) attrs &= ~AttrNormal;
+        return new FileInfo
+        {
+            FileAttributes = attrs,
+            FileSize = n.Dir ? 0 : (ulong)n.Size,
+            AllocationSize = n.Dir ? 0 : ((ulong)n.Size + 4095) / 4096 * 4096,
+            CreationTime = (ulong)n.Ctime,
+            LastAccessTime = (ulong)n.Mtime,
+            LastWriteTime = (ulong)n.Mtime,
+            ChangeTime = (ulong)n.Mtime,
+            IndexNumber = n.Ino,
+            HardLinks = 0,
+        };
+    }
+
+    Node NodeOf(object fileNode) => _db.Get(((Handle)fileNode).Id) ?? throw new FileNotFoundException();
+
+    static uint CleanAttrs(uint attrs, bool dir)
+    {
+        attrs &= ~AttrNormal;
+        return dir ? attrs | AttrDirectory : attrs & ~AttrDirectory;
+    }
+
+    // ── volume ───────────────────────────────────────────────────────────────
+    public override int GetVolumeInfo(out VolumeInfo volumeInfo)
+    {
+        volumeInfo = default;
+        volumeInfo.TotalSize = TotalSize;
+        volumeInfo.FreeSize = TotalSize - (ulong)Math.Max(0, _db.UsedBytes());
+        volumeInfo.SetVolumeLabel(_label);
+        return STATUS_SUCCESS;
+    }
+
+    public override int SetVolumeLabel(string volumeLabel, out VolumeInfo volumeInfo) => GetVolumeInfo(out volumeInfo);
+
+    // ── lookup / security ────────────────────────────────────────────────────
+    public override int GetSecurityByName(string fileName, out uint fileAttributes, ref byte[] securityDescriptor)
+    {
+        var n = _db.Resolve(fileName);
+        if (n is null)
+        {
+            fileAttributes = 0;
+            return _db.ResolveParent(fileName).Parent is null && IndexDb.SplitPath(fileName).Length > 1
+                ? STATUS_OBJECT_PATH_NOT_FOUND
+                : STATUS_OBJECT_NAME_NOT_FOUND;
+        }
+        fileAttributes = Info(n).FileAttributes;
+        if (securityDescriptor is not null) securityDescriptor = _sd;
+        return STATUS_SUCCESS;
+    }
+
+    public override int GetSecurity(object fileNode, object fileDesc, ref byte[] securityDescriptor)
+    {
+        securityDescriptor = _sd;
+        return STATUS_SUCCESS;
+    }
+
+    public override int SetSecurity(object fileNode, object fileDesc, AccessControlSections sections, byte[] securityDescriptor) =>
+        STATUS_SUCCESS; // ACLs are not stored: everyone on this PC who can see the drive can use it
+
+    // ── create / open / close ────────────────────────────────────────────────
+    public override int Create(string fileName, uint createOptions, uint grantedAccess, uint fileAttributes,
+        byte[] securityDescriptor, ulong allocationSize, out object fileNode, out object fileDesc,
+        out FileInfo fileInfo, out string normalizedName)
+    {
+        fileNode = default!; fileDesc = default!; fileInfo = default; normalizedName = default!;
+        if (ReadOnly) return StatusWriteProtected;
+        var (parent, name) = _db.ResolveParent(fileName);
+        if (parent is null) return STATUS_OBJECT_PATH_NOT_FOUND;
+        if (name.Length > 255) return STATUS_OBJECT_NAME_INVALID;
+        if (_db.Child(parent.Id, name) is not null) return STATUS_OBJECT_NAME_COLLISION;
+
+        bool dir = (createOptions & FILE_DIRECTORY_FILE) != 0;
+        uint attrs = CleanAttrs(dir ? fileAttributes : fileAttributes | AttrArchive, dir);
+        var id = Guid.NewGuid().ToString("N");
+        long now = Now;
+        _db.ApplyLocal(new UpsertOp(id, parent.Id, name, dir, attrs, now, now));
+        bool writer = !dir && (grantedAccess & WriteAccess) != 0;
+        _engine.Opened(id, writer);
+        fileNode = new Handle(id, dir, writer);
+        fileInfo = Info(_db.Get(id)!);
+        return STATUS_SUCCESS;
+    }
+
+    public override int Open(string fileName, uint createOptions, uint grantedAccess, out object fileNode,
+        out object fileDesc, out FileInfo fileInfo, out string normalizedName)
+    {
+        fileNode = default!; fileDesc = default!; fileInfo = default; normalizedName = default!;
+        var n = _db.Resolve(fileName);
+        if (n is null) return STATUS_OBJECT_NAME_NOT_FOUND;
+        bool writer = !n.Dir && !ReadOnly && (grantedAccess & WriteAccess) != 0;
+        _engine.Opened(n.Id, writer);
+        fileNode = new Handle(n.Id, n.Dir, writer);
+        fileInfo = Info(n);
+        return STATUS_SUCCESS;
+    }
+
+    public override int Overwrite(object fileNode, object fileDesc, uint fileAttributes, bool replaceFileAttributes,
+        ulong allocationSize, out FileInfo fileInfo)
+    {
+        fileInfo = default;
+        if (ReadOnly) return StatusWriteProtected;
+        var n = NodeOf(fileNode);
+        _engine.SetSize(n.Id, 0);
+        uint attrs = CleanAttrs(replaceFileAttributes ? fileAttributes | AttrArchive : n.Attrs | fileAttributes | AttrArchive, false);
+        long now = Now;
+        _db.ApplyLocal(new UpsertOp(n.Id, n.Parent!, n.Name, false, attrs, n.Ctime, now));
+        fileInfo = Info(_db.Get(n.Id)!);
+        return STATUS_SUCCESS;
+    }
+
+    public override void Cleanup(object fileNode, object fileDesc, string fileName, uint flags)
+    {
+        if (fileNode is not Handle h) return;
+        if ((flags & CleanupDelete) != 0 && !ReadOnly)
+        {
+            var n = _db.Get(h.Id);
+            if (n is null || n.IsRoot) return;
+            _db.ApplyLocal(new TrashOp(n.Id, Now));
+            if (!n.Dir) _engine.Discard(n.Id);
+            Log.Debug($"deleted (to trash) {fileName}");
+        }
+    }
+
+    public override void Close(object fileNode, object fileDesc)
+    {
+        if (fileNode is Handle h) _engine.Closed(h.Id, h.Writer);
+    }
+
+    // ── data ─────────────────────────────────────────────────────────────────
+    public override unsafe int Read(object fileNode, object fileDesc, IntPtr buffer, ulong offset, uint length,
+        out uint bytesTransferred)
+    {
+        bytesTransferred = 0;
+        var h = (Handle)fileNode;
+        var n = _db.Get(h.Id) ?? throw new FileNotFoundException();
+        if (offset >= (ulong)n.Size) return STATUS_END_OF_FILE;
+        var span = new Span<byte>((void*)buffer, (int)length);
+        bytesTransferred = (uint)_engine.Read(h.Id, (long)offset, span);
+        return STATUS_SUCCESS;
+    }
+
+    public override unsafe int Write(object fileNode, object fileDesc, IntPtr buffer, ulong offset, uint length,
+        bool writeToEndOfFile, bool constrainedIo, out uint bytesTransferred, out FileInfo fileInfo)
+    {
+        bytesTransferred = 0;
+        fileInfo = default;
+        if (ReadOnly) return StatusWriteProtected;
+        var h = (Handle)fileNode;
+        var n = _db.Get(h.Id) ?? throw new FileNotFoundException();
+        ulong size = (ulong)n.Size;
+        if (constrainedIo)
+        {
+            if (offset >= size) { fileInfo = Info(n); return STATUS_SUCCESS; }
+            if (offset + length > size) length = (uint)(size - offset);
+        }
+        else if (writeToEndOfFile) offset = size;
+
+        _engine.Write(h.Id, (long)offset, new ReadOnlySpan<byte>((void*)buffer, (int)length));
+        bytesTransferred = length;
+        fileInfo = Info(_db.Get(h.Id)!);
+        return STATUS_SUCCESS;
+    }
+
+    public override int Flush(object fileNode, object fileDesc, out FileInfo fileInfo)
+    {
+        fileInfo = fileNode is Handle h && _db.Get(h.Id) is { } n ? Info(n) : default;
+        return STATUS_SUCCESS; // data is already on the local disk; upload follows on close
+    }
+
+    public override int GetFileInfo(object fileNode, object fileDesc, out FileInfo fileInfo)
+    {
+        fileInfo = Info(NodeOf(fileNode));
+        return STATUS_SUCCESS;
+    }
+
+    public override int SetBasicInfo(object fileNode, object fileDesc, uint fileAttributes, ulong creationTime,
+        ulong lastAccessTime, ulong lastWriteTime, ulong changeTime, out FileInfo fileInfo)
+    {
+        fileInfo = default;
+        if (ReadOnly) return StatusWriteProtected;
+        var n = NodeOf(fileNode);
+        if (n.IsRoot) { fileInfo = Info(n); return STATUS_SUCCESS; }
+        uint attrs = fileAttributes != unchecked((uint)-1) ? CleanAttrs(fileAttributes, n.Dir) : n.Attrs;
+        long ctime = creationTime != 0 ? (long)creationTime : n.Ctime;
+        long mtime = lastWriteTime != 0 ? (long)lastWriteTime : n.Mtime;
+        if (attrs != n.Attrs || ctime != n.Ctime || mtime != n.Mtime)
+            _db.ApplyLocal(new UpsertOp(n.Id, n.Parent!, n.Name, n.Dir, attrs, ctime, mtime));
+        fileInfo = Info(_db.Get(n.Id)!);
+        return STATUS_SUCCESS;
+    }
+
+    public override int SetFileSize(object fileNode, object fileDesc, ulong newSize, bool setAllocationSize, out FileInfo fileInfo)
+    {
+        fileInfo = default;
+        if (ReadOnly) return StatusWriteProtected;
+        var n = NodeOf(fileNode);
+        // An allocation-size request only matters when it cuts the file; we never preallocate.
+        if (!setAllocationSize || (ulong)n.Size > newSize) _engine.SetSize(n.Id, (long)newSize);
+        fileInfo = Info(_db.Get(n.Id)!);
+        return STATUS_SUCCESS;
+    }
+
+    // ── delete / rename ──────────────────────────────────────────────────────
+    public override int CanDelete(object fileNode, object fileDesc, string fileName)
+    {
+        if (ReadOnly) return StatusWriteProtected;
+        var n = NodeOf(fileNode);
+        if (n.IsRoot) return STATUS_ACCESS_DENIED;
+        if (n.Dir && _db.HasChildren(n.Id)) return STATUS_DIRECTORY_NOT_EMPTY;
+        return STATUS_SUCCESS;
+    }
+
+    public override int Rename(object fileNode, object fileDesc, string fileName, string newFileName, bool replaceIfExists)
+    {
+        if (ReadOnly) return StatusWriteProtected;
+        var n = NodeOf(fileNode);
+        var (newParent, newName) = _db.ResolveParent(newFileName);
+        if (newParent is null) return STATUS_OBJECT_PATH_NOT_FOUND;
+        if (n.Dir && _db.IsSelfOrAncestor(n.Id, newParent.Id)) return STATUS_INVALID_PARAMETER;
+
+        var ops = new List<Op>();
+        var existing = _db.Child(newParent.Id, newName);
+        if (existing is not null && existing.Id != n.Id)
+        {
+            if (!replaceIfExists) return STATUS_OBJECT_NAME_COLLISION;
+            if (existing.Dir) return STATUS_ACCESS_DENIED;
+            ops.Add(new TrashOp(existing.Id, Now)); // replaced file goes to the trash (= old version kept 30 days)
+        }
+        ops.Add(new UpsertOp(n.Id, newParent.Id, newName, n.Dir, n.Attrs, n.Ctime, n.Mtime));
+        _db.ApplyLocal(ops);
+        if (existing is not null && existing.Id != n.Id) _engine.Discard(existing.Id);
+        return STATUS_SUCCESS;
+    }
+
+    // ── directories ──────────────────────────────────────────────────────────
+    public override bool ReadDirectoryEntry(object fileNode, object fileDesc, string pattern, string marker,
+        ref object context, out string fileName, out FileInfo fileInfo)
+    {
+        if (context is not DirEnum e)
+        {
+            var dir = NodeOf(fileNode);
+            var entries = new List<(string, FileInfo)>();
+            if (!dir.IsRoot)
+            {
+                entries.Add((".", Info(dir)));
+                entries.Add(("..", Info(_db.Get(dir.Parent!) ?? dir)));
+            }
+            foreach (var c in _db.Children(dir.Id).OrderBy(c => c.Name, StringComparer.OrdinalIgnoreCase))
+                entries.Add((c.Name, Info(c)));
+            int start = 0;
+            if (marker is not null)
+            {
+                int at = entries.FindIndex(x => string.Equals(x.Item1, marker, StringComparison.OrdinalIgnoreCase));
+                start = at >= 0 ? at + 1
+                    : entries.FindIndex(x => x.Item1 is not "." and not ".." &&
+                                              StringComparer.OrdinalIgnoreCase.Compare(x.Item1, marker) > 0) is var g and >= 0
+                        ? g : entries.Count;
+            }
+            context = e = new DirEnum(entries, start);
+        }
+        if (e.Index < e.Entries.Count)
+        {
+            (fileName, fileInfo) = e.Entries[e.Index++];
+            return true;
+        }
+        fileName = default!;
+        fileInfo = default;
+        return false;
+    }
+
+    public override int GetDirInfoByName(object fileNode, object fileDesc, string fileName, out string normalizedName,
+        out FileInfo fileInfo)
+    {
+        var dir = NodeOf(fileNode);
+        var c = _db.Child(dir.Id, fileName);
+        if (c is null) { normalizedName = default!; fileInfo = default; return STATUS_OBJECT_NAME_NOT_FOUND; }
+        normalizedName = c.Name;
+        fileInfo = Info(c);
+        return STATUS_SUCCESS;
+    }
+}
