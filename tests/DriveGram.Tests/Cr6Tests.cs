@@ -74,4 +74,35 @@ public class Cr6Tests
         await Task.Delay(1500);                                   // several heartbeats
         Assert.Null((await SyncService.ReadControlAsync(kit.Remote, default))!.Lease);
     }
+
+    [Fact]
+    public async Task AHolderSilentForALongTimeIsTakenOverRightAtStart()
+    {
+        await using var kit = await TestKit.CreateAsync();
+        var a = kit.Pc("a", so: Fast("PC-A"));
+        await a.Sync.StartAsync(false, default);
+        await a.Sync.DisposeAsync();                              // A sleeps / crashed, holding the lease
+        var ctrl = (await SyncService.ReadControlAsync(kit.Remote, default))!;
+        await kit.Remote.WriteControlAsync((ctrl with { Lease = ctrl.Lease! with { Until = DateTimeOffset.UtcNow.AddMinutes(-20).ToUnixTimeSeconds() } }).ToJson(), default);
+        File.SetLastWriteTimeUtc(Path.Combine(kit.Root, "remote", "control.json"), DateTime.UtcNow.AddMinutes(-35)); // untouched on the server
+
+        var b = kit.Pc("b", so: Fast("PC-B"));
+        await b.Sync.StartAsync(false, default);
+        Assert.True(b.Sync.Writable);                             // no 2-3 minutes of read-only
+    }
+
+    [Fact]
+    public async Task ALeaseOfThisPcsRemovedProfileIsTakenAtOnce()
+    {
+        await using var kit = await TestKit.CreateAsync();
+        var old = kit.Pc("old", so: Fast("PC-A"));
+        await old.Sync.StartAsync(false, default);
+        var oldDevice = old.Db.DeviceId;
+        await old.Sync.DisposeAsync();                            // removed while it still held the lease
+
+        var again = kit.Pc("again", so: Fast("PC-A"));
+        again.Sync.IsFormerSelf = dev => dev == oldDevice;
+        await again.Sync.StartAsync(false, default);
+        Assert.True(again.Sync.Writable);
+    }
 }

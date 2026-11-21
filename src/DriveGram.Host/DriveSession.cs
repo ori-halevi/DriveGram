@@ -231,6 +231,7 @@ public sealed class DriveSession : IAsyncDisposable
             var engineRef = engine;
             sync.CanCollectGarbage = () => engineRef.Idle;
             sync.WritableChanged += () => Log.Warn(sync.Writable ? "the drive is now writable" : $"the drive is now READ-ONLY (open on {sync.LeaseHolder})");
+            engine.RepairPending();
             await sync.StartAsync(takeOver, ct);
             if (remote is TelegramRemote telegram)
             {
@@ -426,10 +427,15 @@ public sealed class DriveSession : IAsyncDisposable
             if (!await Sync.BeginHandoverAsync(r, Engine.Status.PendingFiles, ct)) return false; // withdrawn
             Engine.CommitAllNow();
             var lastReport = DateTime.UtcNow;
+            var moved = (Pending: -1, Sent: -1L);
+            var movedAt = DateTime.UtcNow;
             while (Engine.PendingClosedFiles() > 0)
             {
                 if (!Sync.Writable) return false; // the other PC took the drive meanwhile ("take now")
                 int pending = Engine.Status.PendingFiles;
+                var now = (pending, _remote.BytesSent);
+                if (now != moved) { moved = now; movedAt = DateTime.UtcNow; }
+                else if (DateTime.UtcNow - movedAt > TimeSpan.FromMinutes(5)) return false; // stuck (offline, rate limit)
                 progress?.Invoke(pending);
                 if (DateTime.UtcNow - lastReport > TimeSpan.FromSeconds(5))
                 {
@@ -467,7 +473,8 @@ public sealed class DriveSession : IAsyncDisposable
     {
         _oldPaths.Clear();
         foreach (var op in ops)
-            if (op is UpsertOp or RestoreOp && Db.Get(op.Id) is { Trashed: 0 }) _oldPaths[op.Id] = PathOf(op.Id);
+            if (op is UpsertOp or RestoreOp or PurgeOp && Db.Get(op.Id) is { Trashed: 0 } n)
+                _oldPaths[op.Id] = PathOf(op.Id) + (op is PurgeOp && n.Dir ? "\0dir" : "");
     }
 
     readonly object _notifyGate = new();
@@ -502,6 +509,12 @@ public sealed class DriveSession : IAsyncDisposable
     {
         foreach (var op in ops)
         {
+            if (op is PurgeOp && _oldPaths.TryGetValue(op.Id, out var gone))
+            {
+                bool wasDir = gone.EndsWith("\0dir");
+                Notify(wasDir ? gone[..^4] : gone, NotifyAction.Removed, wasDir);
+                continue;
+            }
             var n = Db.Get(op.Id);
             if (n is null) continue;
             var path = PathOf(n.Id);

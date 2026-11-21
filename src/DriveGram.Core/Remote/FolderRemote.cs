@@ -101,8 +101,12 @@ public sealed class FolderRemote : IRemote
     public Task<string?> ReadControlAsync(CancellationToken ct)
     {
         var p = Path.Combine(_root, "control.json");
-        return Task.FromResult(File.Exists(p) ? File.ReadAllText(p) : null);
+        if (!File.Exists(p)) return Task.FromResult<string?>(null);
+        ControlEditedAtUtc = File.GetLastWriteTimeUtc(p);
+        return Task.FromResult<string?>(File.ReadAllText(p));
     }
+
+    public DateTime? ControlEditedAtUtc { get; private set; }
 
     public Task WriteControlAsync(string text, CancellationToken ct)
     {

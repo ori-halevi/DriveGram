@@ -29,6 +29,9 @@ public interface IRemote : IAsyncDisposable
     /// <summary>Bytes handed to the server so far, including parts of uploads still in progress.</summary>
     long BytesSent => 0;
 
+    /// <summary>When the control record was last changed, by the SERVER's clock (from the last read); null if unknown.</summary>
+    DateTime? ControlEditedAtUtc => null;
+
     /// <summary>When the server asked this account to wait (rate limit), until when; null if not.</summary>
     DateTime? WaitingUntil => null;
 

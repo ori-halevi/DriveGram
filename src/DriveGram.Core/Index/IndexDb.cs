@@ -387,9 +387,9 @@ public sealed class IndexDb : IDisposable
                 Exec("DROP TABLE IF EXISTS temp.purge_ids");
                 Exec("""
                     CREATE TEMP TABLE purge_ids AS
-                    WITH RECURSIVE sub(id) AS (SELECT @id UNION ALL SELECT n.id FROM nodes n JOIN sub ON n.parent = sub.id)
+                    WITH RECURSIVE sub(id) AS (SELECT @id UNION SELECT n.id FROM nodes n JOIN sub ON n.parent = sub.id)
                     SELECT id FROM sub
-                    """, ("@id", p.Id));
+                    """, ("@id", p.Id)); // UNION: a folder cycle (two writers) cannot loop forever
                 Exec("UPDATE chunks SET created=@t WHERE id IN (SELECT chunk FROM file_chunks WHERE node IN (SELECT id FROM temp.purge_ids))", ("@t", now));
                 Exec("DELETE FROM file_chunks WHERE node IN (SELECT id FROM temp.purge_ids)");
                 Exec("DELETE FROM dirty WHERE node IN (SELECT id FROM temp.purge_ids)");
@@ -430,8 +430,7 @@ public sealed class IndexDb : IDisposable
             {
                 // a file being edited again keeps its local size; its committed chunks were never touched
                 // (another PC's content for it became a conflict copy instead)
-                if (op is ContentOp c && IsPending(c.Id)) continue;
-                Apply(op, remote: false);
+                ApplyAsOwn([op]);
                 n++;
             }
             SetMeta("rebase", null);

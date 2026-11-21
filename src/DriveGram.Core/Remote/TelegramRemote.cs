@@ -570,9 +570,12 @@ public sealed class TelegramRemote : IRemote
     public async Task<byte[]> ReadJournalAsync(int id, CancellationToken ct)
     {
         var doc = await GetDocAsync(_journal, _jdocs, id, ct);
-        using var ms = new MemoryStream();
-        await _down.RunAsync(() => _client.DownloadFileAsync(doc, ms), ct, TimeSpan.FromMinutes(10));
-        return ms.ToArray();
+        return await _down.RunAsync(async () =>
+        {
+            using var ms = new MemoryStream(); // fresh for every attempt
+            await _client.DownloadFileAsync(doc, ms);
+            return ms.ToArray();
+        }, ct, TimeSpan.FromMinutes(10));
     }
 
     async Task<int> ControlIdAsync(CancellationToken ct)
@@ -587,8 +590,12 @@ public sealed class TelegramRemote : IRemote
         int id = await ControlIdAsync(ct);
         if (id == 0) return null;
         var r = await _ctl.RunAsync(() => _client.Channels_GetMessages(_journal, [new InputMessageID { id = id }]), ct, ReadTimeout);
-        return r.Messages.FirstOrDefault() is Message m ? m.message : null;
+        if (r.Messages.FirstOrDefault() is not Message m) return null;
+        ControlEditedAtUtc = (m.edit_date > m.date ? m.edit_date : m.date).ToUniversalTime();
+        return m.message;
     }
+
+    public DateTime? ControlEditedAtUtc { get; private set; }
 
     public async Task WriteControlAsync(string text, CancellationToken ct)
     {

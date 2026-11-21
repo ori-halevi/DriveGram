@@ -145,15 +145,22 @@ public sealed class ContentEngine : IAsyncDisposable
         }
     }
 
-    public void Start()
+    /// <summary>Local changes a crash left without the "pending" mark are marked again (they upload, and
+    /// a new file's ops wait for its content). Called before the sync starts; Start repeats it.</summary>
+    public void RepairPending()
     {
-        ReconcileStaging(adjustCount: false); // before counting: the count starts from what is really staged
         foreach (var node in _db.AllDirty().Where(r => r.Kind != 'U' || r.Staged).Select(r => r.Node).Distinct())
             if (!_db.IsPending(node) && _db.Get(node) is not null)
             {
                 Log.Warn($"local changes of {node} were not marked for upload (interrupted write); uploading them");
                 _db.SetPending(node);
             }
+    }
+
+    public void Start()
+    {
+        ReconcileStaging(adjustCount: false); // before counting: the count starts from what is really staged
+        RepairPending();
         long staged = 0;
         foreach (var row in _db.AllDirty())
         {
@@ -354,7 +361,7 @@ public sealed class ContentEngine : IAsyncDisposable
     public void Write(string id, long offset, ReadOnlySpan<byte> src)
     {
         if (src.IsEmpty) return;
-        WaitForRoom(src.Length);
+        WaitForRoom(NewRoomFor(id, offset, src.Length));
         var st = State(id);
         lock (st.Lock)
         {
@@ -569,14 +576,35 @@ public sealed class ContentEngine : IAsyncDisposable
     }
 
     // ── backpressure ─────────────────────────────────────────────────────────
+    /// <summary>New local space a write needs: nothing inside pieces already staged at that length.</summary>
+    int NewRoomFor(string id, long offset, int len)
+    {
+        int first = (int)(offset / CS), last = (int)((offset + len - 1) / CS);
+        long need = 0;
+        for (int idx = first; idx <= last; idx++)
+        {
+            var row = _db.GetDirty(id, idx);
+            int end = (int)Math.Min(CS, offset + len - (long)idx * CS);
+            need += row is { Staged: true } ? Math.Max(0, end - row.Size) : end;
+        }
+        return (int)Math.Min(need, int.MaxValue);
+    }
+
     void WaitForRoom(int incoming)
     {
+        if (incoming <= 0) return;
         if (Interlocked.Read(ref _stagingBytes) + incoming <= StagingLimit()) return;
         var deadline = DateTime.UtcNow + _o.BackpressureTimeout;
         while (Interlocked.Read(ref _stagingBytes) + incoming > StagingLimit())
         {
             EvictUploadedPieces();
-            if (StagingLimit() < _o.StagingQuota) FitCacheToDisk(incoming); // the disk is the limit: free cache
+            if (StagingLimit() < _o.StagingQuota)
+            {
+                FitCacheToDisk(incoming); // the disk is the limit: free cache
+                if (Interlocked.Read(ref _stagingBytes) + incoming > StagingLimit() && Volatile.Read(ref _uploadsInFlight) == 0
+                    && _db.PendingNodes().Count == 0)
+                    throw new IOException("DriveGram: local staging area is full (the local disk is full)."); // nothing will free it
+            }
             if (Interlocked.Read(ref _stagingBytes) + incoming <= StagingLimit()) return;
             if (DateTime.UtcNow > deadline || _cts.IsCancellationRequested || _waits.IsCancellationRequested)
                 throw new IOException("DriveGram: local staging area is full (uploads are not keeping up).");
@@ -604,7 +632,7 @@ public sealed class ContentEngine : IAsyncDisposable
     void FitCacheToDisk(long needed)
     {
         long room = _cache.Bytes + FreeDisk() - _o.MinFreeDisk - needed;
-        _cache.SetQuota(Math.Clamp(room, 0, _o.CacheQuota));
+        _cache.SetQuota(Math.Clamp(room, Math.Min(128L << 20, _o.CacheQuota), _o.CacheQuota));
         Interlocked.Exchange(ref _freeAt, 0); // re-measure right away
     }
 
@@ -624,13 +652,21 @@ public sealed class ContentEngine : IAsyncDisposable
     /// <summary>Is every byte of this file on this PC (staged or in the cache)?</summary>
     public bool IsFullyLocal(string id)
     {
-        var st = State(id);
-        lock (st.Lock)
+        var node = _db.Get(id);
+        if (node is null || node.Size == 0) return true;
+        var dirty = _db.DirtyRows(id).ToDictionary(r => r.Idx);
+        var committed = _db.CommittedChunks(id).ToDictionary(c => c.Idx);
+        for (int idx = 0; idx < Count(node.Size); idx++)
         {
-            var node = _db.Get(id);
-            if (node is null || node.Size == 0) return true;
-            return Plan(id, 0, (int)Math.Min(node.Size, int.MaxValue)).OfType<RemoteSeg>().All(r => _cache.TryGetPlain(r.Loc.ChunkId) is not null);
+            if (dirty.TryGetValue(idx, out var d))
+            {
+                if (d.Staged || d.Kind == 'Z') continue;
+                if (d.ChunkId is { } dc && _cache.TryGetPlain(dc) is not null) continue;
+                return false;
+            }
+            if (committed.TryGetValue(idx, out var c) && _cache.TryGetPlain(c.ChunkId) is null) return false;
         }
+        return true;
     }
 
     /// <summary>Free disk by dropping local copies of pieces already safely uploaded.</summary>

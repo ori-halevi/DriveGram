@@ -278,7 +278,14 @@ public sealed class DriveFileSystem : FileSystemBase
         var id = Guid.NewGuid().ToString("N");
         long now = Now;
         _db.ApplyLocal(new UpsertOp(id, parent.Id, name, dir, attrs, now, now));
-        if (!dir) _createdAt[id] = Environment.TickCount64;
+        if (!dir)
+        {
+            long t = Environment.TickCount64;
+            if (_createdAt.Count > 5000) // forget files created long ago (only the last half hour matters)
+                foreach (var old in _createdAt.Where(kv => t - kv.Value > 30 * 60_000).Select(kv => kv.Key).ToList())
+                    _createdAt.TryRemove(old, out _);
+            _createdAt[id] = t;
+        }
         bool writer = !dir && (grantedAccess & WriteAccess) != 0;
         _engine.Opened(id, writer);
         fileNode = new Handle(id, dir, writer, writer);

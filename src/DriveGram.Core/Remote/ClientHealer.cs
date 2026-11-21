@@ -39,7 +39,7 @@ public sealed class ClientHealer : IDisposable
     void OnNetwork(object? sender, System.Net.NetworkInformation.NetworkAvailabilityEventArgs e)
     {
         if (!e.IsAvailable) return;
-        if (_healing == 1) _wake.Release(); // a heal is waiting out its back-off: try now
+        if (_healing == 1) { if (_wake.CurrentCount == 0) _wake.Release(); } // a heal is waiting out its back-off: try now
         else _ = CheckSoonAsync();
     }
 
@@ -53,7 +53,7 @@ public sealed class ClientHealer : IDisposable
     /// dead, so ask the server something small and reconnect if it does not answer.</summary>
     public void Poke()
     {
-        if (_healing == 1) { _wake.Release(); return; }
+        if (_healing == 1) { if (_wake.CurrentCount == 0) _wake.Release(); return; }
         _ = ProbeAsync();
     }
 

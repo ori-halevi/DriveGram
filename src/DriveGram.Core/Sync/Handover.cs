@@ -41,10 +41,11 @@ public sealed partial class SyncService
         if (r is null || r.Dev == _db.DeviceId || r.Id == _surfacedRequest) return;
         if (!(r.State == "asked" || (r.State == "seen" && _resurface))) return;
         _resurface = false;
+        // (re)shown now: a fresh stamp lets the asking PC count its answer time from this moment
         _surfacedRequest = r.Id;
         Log.Info($"handover: '{r.Name}' asks for the drive");
         // tell the asking PC its question is on screen: from now on both count the same answer time
-        await UpdateControlAsync(c => c.Handover?.Id == r.Id && c.Handover.State == "asked"
+        await UpdateControlAsync(c => c.Handover?.Id == r.Id && c.Handover.State is "asked" or "seen"
             ? c with { Handover = c.Handover with { State = "seen", Updated = NowUnix } } : c, ct);
         try { HandoverRequested?.Invoke(r); }
         catch (Exception ex) { Log.Warn($"handover listener failed: {ex.Message}"); }

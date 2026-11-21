@@ -247,7 +247,8 @@ public sealed partial class SyncService : IAsyncDisposable
     {
         var lease = new LeaseInfo(_db.DeviceId, _o.DeviceName, NowUnix + (long)_o.LeaseDuration.TotalSeconds);
         var c = await UpdateControlAsync(c =>
-            takeFromOthers || c.Lease is null || c.Lease.Dev == _db.DeviceId || Abandoned(c.Lease) ? c with { Lease = lease } : c, ct);
+            takeFromOthers || c.Lease is null || c.Lease.Dev == _db.DeviceId || IsFormerSelf?.Invoke(c.Lease.Dev) == true || Abandoned(c.Lease)
+                ? c with { Lease = lease } : c, ct);
         return c.Lease?.Dev == _db.DeviceId;
     }
 
@@ -266,6 +267,10 @@ public sealed partial class SyncService : IAsyncDisposable
         long now = Environment.TickCount64;
         if (_seenLease != key) { _seenLease = key; _seenLeaseAt = now; }
         if (l.Until >= NowUnix) return false;
+        // the record's last edit, stamped by Telegram's server: untouched for a whole lease (plus margin
+        // for this PC's own clock) means the holder is gone — at once, also right after this PC starts
+        if (_remote.ControlEditedAtUtc is { } edited && DateTime.UtcNow - edited > _o.LeaseDuration + TimeSpan.FromMinutes(2))
+            return true;
         return now - _seenLeaseAt >= 2 * _o.HeartbeatInterval.TotalMilliseconds;
     }
 
@@ -417,7 +422,7 @@ public sealed partial class SyncService : IAsyncDisposable
             }
             catch (Exception ex) when (ex is InvalidDataException or System.Security.Cryptography.CryptographicException)
             {
-                if (attempt == 0) continue; // a damaged download: fetch it once more
+                if (attempt < 2) { await Task.Delay(1000 * (attempt + 1), ct); continue; } // a damaged download: fetch again
                 Log.Warn($"journal #{item.Id} ('{item.Name}') is not a valid record of this drive ({ex.Message}); ignored");
                 return null;
             }

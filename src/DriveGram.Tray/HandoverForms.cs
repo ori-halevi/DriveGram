@@ -191,7 +191,12 @@ sealed class HandoverWaitForm : Form
                     lastState = state;
                     lastProgress = DateTime.UtcNow;
                 }
-                if (req?.Id == mine.Id && req.Updated != lastUpdated) { lastUpdated = req.Updated; lastProgress = DateTime.UtcNow; }
+                if (req?.Id == mine.Id && req.Updated != lastUpdated)
+                {
+                    if (state == "seen" && lastUpdated != -1) countFrom = DateTime.UtcNow; // the question was shown again
+                    lastUpdated = req.Updated;
+                    lastProgress = DateTime.UtcNow;
+                }
                 _state.ForeColor = Theme.Text;
                 switch (state)
                 {
