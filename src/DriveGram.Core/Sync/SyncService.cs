@@ -419,7 +419,12 @@ public sealed partial class SyncService : IAsyncDisposable
         var expired = _db.Trashed().Where(n => n.Trashed < cutoff).ToList();
         if (expired.Count > 0)
         {
-            _db.ApplyLocal(expired.Select(n => (Op)new PurgeOp(n.Id)).ToList());
+            // in small batches: the index lock is released between them, so the drive stays responsive
+            foreach (var batch in expired.Chunk(50))
+            {
+                _db.ApplyLocal(batch.Select(n => (Op)new PurgeOp(n.Id)).ToList());
+                await Task.Yield();
+            }
             Log.Info($"trash: purged {expired.Count} items older than {_o.TrashRetention.TotalDays:0} days");
         }
         // rail (from InfiDrive's gc_orphan_blobs): never sweep while uploads are in flight
@@ -499,6 +504,16 @@ public sealed partial class SyncService : IAsyncDisposable
             }
             failures = 0;
         }
+    }
+
+    /// <summary>Windows asks whether it may end the session: send what is queued and give the lease back
+    /// if nothing is pending. Everything keeps running: the user (or an app) may still cancel.</summary>
+    public async Task PrepareForShutdownAsync(CancellationToken ct)
+    {
+        if (!Writable) return;
+        await FlushAsync(ct);
+        if (_db.OutboxCount() == 0 && _db.PendingNodes().Count == 0)
+            await UpdateControlAsync(c => c.Lease?.Dev == _db.DeviceId ? c with { Lease = null } : c, ct);
     }
 
     /// <summary>Windows is shutting down: push the journal and give the lease back, nothing slower.</summary>

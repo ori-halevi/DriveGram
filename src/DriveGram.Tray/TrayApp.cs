@@ -67,6 +67,7 @@ sealed class TrayApp : ApplicationContext
         _timer.Tick += (_, _) => UpdateIcon();
         _timer.Start();
         SystemEvents.SessionEnding += (_, _) => OnSessionEnding();
+        SystemEvents.SessionEnded += (_, _) => OnSessionEnded();
         SystemEvents.PowerModeChanged += (_, e) => { if (e.Mode == PowerModes.Resume) _ui.Post(_ => OnResume(), null); };
 
         _activate = new EventWaitHandle(false, EventResetMode.AutoReset, Program.ActivateEvent);
@@ -78,25 +79,20 @@ sealed class TrayApp : ApplicationContext
         else foreach (var d in _drives) _ = MountAsync(d);
     }
 
-    /// <summary>Windows is ending the session: unmount fast. If the user then cancels the shutdown (an app
-    /// asked "save changes?"), the process lives on: bring the drives back a minute later.</summary>
+    /// <summary>Windows asks to end the session (DriveGram is asked after the other apps): send what is
+    /// queued, but keep every drive mounted — the shutdown can still be cancelled.</summary>
     void OnSessionEnding()
     {
-        var mounted = _drives.Where(x => x.Session is not null).ToList();
-        Parallel.ForEach(mounted.Select(x => x.Session!).ToList(), x => x.StopForShutdown());
-        foreach (var d in mounted)
-        {
-            var s = d.Session!;
-            d.Session = null;
-            d.Problem = L.T("נותק (כיבוי של וינדוס)", "disconnected (Windows shutdown)");
-            _ui.Post(async _ =>
-            {
-                await Task.Delay(TimeSpan.FromSeconds(60));
-                try { await s.DisposeAsync(); } catch (Exception ex) { Log.Warn($"after shutdown stop: {ex.Message}"); }
-                if (!_quitting && d.Session is null) await MountAsync(d);
-            }, null);
-        }
-        UpdateIcon();
+        var sessions = _drives.Select(x => x.Session).OfType<DriveSession>().ToList();
+        Parallel.ForEach(sessions, s => s.PrepareForShutdown());
+    }
+
+    /// <summary>The session really ends: unmount everything within Windows' few seconds.</summary>
+    void OnSessionEnded()
+    {
+        _quitting = true;
+        var sessions = _drives.Select(x => x.Session).OfType<DriveSession>().ToList();
+        Parallel.ForEach(sessions, s => s.EndForShutdown());
     }
 
     void OnResume()
@@ -272,6 +268,12 @@ sealed class TrayApp : ApplicationContext
         }
         StopRetrying(d); // the user disconnects: it must not come back by itself (e.g. after sleep)
         if (d.Session is not { } session) return true;
+        int open = session.Engine.FilesOpenForWriting;
+        if (open > 0 && ask && Ui.Ask(L.T(
+                $"ב־{d.Name} יש {open} קבצים פתוחים לעריכה באפליקציות. אחרי הניתוק לא יהיה אפשר לשמור אותם (מה שכבר נשמר לא ילך לאיבוד).\n\nלנתק בכל זאת?",
+                $"{d.Name} has {open} files open for editing in apps. After disconnecting they cannot be saved (what was already saved is kept).\n\nDisconnect anyway?"),
+                icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+            return false;
         int pending = session.Status.PendingFiles;
         if (pending > 0 && ask && waitForUploads)
         {

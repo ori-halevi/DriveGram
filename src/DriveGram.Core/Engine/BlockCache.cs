@@ -29,7 +29,12 @@ public sealed class BlockCache
         Directory.CreateDirectory(_pDir);
         var files = new DirectoryInfo(_wDir).EnumerateFiles().Select(f => ("w/" + f.Name, f))
             .Concat(new DirectoryInfo(_pDir).EnumerateFiles().Select(f => ("p/" + f.Name, f)))
-            .Where(x => !x.f.Name.EndsWith(".tmp"))
+            .Where(x =>
+            {
+                if (!x.f.Name.EndsWith(".tmp")) return true;
+                try { x.f.Delete(); } catch (IOException) { } // left by a crash mid-write
+                return false;
+            })
             .OrderByDescending(x => x.f.LastAccessTimeUtc);
         foreach (var (key, f) in files)
         {
@@ -40,6 +45,12 @@ public sealed class BlockCache
     }
 
     static string WKey(int msg, int win) => $"w/{msg}_{win}";
+
+    public void SetQuota(long quota)
+    {
+        lock (_gate) Quota = quota;
+        Evict();
+    }
 
     public bool HasWindow(int msg, int win)
     {

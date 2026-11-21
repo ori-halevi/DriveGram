@@ -183,9 +183,7 @@ public sealed class DriveSession : IAsyncDisposable
                 if (free == default) throw new MountFailedException(L.T("אין אות כונן פנויה.", "No free drive letter."));
                 letterNote = $"{mountPoint} → {free}:";
                 try { ShellIntegration.ClearDriveIcon(mountPoint); } catch { } // the other device must not wear our icon
-                mountPoint = $"{free}:";
-                state.Config.MountPoint = mountPoint;
-                state.Save();
+                mountPoint = $"{free}:"; // this run only: next start tries the usual letter again
             }
         }
         catch
@@ -236,7 +234,8 @@ public sealed class DriveSession : IAsyncDisposable
 
             var stopEvent = new EventWaitHandle(false, EventResetMode.AutoReset, StopEventName(state));
             var session = new DriveSession(state, mountPoint, remote, db, engine, sync, keys, instance!, stopEvent);
-            int status = session._host.Mount(mountPoint, null, false, 0);
+            uint threads = (uint)Math.Clamp(Environment.ProcessorCount * 2, 16, 64);
+            int status = session._host.MountEx(mountPoint, threads, null, false, 0);
             if (status < 0)
             {
                 await session.StopAsync(waitForUploads: false);
@@ -274,10 +273,11 @@ public sealed class DriveSession : IAsyncDisposable
     /// <summary>Unmount; optionally wait until all uploads are done; give the lease back; close everything.</summary>
     public async Task StopAsync(bool waitForUploads, Action<EngineStatus>? progress = null, CancellationToken ct = default)
     {
-        if (_mounted)
+        bool wasMounted;
+        lock (_notifyGate) { wasMounted = _mounted; _mounted = false; }
+        if (wasMounted)
         {
             _host.Unmount();
-            _mounted = false;
             Log.Info($"unmounted {MountPoint}");
         }
         try { ShellIntegration.ClearDriveIcon(MountPoint); } catch { }
@@ -295,20 +295,33 @@ public sealed class DriveSession : IAsyncDisposable
         catch (Exception ex) { Log.Warn($"stop: could not reach the journal ({ex.Message}); changes stay queued"); }
     }
 
-    /// <summary>Fast stop for Windows shutdown: unmount and push the journal within a few seconds.</summary>
-    public void StopForShutdown()
+    /// <summary>
+    /// Windows asks to end the session (DriveGram is asked last: other apps have already saved). Send
+    /// what is queued and give the lease back — but keep the drive mounted: the shutdown may be cancelled.
+    /// </summary>
+    public void PrepareForShutdown()
     {
         try
         {
-            if (_mounted) { _host.Unmount(); _mounted = false; }
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
             // the caller is the UI thread: run the async work on the thread pool, or its continuations
             // would queue behind this very wait and nothing would be sent
-            Task.Run(() => Sync.QuickReleaseAsync(cts.Token)).Wait(cts.Token);
+            Task.Run(() => Sync.PrepareForShutdownAsync(cts.Token)).Wait(cts.Token);
         }
-        catch (Exception ex) { Log.Warn($"shutdown stop: {ex.Message}"); }
-        // if the shutdown is cancelled, "Connect" must work at once (not "already open") —
-        // released exactly once (ReleaseInstance)
+        catch (Exception ex) { Log.Warn($"shutdown: {ex.Message}"); }
+    }
+
+    /// <summary>The session really ends: free every file-system thread that waits in the engine, then
+    /// unmount, all within a few seconds (Windows kills slower apps anyway).</summary>
+    public void EndForShutdown()
+    {
+        try
+        {
+            Engine.Abort();
+            lock (_notifyGate) _mounted = false;
+            Task.Run(() => _host.Unmount()).Wait(TimeSpan.FromSeconds(3));
+        }
+        catch (Exception ex) { Log.Warn($"shutdown unmount: {ex.Message}"); }
         ReleaseInstance();
     }
 
@@ -433,7 +446,14 @@ public sealed class DriveSession : IAsyncDisposable
             if (op is UpsertOp or RestoreOp && Db.Get(op.Id) is { Trashed: 0 }) _oldPaths[op.Id] = PathOf(op.Id);
     }
 
+    readonly object _notifyGate = new();
+
     void Notify(string path, NotifyAction action, bool dir, NotifyFilter? filter = null)
+    {
+        lock (_notifyGate) NotifyLocked(path, action, dir, filter);
+    }
+
+    void NotifyLocked(string path, NotifyAction action, bool dir, NotifyFilter? filter)
     {
         if (!_mounted) return;
         try
@@ -472,7 +492,9 @@ public sealed class DriveSession : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (_mounted) { _host.Unmount(); _mounted = false; }
+        bool wasMounted;
+        lock (_notifyGate) { wasMounted = _mounted; _mounted = false; }
+        if (wasMounted) _host.Unmount();
         _host.Dispose();
         _stopEvent.Dispose();
         await Engine.DisposeAsync();

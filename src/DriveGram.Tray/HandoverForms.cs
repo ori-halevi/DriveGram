@@ -142,13 +142,13 @@ sealed class HandoverWaitForm : Form
                 long nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
                 switch (req?.State)
                 {
-                    case "refused" when req.At == mine.At:
+                    case "refused" when req.Id == mine.Id:
                         _state.ForeColor = Theme.Error;
                         _state.Text = L.T($"{_holder} סירב להעביר את הכונן.", $"{_holder} refused to hand the drive over.");
                         _takeNow.Text = L.T("קח בכל זאת", "Take it anyway");
                         _cancel.Text = L.T("סגור", "Close");
                         return;
-                    case "finishing" when req.At == mine.At:
+                    case "finishing" when req.Id == mine.Id:
                         if (nowUnix - req.Updated > SyncService.HandoverStall.TotalSeconds)
                         {
                             _state.Text = L.T($"{_holder} הפסיק לענות. לוקח את הכונן…", $"{_holder} stopped answering. Taking the drive…");

@@ -13,7 +13,7 @@ public sealed class HandoverBusyException(string other) : Exception($"{other} al
     public string Other { get; } = other;
 }
 
-public sealed record HandoverRequest(string Dev, string Name, long At, string State = "asked", int Pending = 0, long Updated = 0);
+public sealed record HandoverRequest(string Dev, string Name, long At, string State = "asked", int Pending = 0, long Updated = 0, string Id = "");
 
 public sealed partial class SyncService
 {
@@ -29,7 +29,7 @@ public sealed partial class SyncService
     /// still uploads and journals what it has.</summary>
     public bool HandingOver { get; private set; }
 
-    long _surfacedRequest;
+    string? _surfacedRequest;
     DateTime _nextHandoverCheck;
 
     async Task CheckHandoverAsync(CancellationToken ct)
@@ -37,9 +37,9 @@ public sealed partial class SyncService
         if (DateTime.UtcNow < _nextHandoverCheck || HandingOver) return;
         _nextHandoverCheck = DateTime.UtcNow.AddSeconds(10);
         var r = (await ReadControlAsync(_remote, ct))?.Handover;
-        if (r is not { State: "asked" } || r.Dev == _db.DeviceId || r.At == _surfacedRequest) return;
+        if (r is not { State: "asked" } || r.Dev == _db.DeviceId || r.Id == _surfacedRequest) return;
         if (NowUnix - r.At > HandoverAnswerTime.TotalSeconds * 2) return; // stale
-        _surfacedRequest = r.At;
+        _surfacedRequest = r.Id;
         Log.Info($"handover: '{r.Name}' asks for the drive");
         try { HandoverRequested?.Invoke(r); }
         catch (Exception ex) { Log.Warn($"handover listener failed: {ex.Message}"); }
@@ -49,7 +49,7 @@ public sealed partial class SyncService
     /// <summary>Ask the PC that writes for the drive. Fails if another request is already being served.</summary>
     public async Task<HandoverRequest> RequestHandoverAsync(CancellationToken ct)
     {
-        var mine = new HandoverRequest(_db.DeviceId, _o.DeviceName, NowUnix, Updated: NowUnix);
+        var mine = new HandoverRequest(_db.DeviceId, _o.DeviceName, NowUnix, Updated: NowUnix, Id: Guid.NewGuid().ToString("N"));
         string? busy = null;
         await UpdateControlAsync(c =>
         {
@@ -72,7 +72,7 @@ public sealed partial class SyncService
     {
         var c = (await ReadControlAsync(_remote, ct))!;
         if (c.Lease?.Dev == _db.DeviceId) return (c.Handover, c.Lease);
-        if (c.Handover?.At != mine.At || c.Handover.Dev != mine.Dev)
+        if (c.Handover?.Id != mine.Id)
         {
             // a rewrite by the other PC that read the record just before our request: ask again (same request)
             c = await UpdateControlAsync(x => x.Handover is null || x.Handover.State is "done" or "refused" ? x with { Handover = mine } : x, ct);
@@ -92,12 +92,12 @@ public sealed partial class SyncService
     }
 
     public async Task CancelHandoverAsync(HandoverRequest mine, CancellationToken ct) =>
-        await UpdateControlAsync(c => c.Handover?.At == mine.At && c.Handover.Dev == mine.Dev ? c with { Handover = null } : c, ct);
+        await UpdateControlAsync(c => c.Handover?.Id == mine.Id ? c with { Handover = null } : c, ct);
 
     // ── on the PC that writes ────────────────────────────────────────────────
     public async Task RefuseHandoverAsync(HandoverRequest r, CancellationToken ct)
     {
-        await UpdateControlAsync(c => c.Handover?.At == r.At ? c with { Handover = r with { State = "refused", Updated = NowUnix } } : c, ct);
+        await UpdateControlAsync(c => c.Handover?.Id == r.Id ? c with { Handover = r with { State = "refused", Updated = NowUnix } } : c, ct);
         Log.Info($"handover: refused '{r.Name}'");
     }
 
@@ -111,7 +111,7 @@ public sealed partial class SyncService
     }
 
     public Task ReportHandoverAsync(HandoverRequest r, int pending, CancellationToken ct) =>
-        UpdateControlAsync(c => c.Handover?.At == r.At
+        UpdateControlAsync(c => c.Handover?.Id == r.Id
             ? c with { Handover = r with { State = "finishing", Pending = pending, Updated = NowUnix } } : c, ct);
 
     /// <summary>Everything is uploaded and journaled: write the requester into the lease. False if the

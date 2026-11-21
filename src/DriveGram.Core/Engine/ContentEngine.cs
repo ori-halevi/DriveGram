@@ -18,9 +18,15 @@ public sealed class EngineOptions
     /// <summary>Delay between the last close of a file and its commit (lets save-via-rename settle).</summary>
     public TimeSpan CommitDelay { get; init; } = TimeSpan.FromSeconds(1);
     public TimeSpan ReadTimeout { get; init; } = TimeSpan.FromSeconds(45);
-    /// <summary>How long a writer waits for staging room before the write fails with "disk full".</summary>
-    public TimeSpan BackpressureTimeout { get; init; } = TimeSpan.FromMinutes(30);
+    /// <summary>How long a writer waits for staging room before the write fails with "disk full". It holds
+    /// one of the file system's threads meanwhile, so it must stay short.</summary>
+    public TimeSpan BackpressureTimeout { get; init; } = TimeSpan.FromMinutes(2);
+    /// <summary>Space always left free on the local disk (staging and cache shrink to keep it).</summary>
+    public long MinFreeDisk { get; init; } = 3L << 30;
 }
+
+/// <summary>The data is only in Telegram, and this reader may not trigger a download.</summary>
+public sealed class DataNotLocalException() : IOException("the data is not on this PC");
 
 public sealed record EngineStatus(int PendingFiles, long StagedBytes, int UploadsInFlight, long BytesUploaded,
     long BytesDownloaded, long CacheBytes);
@@ -79,6 +85,7 @@ public sealed class ContentEngine : IAsyncDisposable
     readonly Channel<string> _commitQueue = Channel.CreateUnbounded<string>();
     readonly CancellationTokenSource _cts = new();
     readonly SemaphoreSlim _room = new(0);
+    readonly AutoResetEvent _roomSignal = new(false); // "staging space was freed": wakes a waiting writer
     readonly List<Task> _loops = [];
     long _stagingBytes;
     long _stamp;
@@ -230,7 +237,10 @@ public sealed class ContentEngine : IAsyncDisposable
     }
 
     // ── read ─────────────────────────────────────────────────────────────────
-    public int Read(string id, long offset, Span<byte> dst)
+    public int Read(string id, long offset, Span<byte> dst) => Read(id, offset, dst, allowRemote: true);
+
+    /// <param name="allowRemote">false: only data already on this PC (staged or cached in full).</param>
+    public int Read(string id, long offset, Span<byte> dst, bool allowRemote)
     {
         var st = State(id);
         for (int attempt = 0; ; attempt++)
@@ -244,6 +254,8 @@ public sealed class ContentEngine : IAsyncDisposable
                 n = (int)Math.Min(dst.Length, node.Size - offset);
                 plan = Plan(id, offset, n);
             }
+            if (!allowRemote && plan.OfType<RemoteSeg>().Any(r => _cache.TryGetPlain(r.Loc.ChunkId) is null))
+                throw new DataNotLocalException();
             bool sequential = Interlocked.Exchange(ref st.LastReadEnd, offset + n) == offset;
             try
             {
@@ -525,16 +537,39 @@ public sealed class ContentEngine : IAsyncDisposable
     // ── backpressure ─────────────────────────────────────────────────────────
     void WaitForRoom(int incoming)
     {
-        if (Interlocked.Read(ref _stagingBytes) + incoming <= _o.StagingQuota) return;
+        if (Interlocked.Read(ref _stagingBytes) + incoming <= StagingLimit()) return;
         var deadline = DateTime.UtcNow + _o.BackpressureTimeout;
-        while (Interlocked.Read(ref _stagingBytes) + incoming > _o.StagingQuota)
+        while (Interlocked.Read(ref _stagingBytes) + incoming > StagingLimit())
         {
             EvictUploadedPieces();
-            if (Interlocked.Read(ref _stagingBytes) + incoming <= _o.StagingQuota) return;
-            if (DateTime.UtcNow > deadline) throw new IOException("DriveGram: local staging area is full (uploads are not keeping up).");
-            _room.Wait(500);
+            if (Interlocked.Read(ref _stagingBytes) + incoming <= StagingLimit()) return;
+            if (DateTime.UtcNow > deadline || _cts.IsCancellationRequested)
+                throw new IOException("DriveGram: local staging area is full (uploads are not keeping up).");
+            WaitHandle.WaitAny([_roomSignal, _cts.Token.WaitHandle], 500);
         }
     }
+
+    long _freeAt, _freeBytes = long.MaxValue;
+
+    /// <summary>Free space on the disk that holds staging and cache (re-measured every 2 s).</summary>
+    long FreeDisk()
+    {
+        long now = Environment.TickCount64;
+        if (now - Interlocked.Read(ref _freeAt) > 2000)
+        {
+            try { Interlocked.Exchange(ref _freeBytes, new DriveInfo(Path.GetPathRoot(Path.GetFullPath(_staging))!).AvailableFreeSpace); }
+            catch (Exception) { }
+            Interlocked.Exchange(ref _freeAt, now);
+        }
+        return Interlocked.Read(ref _freeBytes);
+    }
+
+    /// <summary>The staging quota, but never so much that the local disk would drop below MinFreeDisk.</summary>
+    long StagingLimit() =>
+        Math.Min(_o.StagingQuota, Interlocked.Read(ref _stagingBytes) + Math.Max(0, FreeDisk() - _o.MinFreeDisk));
+
+    /// <summary>Windows session ends: release every thread waiting in here, right now.</summary>
+    public void Abort() => _cts.Cancel();
 
     /// <summary>Free disk by dropping local copies of pieces already safely uploaded.</summary>
     void EvictUploadedPieces()
@@ -637,6 +672,7 @@ public sealed class ContentEngine : IAsyncDisposable
             _db.PutDirty(new DirtyRow(id, idx, 'U', data.Length, cur.Staged, loc.ChunkId, loc.Msg, loc.Hash));
         }
         _room.Release();
+        _roomSignal.Set();
         return true;
     }
 
@@ -710,6 +746,7 @@ public sealed class ContentEngine : IAsyncDisposable
                     TryDeleteDir(Path.Combine(_staging, id));
                     Log.Info($"committed {node.Name} ({node.Size:N0} bytes, {count} chunks)");
                     _room.Release();
+        _roomSignal.Set();
                     return;
                 }
             }
@@ -758,6 +795,12 @@ public sealed class ContentEngine : IAsyncDisposable
             {
                 await Task.Delay(1000, ct);
                 if (++_ticks % 60 == 0) ReconcileStaging(adjustCount: true);
+                if (_ticks % 10 == 0)
+                {
+                    // the cache gives way when the local disk runs low (it is only a copy)
+                    long room = _cache.Bytes + Math.Max(0, FreeDisk() - _o.MinFreeDisk);
+                    _cache.SetQuota(Math.Max(256L << 20, Math.Min(_o.CacheQuota, room)));
+                }
                 long now = Environment.TickCount64;
                 var due = new List<(string, int)>();
                 foreach (var row in _db.AllDirty().Where(r => r.Kind == 'S' && r.Size == CS))

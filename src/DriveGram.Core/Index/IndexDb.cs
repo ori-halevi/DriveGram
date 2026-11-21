@@ -56,6 +56,7 @@ public sealed class IndexDb : IDisposable
         Exec("""
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
+            PRAGMA journal_size_limit=67108864;
             CREATE TABLE IF NOT EXISTS nodes(
                 id TEXT PRIMARY KEY, parent TEXT, name TEXT NOT NULL, nkey TEXT NOT NULL,
                 dir INTEGER NOT NULL, size INTEGER NOT NULL DEFAULT 0, attrs INTEGER NOT NULL DEFAULT 0,
@@ -330,19 +331,20 @@ public sealed class IndexDb : IDisposable
             case PurgeOp p:
             {
                 if (p.Id == RootId) return;
-                var ids = Query("""
+                // set-based: a folder of 500,000 files is a handful of statements, not millions
+                long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                Exec("DROP TABLE IF EXISTS temp.purge_ids");
+                Exec("""
+                    CREATE TEMP TABLE purge_ids AS
                     WITH RECURSIVE sub(id) AS (SELECT @id UNION ALL SELECT n.id FROM nodes n JOIN sub ON n.parent = sub.id)
                     SELECT id FROM sub
-                    """, r => r.GetString(0), ("@id", p.Id));
-                long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                foreach (var id in ids)
-                {
-                    TouchChunksOf(id, now);
-                    Exec("DELETE FROM file_chunks WHERE node=@n", ("@n", id));
-                    Exec("DELETE FROM dirty WHERE node=@n", ("@n", id));
-                    Exec("DELETE FROM pending WHERE node=@n", ("@n", id));
-                    Exec("DELETE FROM nodes WHERE id=@n", ("@n", id));
-                }
+                    """, ("@id", p.Id));
+                Exec("UPDATE chunks SET created=@t WHERE id IN (SELECT chunk FROM file_chunks WHERE node IN (SELECT id FROM temp.purge_ids))", ("@t", now));
+                Exec("DELETE FROM file_chunks WHERE node IN (SELECT id FROM temp.purge_ids)");
+                Exec("DELETE FROM dirty WHERE node IN (SELECT id FROM temp.purge_ids)");
+                Exec("DELETE FROM pending WHERE node IN (SELECT id FROM temp.purge_ids)");
+                Exec("DELETE FROM nodes WHERE id IN (SELECT id FROM temp.purge_ids)");
+                Exec("DROP TABLE temp.purge_ids");
                 break;
             }
             default:
@@ -494,7 +496,8 @@ public sealed class IndexDb : IDisposable
             Exec("PRAGMA wal_checkpoint(TRUNCATE);");
             long pages = Convert.ToInt64(Scalar("PRAGMA page_count") ?? 0L);
             long free = Convert.ToInt64(Scalar("PRAGMA freelist_count") ?? 0L);
-            if (pages > 256 && free * 4 > pages) // over 25% unused
+            // VACUUM rewrites the whole index under the lock (the drive stalls meanwhile): only small ones
+            if (pages > 256 && pages < 16384 && free * 4 > pages) // over 25% unused, index under ~64 MB
             {
                 Exec("VACUUM;");
                 Log.Info($"index compacted ({free:N0} of {pages:N0} pages were free)");

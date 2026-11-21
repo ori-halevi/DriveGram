@@ -10,11 +10,16 @@ static class Program
     /// <summary>A second launch signals this, so the running copy shows itself instead.</summary>
     public const string ActivateEvent = @"Local\DriveGram-activate";
 
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    static extern bool SetProcessShutdownParameters(uint level, uint flags);
+
     [STAThread]
     static void Main(string[] args)
     {
         Log.Open(Path.Combine(AppState.Root, "logs"));
         Log.Verbose = args.Contains("--verbose");
+        // shut down after the apps (0x100 = the lowest normal level): Word & co. save to the drive first
+        try { SetProcessShutdownParameters(0x100, 0); } catch { }
         WTelegram.Helpers.Log = (level, msg) => { if (level >= 3) Log.Warn("[tg] " + msg); else Log.Debug("[tg] " + msg); };
 
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);

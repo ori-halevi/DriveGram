@@ -22,6 +22,8 @@ public sealed class DriveFileSystem : FileSystemBase
         public bool Dir { get; } = dir;
         public bool Writer { get; set; } = writer;
         public bool CanWrite { get; } = canWrite;
+        /// <summary>The sorted listing of a directory being enumerated through this handle.</summary>
+        public List<(string Name, FileInfo Info)>? Listing;
     }
 
     /// <summary>The first change through a handle opened for writing makes it a writer (holds the commit
@@ -61,6 +63,7 @@ public sealed class DriveFileSystem : FileSystemBase
     const int StatusIoTimeout = unchecked((int)0xC00000B5);
     const int StatusUnexpectedIo = unchecked((int)0xC00000E9);
     const int StatusWriteProtected = unchecked((int)0xC00000A2);
+    const int StatusFileIsOffline = unchecked((int)0xC0000267);
 
     readonly IndexDb _db;
     readonly ContentEngine _engine;
@@ -75,7 +78,7 @@ public sealed class DriveFileSystem : FileSystemBase
         _sync = sync;
         _label = label;
         var me = System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value ?? "BA";
-        var sd = new RawSecurityDescriptor($"O:{me}G:{me}D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{me})(A;;FA;;;WD)");
+        var sd = new RawSecurityDescriptor($"O:{me}G:{me}D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{me})(A;;FA;;;AC)");
         _sd = new byte[sd.BinaryLength];
         sd.GetBinaryForm(_sd, 0);
     }
@@ -108,6 +111,7 @@ public sealed class DriveFileSystem : FileSystemBase
         switch (ex)
         {
             case FileNotFoundException: return STATUS_OBJECT_NAME_NOT_FOUND;
+            case DataNotLocalException: return StatusFileIsOffline;
             case TimeoutException or OperationCanceledException:
                 Log.Warn($"fs: timed out ({ex.Message})");
                 return StatusIoTimeout;
@@ -158,6 +162,59 @@ public sealed class DriveFileSystem : FileSystemBase
         volumeInfo.FreeSize = TotalSize - (ulong)Math.Max(0, _db.UsedBytes());
         volumeInfo.SetVolumeLabel(_label);
         return STATUS_SUCCESS;
+    }
+
+    // Antivirus full scans and the search indexer read EVERY file of every fixed drive. Here that would
+    // download the whole drive from Telegram (rate limits, a thrashing cache): they get only what is
+    // already on this PC. People's apps (Explorer thumbnails included) are not affected.
+    static readonly HashSet<string> Scanners = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "MsMpEng", "MpDefenderCoreService", "NisSrv", "MpCopyAccelerator",
+        "SearchProtocolHost", "SearchIndexer", "SearchFilterHost",
+    };
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<uint, (bool Scanner, long At)> ProcessKinds = new();
+
+    bool IsBackgroundScanner()
+    {
+        uint pid;
+        try { pid = (uint)GetOperationProcessId(); } catch { return false; }
+        long now = Environment.TickCount64;
+        if (ProcessKinds.TryGetValue(pid, out var k) && now - k.At < 60_000) return k.Scanner;
+        bool scanner;
+        try { using var p = System.Diagnostics.Process.GetProcessById((int)pid); scanner = Scanners.Contains(p.ProcessName); }
+        catch { scanner = false; } // protected processes (Defender) may refuse: decide by the name we can see
+        if (!scanner)
+        {
+            try
+            {
+                var name = GetProcessImageName(pid);
+                scanner = name is not null && Scanners.Contains(Path.GetFileNameWithoutExtension(name));
+            }
+            catch { }
+        }
+        ProcessKinds[pid] = (scanner, now);
+        return scanner;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern bool QueryFullProcessImageName(IntPtr process, uint flags, System.Text.StringBuilder name, ref uint size);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr h);
+
+    /// <summary>The image path of a process, readable even for protected ones (limited query right).</summary>
+    static string? GetProcessImageName(uint pid)
+    {
+        var h = OpenProcess(0x1000 /* PROCESS_QUERY_LIMITED_INFORMATION */, false, pid);
+        if (h == IntPtr.Zero) return null;
+        try
+        {
+            var sb = new System.Text.StringBuilder(1024);
+            uint size = (uint)sb.Capacity;
+            return QueryFullProcessImageName(h, 0, sb, ref size) ? sb.ToString() : null;
+        }
+        finally { CloseHandle(h); }
     }
 
     static bool InGitDir(string path) =>
@@ -292,7 +349,7 @@ public sealed class DriveFileSystem : FileSystemBase
         var n = _db.Get(h.Id) ?? throw new FileNotFoundException();
         if (offset >= (ulong)n.Size) return STATUS_END_OF_FILE;
         var span = new Span<byte>((void*)buffer, (int)length);
-        bytesTransferred = (uint)_engine.Read(h.Id, (long)offset, span);
+        bytesTransferred = (uint)_engine.Read(h.Id, (long)offset, span, allowRemote: !IsBackgroundScanner());
         return STATUS_SUCCESS;
     }
 
@@ -403,15 +460,21 @@ public sealed class DriveFileSystem : FileSystemBase
     {
         if (context is not DirEnum e)
         {
-            var dir = NodeOf(fileNode);
-            var entries = new List<(string, FileInfo)>();
-            if (!dir.IsRoot)
+            var h = (Handle)fileNode;
+            var entries = marker is not null && h.Listing is { } cached ? cached : null;
+            if (entries is null)
             {
-                entries.Add((".", Info(dir)));
-                entries.Add(("..", Info(_db.Get(dir.Parent!) ?? dir)));
+                var dir = NodeOf(fileNode);
+                entries = new List<(string, FileInfo)>();
+                if (!dir.IsRoot)
+                {
+                    entries.Add((".", Info(dir)));
+                    entries.Add(("..", Info(_db.Get(dir.Parent!) ?? dir)));
+                }
+                foreach (var c in _db.Children(dir.Id).OrderBy(c => c.Name, StringComparer.OrdinalIgnoreCase))
+                    entries.Add((c.Name, Info(c)));
+                h.Listing = entries; // later pages of THIS listing (marker != null) reuse it
             }
-            foreach (var c in _db.Children(dir.Id).OrderBy(c => c.Name, StringComparer.OrdinalIgnoreCase))
-                entries.Add((c.Name, Info(c)));
             int start = 0;
             if (marker is not null)
             {
