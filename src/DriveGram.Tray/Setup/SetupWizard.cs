@@ -14,6 +14,8 @@ sealed class SetupContext : IDisposable
     public WTelegram.Client? Client { get; private set; }
     public TL.User? User { get; set; }
     public TelegramRemote? Remote { get; set; }
+    /// <summary>The drive's keys, once unlocked in the wizard (used for the first mount, in memory only).</summary>
+    public DriveGram.Crypto.Keys? UnlockedKeys { get; set; }
     /// <summary>Answers a 2FA prompt during QR sign-in (set by the login page).</summary>
     public Func<string?>? AskPassword { get; set; }
 
@@ -144,6 +146,7 @@ abstract class WizardPage : UserControl
 sealed class SetupWizard : Form
 {
     readonly SetupContext _ctx;
+    public SetupContext Context => _ctx;
     readonly List<WizardPage> _pages;
     readonly Label _title = new() { Font = Theme.Title, ForeColor = Theme.Text, AutoSize = true };
     readonly Label _subtitle = new() { Font = Theme.Body, ForeColor = Theme.Muted, AutoSize = true, MaximumSize = new Size(540, 0) };

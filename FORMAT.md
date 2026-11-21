@@ -23,14 +23,17 @@ it written on their first writable mount; until then, the data channel created c
   "snap":  { "msg": <journal message id>, "upto": <journal message id> } | null,
   "drive": { "id": "<32 hex>", "name": "<display name>", "dataChannel": <channel id> } | null,
   "minReader": 1, "minWriter": 1,
-  "handover": { "dev": "<requesting device>", "name": "<PC name>", "at": <unix>, "state": "asked|finishing|done|refused",
+  "handover": { "dev": "<requesting device>", "name": "<PC name>", "at": <unix>, "id": "<32 hex, unique per request>",
+                "state": "asked|seen|finishing|done|refused|failed",
                 "pending": <files still uploading on the holder>, "updated": <unix> } | null }
 ```
 
-`handover` (1.0.3+): a request to move the lease. The requester writes `asked`; the holder answers
-`refused`, or `finishing` (it takes no new changes, uploads and journals what it has, refreshing
-`pending`/`updated` every ~10 s) and then writes the requester into `lease` with `done`. Without an
-answer within 60 s, or when `updated` is older than 2 minutes, the requester takes the lease itself.
+`handover` (1.0.3+): a request to move the lease. The requester writes `asked`; the holder marks it
+`seen` as soon as its question is on screen (both sides count the 60 s answer time from then), and
+answers `refused`, or `finishing` (it takes no new changes, uploads and journals what it has, refreshing
+`pending`/`updated` every ~5 s) and then writes the requester into `lease` with `done`; `failed` if it
+could not finish. Without an answer within 60 s, or when `updated` stops changing for 2 minutes (as
+observed by the requester's own clock), the requester takes the lease itself. Answers are tied to `id`.
 Older clients keep the field untouched and never answer. Adding it changed no minReader/minWriter.
 
 `minReader` / `minWriter`: the oldest StorageFormat allowed to read / write the drive. A client

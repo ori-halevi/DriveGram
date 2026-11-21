@@ -38,7 +38,9 @@ public sealed partial class SyncService
         if (DateTime.UtcNow < _nextHandoverCheck || HandingOver) return;
         _nextHandoverCheck = DateTime.UtcNow.AddSeconds(10);
         var r = (await ReadControlAsync(_remote, ct))?.Handover;
-        if (r is not { State: "asked" } || r.Dev == _db.DeviceId || r.Id == _surfacedRequest) return;
+        if (r is null || r.Dev == _db.DeviceId || r.Id == _surfacedRequest) return;
+        if (!(r.State == "asked" || (r.State == "seen" && _resurface))) return;
+        _resurface = false;
         _surfacedRequest = r.Id;
         Log.Info($"handover: '{r.Name}' asks for the drive");
         // tell the asking PC its question is on screen: from now on both count the same answer time
@@ -49,7 +51,8 @@ public sealed partial class SyncService
     }
 
     /// <summary>The question could not be shown (another one is open): offer it again at the next check.</summary>
-    public void ForgetSurfacedRequest() => _surfacedRequest = null;
+    public void ForgetSurfacedRequest() { _surfacedRequest = null; _resurface = true; }
+    bool _resurface;
 
     /// <summary>Is this request still waiting for this PC's answer (not cancelled, not taken over)?</summary>
     public async Task<bool> RequestStillOpenAsync(HandoverRequest r, CancellationToken ct)

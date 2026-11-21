@@ -250,3 +250,32 @@ public sealed class DpapiSessionStream : Stream
     public override void SetLength(long value) { _mem.SetLength(value); Persist(); }
     public override void Write(byte[] buffer, int offset, int count) { _mem.Write(buffer, offset, count); Persist(); }
 }
+
+/// <summary>
+/// Device ids this PC used for a drive in profiles that were removed since. A lease such a profile still
+/// held (removed while uploads were pending) is this PC's own: the next profile of that drive takes it
+/// at once instead of waiting a quarter of an hour for "another PC".
+/// </summary>
+public static class FormerDevices
+{
+    static string FilePath => Path.Combine(AppState.Root, "former-devices.txt");
+
+    public static void Remember(AppState state)
+    {
+        if (string.IsNullOrEmpty(state.Config.DriveId) || !File.Exists(state.IndexPath)) return;
+        try
+        {
+            string device;
+            using (var db = DriveGram.Index.IndexDb.Open(state.IndexPath)) device = db.DeviceId;
+            File.AppendAllText(FilePath, $"{state.Config.DriveId} {device}\n");
+        }
+        catch (Exception ex) { Log.Warn($"former device: {ex.Message}"); }
+    }
+
+    public static bool Has(string driveId, string device)
+    {
+        if (string.IsNullOrEmpty(driveId)) return false;
+        try { return File.Exists(FilePath) && File.ReadLines(FilePath).Contains($"{driveId} {device}"); }
+        catch (IOException) { return false; }
+    }
+}

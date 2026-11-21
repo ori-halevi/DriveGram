@@ -30,12 +30,14 @@ sealed class DriveController
     public HandoverAskForm? HandoverAsk;
     /// <summary>The writable state the user was last told about (no second balloon for the same news).</summary>
     public bool? ToldWritable;
+    /// <summary>Keys just unlocked in the setup wizard: the first mount uses them instead of asking again.</summary>
+    public Keys? PendingKeys;
 
     public DriveController(AppState state) => State = state;
 
     public string Letter => Session?.MountPoint ?? State.Config.MountPoint;
     public string Name => $"{L.Ltr(Letter)} {State.Config.VolumeLabel}";
-    public bool Busy => Session is { } s && (s.Status.PendingFiles > 0 || s.Status.UploadsInFlight > 0);
+    public bool Busy => !Stopping && Session is { } s && (s.Status.PendingFiles > 0 || s.Status.UploadsInFlight > 0);
 }
 
 /// <summary>
@@ -175,7 +177,7 @@ sealed class TrayApp : ApplicationContext
                 : $"{L.Ltr(session.MountPoint)} – {ReadOnlyWhy(session)}";
             if (session.LetterChanged is { } moved)
                 text += L.T($"\nהאות הרגילה תפוסה כרגע ({moved}); בפעם הבאה הכונן ינסה אותה שוב.", $"\nThe usual letter is taken right now ({moved}); next time the drive tries it again.");
-            Balloon(L.T("DriveGram מחובר", "DriveGram connected"), text);
+            if (!session.Sync.NeedsUpdate) Balloon(L.T("DriveGram מחובר", "DriveGram connected"), text);
         }
         catch (PasswordNotGivenException) { StopRetrying(d); d.Problem = L.T("לא הוזנה סיסמה", "no password entered"); }
         catch (MountFailedException ex)
@@ -382,6 +384,12 @@ sealed class TrayApp : ApplicationContext
     /// <summary>Runs on a worker thread; shows the password dialog on the UI thread when needed.</summary>
     Task<Keys> UnlockAsync(DriveController d, ControlState ctrl)
     {
+        if (d.PendingKeys is { } fresh)
+        {
+            d.PendingKeys = null;
+            try { return Task.FromResult(Keys.FromMaster(ctrl.Vault, fresh.ExportMaster())); }
+            catch (WrongPasswordException) { }
+        }
         if (d.State.RememberedMaster() is { } master)
         {
             try { return Task.FromResult(Keys.FromMaster(ctrl.Vault, master)); }
@@ -432,9 +440,11 @@ sealed class TrayApp : ApplicationContext
         }
         bool isNew = d is null;
         DialogResult result;
+        Keys? wizardKeys = null;
         using (_wizard = new Setup.SetupWizard(state, isNew))
         {
             result = _wizard.ShowDialog();
+            wizardKeys = _wizard.Context.UnlockedKeys;
             _wizard = null;
         }
         // The drive page saves a new binding (other channels / account) as soon as it is chosen, so a
@@ -461,6 +471,7 @@ sealed class TrayApp : ApplicationContext
             Replace(d!, fresh);
             d = fresh;
         }
+        d.PendingKeys = wizardKeys;
         await MountAsync(d);
         if (!string.IsNullOrEmpty(account))
             foreach (var other in _drives.Where(o => o != d && o.NeedsSetup && o.Session is null && o.State.Config.AccountKey == account).ToList())
@@ -510,7 +521,7 @@ sealed class TrayApp : ApplicationContext
                 $"להסיר את {d.Name} מהמחשב הזה?\n\nהקבצים נשארים בטלגרם, ואפשר לחבר את הכונן שוב בכל עת (עם הסיסמה שלו).",
                 $"Remove {d.Name} from this PC?\n\nThe files stay in Telegram, and you can connect the drive again at any time (with its password)."),
                 icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
-        if (!await StopAsync(d)) return;
+        if (!await StopAsync(d, ask: false, waitForUploads: false)) return;
         if (!ConfirmLosingLocalChanges(d))
         {
             if (wasMounted) await MountAsync(d); // kept: put it back the way it was
@@ -544,6 +555,7 @@ sealed class TrayApp : ApplicationContext
         if (d.Session is not null) return;
         try { ShellIntegration.ClearDriveIcon(d.Letter); } catch { }
         var accountKey = d.State.Config.AccountKey;
+        FormerDevices.Remember(d.State);
         d.State.Delete();
         _drives.Remove(d);
         if (_drives.Count == 0)

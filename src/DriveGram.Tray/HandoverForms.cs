@@ -66,7 +66,7 @@ sealed class HandoverAskForm : Form
         col.Controls.Add(row);
         Controls.Add(col);
 
-        Approved = true; // closing the window without choosing = not refused
+        Approved = false; // closing the window = refusing (only silence until the countdown ends = yes)
         _tick.Tick += (_, _) => UpdateCountdown();
         Shown += (_, _) => { Activate(); UpdateCountdown(); _tick.Start(); };
         FormClosed += (_, _) => _tick.Dispose();
@@ -77,7 +77,7 @@ sealed class HandoverAskForm : Form
         int left = (int)Math.Ceiling((_deadline - DateTime.UtcNow).TotalSeconds);
         if (left <= 0) { Approved = true; Close(); return; }
         if (++_polls % 3 == 0 && !_polling) _ = CheckStillOpenAsync();
-        _countdown.Text = L.T($"אם לא תענה (או תסגור את החלון), הכונן יעבור בעוד {left} שניות.", $"Without an answer (or if you close this window), the drive moves in {left} seconds.");
+        _countdown.Text = L.T($"אם לא תענה, הכונן יעבור בעוד {left} שניות. סגירת החלון = סירוב.", $"Without an answer, the drive moves in {left} seconds. Closing this window = refuse.");
     }
 
     async Task CheckStillOpenAsync()

@@ -72,6 +72,8 @@ public sealed partial class SyncService : IAsyncDisposable
     /// <summary>False while the content engine is uploading (set by the host); garbage collection waits.</summary>
     public Func<bool>? CanCollectGarbage { get; set; }
     public string? LeaseHolder { get; private set; }
+    /// <summary>Was this device id this very PC (an earlier profile of the same drive, since removed)?</summary>
+    public Func<string, bool>? IsFormerSelf { get; set; }
     public event Action? WritableChanged;
     /// <summary>Ops from another PC were applied to the local index (so open folder views can refresh).</summary>
     public event Action<IReadOnlyList<Op>>? RemoteOpsApplied;
@@ -221,7 +223,7 @@ public sealed partial class SyncService : IAsyncDisposable
             return;
         }
         var lease = ctrl.Lease;
-        bool free = lease is null || lease.Dev == _db.DeviceId || Abandoned(lease);
+        bool free = lease is null || lease.Dev == _db.DeviceId || IsFormerSelf?.Invoke(lease.Dev) == true || Abandoned(lease);
         if (!free && !force)
         {
             SetWritable(false, lease!.Name);

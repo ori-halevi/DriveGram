@@ -40,12 +40,14 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 hebrew.Desktop=צור קיצור דרך בשולחן העבודה
 hebrew.Launch=הפעל את DriveGram עכשיו
 hebrew.InstallingWinFsp=מתקין את WinFsp (רכיב מערכת שנדרש לכונן)...
-hebrew.StillRunning=DriveGram עדיין מסיים להעלות קבצים לטלגרם. חכה כמה דקות (ההתקדמות מוצגת באייקון ליד השעון) והפעל את ההתקנה שוב.
-english.StillRunning=DriveGram is still finishing uploads to Telegram. Wait a few minutes (the tray icon shows the progress) and run setup again.
+hebrew.StillRunning=DriveGram עדיין מסיים להעלות קבצים לטלגרם. הכוננים כבר מנותקים, ו־DriveGram ייסגר לבד כשההעלאה תסתיים (ההתקדמות מוצגת באייקון ליד השעון). אחר כך הפעל את ההתקנה שוב.
+english.StillRunning=DriveGram is still finishing uploads to Telegram. The drives are already disconnected, and DriveGram closes by itself when the uploads finish (the tray icon shows the progress). Then run setup again.
+hebrew.UninstallStillRunning=DriveGram עדיין מעלה קבצים. ההסרה ממשיכה: קבצים שלא הספיקו לעלות נשמרים במחשב ויעלו אם תתקין שוב.
+english.UninstallStillRunning=DriveGram is still uploading. Uninstall continues: files not yet uploaded stay on this PC and upload if you install again.
 hebrew.Stopping=סוגר את DriveGram…
 english.Stopping=Closing DriveGram…
-hebrew.StoppingDetail=מחכה שקבצים שעוד לא עלו יסיימו לעלות לטלגרם. זה יכול לקחת כמה דקות.
-english.StoppingDetail=Waiting for files not yet uploaded to finish uploading to Telegram. This can take a few minutes.
+hebrew.StoppingDetail=מחכה שקבצים שעוד לא עלו יסיימו לעלות לטלגרם. זה יכול לקחת כמה דקות. קבצים שפתוחים מהכונן באפליקציות (Word וכו׳) לא יהיה אפשר לשמור עד שהכונן יחזור.
+english.StoppingDetail=Waiting for files not yet uploaded to finish uploading to Telegram. This can take a few minutes. Files open from the drive in apps (Word etc.) cannot be saved until the drive is back.
 hebrew.CmdShortcut=DriveGram – שורת פקודה
 english.CmdShortcut=DriveGram – command line
 hebrew.CleanupAsk=למחוק גם את כל מה ש־DriveGram שמר במחשב הזה (הגדרות, מטמון, יומנים) ולהתנתק מטלגרם?%n%nהקבצים שבטלגרם לא נמחקים: אפשר לחבר את הכונן שוב אחרי התקנה מחדש, עם הסיסמה שלו.%n%nבחר "לא" אם אתה מתכוון להתקין שוב בקרוב.
@@ -74,7 +76,7 @@ Name: "{userdesktop}\DriveGram"; Filename: "{app}\drivegram-tray.exe"; Tasks: de
 
 [Run]
 Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\{#WinFspMsi}"" /qb /norestart"; StatusMsg: "{cm:InstallingWinFsp}"; \
-  Check: NeedsWinFsp; Flags: waituntilterminated
+  Check: NeedsWinFsp; AfterInstall: CheckWinFspInstalled; Flags: waituntilterminated
 Filename: "{app}\drivegram-tray.exe"; Description: "{cm:Launch}"; Flags: postinstall nowait skipifsilent
 
 [Code]
@@ -151,12 +153,20 @@ begin
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var Code: Integer;
 begin
   { only after the user confirmed the uninstall: a "No" must never have stopped their drives }
   if CurUninstallStep = usUninstall then
   begin
+    UninstallProgressForm.StatusLabel.Caption := CustomMessage('StoppingDetail');
     StopRunningCopy(nil);
-    AskToCleanUp;
+    if CheckForMutexes('DriveGramTrayRunning') then
+    begin
+      { still uploading after 10 minutes: what is staged stays on disk (the profile is kept) }
+      MsgBox(CustomMessage('UninstallStillRunning'), mbInformation, MB_OK);
+      Exec('taskkill.exe', '/F /IM drivegram-tray.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+    end
+    else AskToCleanUp;
   end;
   { "Start with Windows" is set by the app, so the uninstaller removes it explicitly }
   if CurUninstallStep = usPostUninstall then
@@ -174,6 +184,10 @@ begin
       '"' + ExpandConstant('{app}\drivegram-tray.exe') + '"');
     DeleteFile(Marker);
   end;
-  if (CurStep = ssPostInstall) and NeedsWinFsp then
-    MsgBox(CustomMessage('WinFspFailed'), mbError, MB_OK);
+end;
+
+{ right after the WinFsp installer itself (not before it, whatever the step order) }
+procedure CheckWinFspInstalled;
+begin
+  if NeedsWinFsp then MsgBox(CustomMessage('WinFspFailed'), mbError, MB_OK);
 end;

@@ -226,6 +226,8 @@ public sealed class DriveSession : IAsyncDisposable
                 UploadConcurrency = cfg.UploadConcurrency,
             });
             sync = new SyncService(db, remote, keys);
+            var driveId = state.Config.DriveId;
+            sync.IsFormerSelf = dev => FormerDevices.Has(driveId, dev);
             var engineRef = engine;
             sync.CanCollectGarbage = () => engineRef.Idle;
             sync.WritableChanged += () => Log.Warn(sync.Writable ? "the drive is now writable" : $"the drive is now READ-ONLY (open on {sync.LeaseHolder})");

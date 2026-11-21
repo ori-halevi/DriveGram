@@ -964,6 +964,7 @@ sealed class DrivePage : WizardPage
             ResetIfRebinding();
         }
         Ctx.State.Save();
+        Ctx.UnlockedKeys = keys;
         if (_remember.Checked) Ctx.State.RememberMaster(keys.ExportMaster());
         else Ctx.State.ForgetMaster();
         return true;
@@ -1009,7 +1010,7 @@ sealed class FinishPage : WizardPage
         _letter.SelectedItem = $"{pick}:";
         _label.Text = cfg.VolumeLabel;
         // the first drive: on; otherwise keep the choice the user already made
-        _autostart.Checked = (Ctx.IsNew && AppState.All().Count == 0) || ShellIntegration.AutostartEnabled;
+        _autostart.Checked = (Ctx.IsNew && !AppState.All().Any(a => a.Dir != Ctx.State.Dir)) || ShellIntegration.AutostartEnabled;
 
         var account = Ctx.State.Folder ?? (string.IsNullOrEmpty(cfg.AccountName) ? null : cfg.AccountName);
         _summary.Text = (account is null ? "" : L.T($"חשבון: {account}\n", $"Account: {account}\n")) +
