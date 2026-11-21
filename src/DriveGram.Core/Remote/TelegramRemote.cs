@@ -163,6 +163,39 @@ public sealed class TelegramRemote : IRemote
         return new TelegramChannels(data.id, data.access_hash, journal.id, journal.access_hash);
     }
 
+    /// <summary>Do the drive's channels still exist for this account, and does it own them (may delete them)?</summary>
+    public static async Task<(bool Exists, bool Owner)> ChannelsStatusAsync(Client client, TelegramChannels ch)
+    {
+        await ResumeAsync(client);
+        var all = (await Patiently(() => client.Messages_GetAllChats())).chats.Values.OfType<Channel>()
+            .Where(c => !c.flags.HasFlag(Channel.Flags.left)).ToList();
+        var data = all.FirstOrDefault(c => c.id == ch.DataId);
+        var journal = all.FirstOrDefault(c => c.id == ch.JournalId);
+        bool exists = data is not null || journal is not null;
+        bool owner = (data ?? journal) is { } any && any.flags.HasFlag(Channel.Flags.creator)
+                     && (journal is null || journal.flags.HasFlag(Channel.Flags.creator));
+        return (exists, owner);
+    }
+
+    /// <summary>
+    /// Permanently delete a drive's two channels (and with them every stored chunk, journal entry and
+    /// snapshot). The journal goes first, so other PCs immediately see the drive as gone rather than
+    /// half there. Only the owner can do this; channels already gone are skipped.
+    /// </summary>
+    public static async Task DeleteChannelsAsync(Client client, TelegramChannels ch)
+    {
+        await ResumeAsync(client);
+        var all = (await Patiently(() => client.Messages_GetAllChats())).chats.Values.OfType<Channel>().ToList();
+        foreach (var id in new[] { ch.JournalId, ch.DataId })
+        {
+            if (all.FirstOrDefault(c => c.id == id) is not { } c) continue;
+            if (!c.flags.HasFlag(Channel.Flags.creator))
+                throw new UnauthorizedAccessException("Only the drive's owner account can delete its channels.");
+            await Patiently(() => client.Channels_DeleteChannel(c));
+            Log.Info($"deleted channel '{c.title}' ({c.id})");
+        }
+    }
+
     /// <summary>Open a drive whose channels are known (from discovery or this PC's saved config).</summary>
     /// <param name="up">/<param name="down">the account's shared governors (drives on one account share
     /// Telegram's per-account rate limit); new ones when null.</param>

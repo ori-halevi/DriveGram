@@ -34,6 +34,26 @@ static class Program
             return;
         }
 
+        int snapDel = Array.IndexOf(args, "--snapshot-delete");
+        if (snapDel >= 0 && snapDel + 1 < args.Length) // developer aid: render the delete confirmation, offline
+        {
+            if (args.Contains("--en")) L.Override("en");
+            if (args.Contains("--he")) L.Override("he");
+            var form = new DeleteDriveForm("U:", "Photos", new DeletionPreview(1234, 56, 7_340_032_000, 12, 3, true, true, "LAPTOP-2"))
+                { StartPosition = FormStartPosition.Manual, Location = new Point(-4000, -4000), ShowInTaskbar = false };
+            form.Shown += (_, _) =>
+            {
+                Application.DoEvents();
+                using var bmp = new Bitmap(form.Width, form.Height);
+                form.DrawToBitmap(bmp, new Rectangle(0, 0, form.Width, form.Height));
+                Directory.CreateDirectory(args[snapDel + 1]);
+                bmp.Save(Path.Combine(args[snapDel + 1], "delete.png"));
+                form.Close();
+            };
+            Application.Run(form);
+            return;
+        }
+
         using var running = new Mutex(true, RunningMutex, out bool first);
         if (!first)
         {

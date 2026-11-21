@@ -328,14 +328,76 @@ sealed class TrayApp : ApplicationContext
                 $"Remove {d.Name} from this PC?\n\nThe files stay in Telegram, and you can connect the drive again at any time (with its password)."),
                 icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
         if (!await StopAsync(d)) return;
+        await ForgetLocallyAsync(d);
+    }
+
+    /// <summary>Everything this PC keeps for the drive: profile, icon, and the account's sign-in if unused now.</summary>
+    async Task ForgetLocallyAsync(DriveController d)
+    {
         if (d.Session is not null) return;
         try { ShellIntegration.ClearDriveIcon(d.Letter); } catch { }
         var accountKey = d.State.Config.AccountKey;
         d.State.Delete();
         _drives.Remove(d);
+        if (_pendingSetup == d) _pendingSetup = null;
         // the account's last drive on this PC: sign it out too, so no stray "device" stays behind
         if (!string.IsNullOrEmpty(accountKey)) await TelegramAccounts.SignOutIfUnusedAsync(accountKey);
         UpdateIcon();
+    }
+
+    /// <summary>
+    /// Permanently delete a drive — its Telegram channels and everything on this PC. Shows what will be
+    /// lost and requires ticking "I understand" plus typing the drive's name. Drives this account does
+    /// not own (a backup admin) can only be removed from this PC.
+    /// </summary>
+    async Task DeleteForeverAsync(DriveController d)
+    {
+        DeletionPreview p;
+        try
+        {
+            SetTooltip(L.T($"בודק את {d.Name}…", $"Checking {d.Name}…"));
+            p = await Task.Run(() => DriveDeletion.PreviewAsync(d.State, d.Session?.Db));
+        }
+        catch (Exception ex)
+        {
+            Ui.Error(L.T($"לא ניתן לבדוק את הכונן כרגע: {ex.Message}", $"Cannot check the drive right now: {ex.Message}"));
+            return;
+        }
+        finally { UpdateIcon(); }
+
+        if (!p.RemoteExists)
+        {
+            if (Ui.Ask(L.T($"האחסון של {d.Name} כבר לא קיים (הערוצים נמחקו מטלגרם). להסיר את הכונן מהמחשב הזה?",
+                    $"The storage of {d.Name} no longer exists (its channels were deleted from Telegram). Remove the drive from this PC?"),
+                    icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+            if (await StopAsync(d, ask: false, waitForUploads: false)) await ForgetLocallyAsync(d);
+            return;
+        }
+        if (!p.CanDeleteRemote)
+        {
+            if (Ui.Ask(L.T($"החשבון שמחובר כאן לא הבעלים של {d.Name} (למשל חשבון גיבוי), ולכן הוא לא יכול למחוק אותו מטלגרם. רק הבעלים יכול.\n\nלהסיר את הכונן רק מהמחשב הזה? הקבצים יישארו בטלגרם.",
+                    $"The account connected here does not own {d.Name} (e.g. a backup account), so it cannot delete it from Telegram — only the owner can.\n\nRemove the drive from this PC only? The files stay in Telegram."),
+                    icon: MessageBoxIcon.Information, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+            if (await StopAsync(d, ask: false)) await ForgetLocallyAsync(d);
+            return;
+        }
+
+        using (var form = new DeleteDriveForm(d.Letter, d.State.Config.VolumeLabel, p))
+            if (form.ShowDialog() != DialogResult.OK) return;
+
+        // uploads are pointless now: disconnect without waiting for them
+        if (!await StopAsync(d, ask: false, waitForUploads: false) || d.Session is not null) return;
+        try { await Task.Run(() => DriveDeletion.DeleteStorageAsync(d.State)); }
+        catch (Exception ex)
+        {
+            Log.Error($"deleting {d.Name} failed", ex);
+            Ui.Error(L.T($"המחיקה מטלגרם נכשלה: {ex.Message}\nהכונן נשאר ברשימה, אפשר לנסות שוב.",
+                         $"Deleting from Telegram failed: {ex.Message}\nThe drive stays in the list; you can try again."));
+            return;
+        }
+        var name = d.Name;
+        await ForgetLocallyAsync(d);
+        Balloon(L.T("הכונן נמחק", "Drive deleted"), L.T($"{name} נמחק לצמיתות.", $"{name} was deleted permanently."), ToolTipIcon.Info);
     }
 
     // ── actions ──────────────────────────────────────────────────────────────
@@ -405,6 +467,9 @@ sealed class TrayApp : ApplicationContext
             item.DropDownItems.Add(Item(L.T("הגדרות והתחברות…", "Settings and sign-in…"), async () => await SetupAsync(d), !d.Starting && !d.Stopping));
             item.DropDownItems.Add(new ToolStripSeparator());
             item.DropDownItems.Add(Item(L.T("הסר מהמחשב הזה…", "Remove from this PC…"), async () => await RemoveAsync(d), !d.Starting && !d.Stopping));
+            var delete = Item(L.T("מחק את הכונן לצמיתות…", "Delete the drive permanently…"), async () => await DeleteForeverAsync(d), !d.Starting && !d.Stopping);
+            delete.ForeColor = Color.FromArgb(0xC6, 0x28, 0x28);
+            item.DropDownItems.Add(delete);
             item.Click += (_, _) => { if (on) OpenDrive(d); };
             _menu.Items.Add(item);
         }
