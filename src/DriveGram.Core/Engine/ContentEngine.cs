@@ -778,6 +778,18 @@ public sealed class ContentEngine : IAsyncDisposable
         }
     }
 
+    /// <summary>Files with local changes that are still open for writing (an app is editing them).</summary>
+    public int FilesOpenForWriting => _nodes.Values.Count(n => Volatile.Read(ref n.OpenWriters) > 0);
+
+    /// <summary>Pending files that can commit now (no app still writing them).</summary>
+    public int PendingClosedFiles() => _db.PendingNodes().Count(id => !_nodes.TryGetValue(id, out var n) || Volatile.Read(ref n.OpenWriters) == 0);
+
+    /// <summary>Queue every pending file for commit at once (handing the drive over).</summary>
+    public void CommitAllNow()
+    {
+        foreach (var node in _db.PendingNodes()) _commitQueue.Writer.TryWrite(node);
+    }
+
     /// <summary>Wait until every pending file is committed (used before unmount / handing over).</summary>
     /// <param name="stall">give up when nothing moved for this long (offline / signed out): the files
     /// stay pending on disk and upload next time. Null waits as long as it takes.</param>

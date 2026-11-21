@@ -26,6 +26,8 @@ sealed class DriveController
     /// <summary>The saved channels did not match: the next setup shows the list of drives.</summary>
     public bool MustChooseDrive;
     public ExportForm? ExportWindow;
+    public HandoverWaitForm? HandoverWait;
+    public HandoverAskForm? HandoverAsk;
 
     public DriveController(AppState state) => State = state;
 
@@ -139,6 +141,7 @@ sealed class TrayApp : ApplicationContext
             d.RetryDelaySeconds = 15;
             session.StopRequested += () => _ui.Post(async _ => await StopAsync(d, ask: false), null);
             session.SignedOut += () => _ui.Post(async _ => await OnSignedOutAsync(d), null);
+            session.Sync.HandoverRequested += r => _ui.Post(async _ => await OnHandoverRequestedAsync(d, session, r), null);
             if (session.Sync.NeedsUpdate)
                 Balloon(L.T("צריך לעדכן את DriveGram", "Update DriveGram"),
                     L.T($"{session.MountPoint} נכתב בגרסה חדשה יותר. הוא פתוח לקריאה בלבד עד שתתקין את הגרסה החדשה.",
@@ -283,6 +286,7 @@ sealed class TrayApp : ApplicationContext
         d.Trash?.Close();
         d.Security?.Close();
         d.ExportWindow?.Close();
+        d.HandoverWait?.Close();
         UpdateIcon();
         try
         {
@@ -488,6 +492,49 @@ sealed class TrayApp : ApplicationContext
         UpdateIcon();
     }
 
+    // ── handing the drive between PCs ────────────────────────────────────────
+    void AskForDrive(DriveController d)
+    {
+        if (d.Session is not { } s) return;
+        if (d.HandoverWait is { IsDisposed: false }) { d.HandoverWait.Activate(); return; }
+        var form = new HandoverWaitForm(s);
+        d.HandoverWait = form;
+        form.FormClosed += (_, _) =>
+        {
+            if (form.Received)
+                Balloon(L.T($"{d.Letter} ניתן לכתיבה", $"{d.Letter} is writable"),
+                    L.T("הכונן עבר למחשב הזה. אפשר לשמור קבצים.", "The drive moved to this PC. You can save files."));
+            UpdateIcon();
+        };
+        form.Show();
+    }
+
+    async Task OnHandoverRequestedAsync(DriveController d, DriveSession s, HandoverRequest r)
+    {
+        if (d.Session != s || d.HandoverAsk is { IsDisposed: false }) return;
+        bool approved;
+        using (var ask = new HandoverAskForm(s, r))
+        {
+            d.HandoverAsk = ask;
+            ask.ShowDialog();
+            approved = ask.Approved;
+        }
+        d.HandoverAsk = null;
+        if (d.Session != s) return;
+        try
+        {
+            if (!approved) { await Task.Run(() => s.Sync.RefuseHandoverAsync(r, default)); return; }
+            UpdateIcon();
+            bool done = await Task.Run(() => s.HandOverAsync(r, null, default));
+            if (done)
+                Balloon(L.T($"{d.Letter} עבר ל־{r.Name}", $"{d.Letter} moved to {r.Name}"),
+                    L.T("המחשב הזה עכשיו לקריאה בלבד. אפשר לבקש את הכונן בחזרה מהתפריט.",
+                        "This PC is now read-only. You can ask for the drive back from the menu."));
+        }
+        catch (Exception ex) { Log.Warn($"tray: handover of {d.Name}: {ex.Message}"); }
+        UpdateIcon();
+    }
+
     bool _deleting;
 
     sealed class PasswordNotGivenException() : Exception("no password entered");
@@ -626,6 +673,8 @@ sealed class TrayApp : ApplicationContext
         if (d.Session is not { } s) return d.Problem is null ? L.T("לא מחובר", "not connected") : d.Problem;
         var st = s.Status;
         if (s.Sync.NeedsUpdate) return L.T("קריאה בלבד: צריך לעדכן את DriveGram", "read-only: DriveGram needs an update");
+        if (s.Sync.HandingOver)
+            return L.T($"מעביר את הכונן למחשב אחר (נשארו {st.PendingFiles} קבצים להעלות)", $"handing the drive to another PC ({st.PendingFiles} uploads left)");
         if (s.Sync.HeldBackChanges is > 0 and var held)
             return L.T($"⚠ {held} שינויים מוחזקים: הכונן נפתח לכתיבה ב־{s.Sync.LeaseHolder}", $"⚠ {held} changes held back: the drive was opened for writing on {s.Sync.LeaseHolder}");
         if (!s.Writable) return s.Sync.LeaseHolder is { } h
@@ -640,7 +689,8 @@ sealed class TrayApp : ApplicationContext
     }
 
     static string ReadOnlyWhy(DriveSession s) => s.Sync.LeaseHolder is { } h
-        ? L.T($"הכונן פתוח לכתיבה במחשב {h}. כאן אפשר רק לקרוא.", $"The drive is open for writing on {h}. Here it can only be read.")
+        ? L.T($"הכונן פתוח לכתיבה במחשב {h}. כאן אפשר רק לקרוא. כדי לכתוב כאן: בתפריט, \"בקש את הכונן\".",
+              $"The drive is open for writing on {h}. Here it can only be read. To write here: \"Ask for the drive\" in the menu.")
         : L.T("הכונן זמין כרגע לקריאה בלבד; DriveGram בודק אם אפשר לכתוב.", "The drive is read-only for now; DriveGram is checking whether it can write.");
 
     string Summary() => _drives.Count == 0
@@ -669,6 +719,8 @@ sealed class TrayApp : ApplicationContext
                 item.DropDownItems.Add(Item(L.T("חבר", "Connect"), async () => { if (d.NeedsSetup) await SetupAsync(d); else await MountAsync(d); },
                     !d.Starting));
             else item.DropDownItems.Add(Item(L.T("נתק", "Disconnect"), async () => await StopAsync(d), !d.Stopping));
+            if (d.Session is { Writable: false, Sync: { LeaseHolder: { } holder, NeedsUpdate: false } })
+                item.DropDownItems.Add(Item(L.T($"בקש את הכונן מ־{holder}…", $"Ask {holder} for the drive…"), () => AskForDrive(d), !d.Stopping, bold: true));
             item.DropDownItems.Add(Item(L.T("הגדרות והתחברות…", "Settings and sign-in…"), async () => await SetupAsync(d), !d.Starting && !d.Stopping));
             item.DropDownItems.Add(Item(L.T("סיסמה ומפתח שחזור…", "Password and recovery key…"), () => ShowSecurity(d), on));
             if (d.State.Folder is null && d.State.Config.Channels is not null)

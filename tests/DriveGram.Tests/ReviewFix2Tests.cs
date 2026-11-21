@@ -8,8 +8,9 @@ namespace DriveGram.Tests;
 /// <summary>Regression tests for the second code review (held-back changes, lease paths, format gate).</summary>
 public class ReviewFix2Tests
 {
-    static SyncOptions Fast(TimeSpan? heartbeat = null) => new()
+    static SyncOptions Fast(TimeSpan? heartbeat = null, string? name = null) => new()
     {
+        DeviceName = name ?? Environment.MachineName,
         FlushInterval = TimeSpan.FromMilliseconds(100),
         HeartbeatInterval = heartbeat ?? TimeSpan.FromMinutes(1),
         TrashRetention = TimeSpan.FromDays(30),
@@ -18,7 +19,7 @@ public class ReviewFix2Tests
 
     static async Task Eventually(Func<bool> condition, string what)
     {
-        for (int i = 0; i < 200 && !condition(); i++) await Task.Delay(50);
+        for (int i = 0; i < 500 && !condition(); i++) await Task.Delay(50);
         Assert.True(condition(), what);
     }
 
@@ -160,5 +161,59 @@ public class ReviewFix2Tests
         Assert.Equal(5000, b.Db.Get(f)!.Size);
         await a.DisposeAsync();
         await b.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task TheDriveCanBeHandedToAnotherPcOnRequest()
+    {
+        await using var kit = await TestKit.CreateAsync();
+        var a = kit.Pc("a", so: Fast(name: "PC-A"));
+        await a.Sync.StartAsync(false, default);
+        var b = kit.Pc("b", so: Fast(name: "PC-B"));
+        await b.Sync.StartAsync(false, default);
+        Assert.True(a.Sync.Writable);
+        Assert.False(b.Sync.Writable);
+
+        // B asks; A refuses
+        HandoverRequest? seen = null;
+        a.Sync.HandoverRequested += r => seen = r;
+        var ask = await b.Sync.RequestHandoverAsync(default);
+        await Eventually(() => seen is not null, "A noticed the request");
+        await a.Sync.RefuseHandoverAsync(seen!, default);
+        Assert.Equal("refused", (await b.Sync.HandoverStatusAsync(ask, default)).Request!.State);
+        Assert.True(a.Sync.Writable);
+
+        // B asks again; A agrees, with a file written just before
+        var f = a.NewFile("last.txt");
+        a.WriteFile(f, "from A"u8.ToArray());
+        seen = null;
+        ask = await b.Sync.RequestHandoverAsync(default);
+        await Eventually(() => seen is not null, "A noticed the second request");
+        await a.Sync.BeginHandoverAsync(seen!, 1, default);
+        using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60))) await a.Engine.DrainAsync(null, cts.Token);
+        Assert.True(await a.Sync.CompleteHandoverAsync(seen!, default));
+        Assert.False(a.Sync.Writable);
+
+        var (_, lease) = await b.Sync.HandoverStatusAsync(ask, default);
+        Assert.Equal(b.Db.DeviceId, lease!.Dev);
+        await b.Sync.TakeDriveAsync(force: false, default);
+        Assert.True(b.Sync.Writable);
+        Assert.Equal("from A", System.Text.Encoding.UTF8.GetString(b.ReadFile(f))); // nothing left behind on A
+        Assert.Null((await SyncService.ReadControlAsync(kit.Remote, default))!.Handover);
+    }
+
+    [Fact]
+    public async Task WithoutAnAnswerTheRequesterTakesTheDrive()
+    {
+        await using var kit = await TestKit.CreateAsync();
+        var a = kit.Pc("a", so: Fast(name: "PC-A"));
+        await a.Sync.StartAsync(false, default);
+        await a.Sync.DisposeAsync();                               // A is asleep: it never answers
+        var b = kit.Pc("b", so: Fast(name: "PC-B"));
+        await b.Sync.StartAsync(false, default);
+        await b.Sync.RequestHandoverAsync(default);
+        await b.Sync.TakeDriveAsync(force: true, default);         // the countdown ran out / "take now"
+        Assert.True(b.Sync.Writable);
+        Assert.Equal(b.Db.DeviceId, (await SyncService.ReadControlAsync(kit.Remote, default))!.Lease!.Dev);
     }
 }

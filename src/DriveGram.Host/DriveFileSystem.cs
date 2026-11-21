@@ -80,7 +80,7 @@ public sealed class DriveFileSystem : FileSystemBase
         sd.GetBinaryForm(_sd, 0);
     }
 
-    bool ReadOnly => !_sync.Writable;
+    bool ReadOnly => !_sync.Writable || _sync.HandingOver; // handing over: no new changes here
     static long Now => DateTime.UtcNow.ToFileTimeUtc();
 
     public override int Init(object host0)

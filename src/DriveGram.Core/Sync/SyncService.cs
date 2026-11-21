@@ -20,7 +20,7 @@ public sealed record DriveIdentity(string Id, string Name, long DataChannel);
 /// <summary>The one editable record of a drive (Telegram: the pinned text message of the journal channel).</summary>
 /// <param name="MinReader">/<param name="MinWriter">oldest StorageFormat that may read / write this drive (see StorageFormat).</param>
 public sealed record ControlState(int V, VaultHeader Vault, LeaseInfo? Lease, SnapInfo? Snap, DriveIdentity? Drive = null,
-    int MinReader = 1, int MinWriter = 1)
+    int MinReader = 1, int MinWriter = 1, HandoverRequest? Handover = null)
 {
     /// <summary>Fields written by a newer version, kept verbatim on every rewrite.</summary>
     [System.Text.Json.Serialization.JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
@@ -54,7 +54,7 @@ public sealed class SyncOptions
 /// Rule kept by the engine: content ops are created only after their chunks are stored, so the
 /// journal never references bytes that exist only on one PC.
 /// </summary>
-public sealed class SyncService : IAsyncDisposable
+public sealed partial class SyncService : IAsyncDisposable
 {
     readonly IndexDb _db;
     readonly IRemote _remote;
@@ -452,6 +452,7 @@ public sealed class SyncService : IAsyncDisposable
             {
                 await Task.Delay(_o.FlushInterval, ct);
                 if (Writable) await FlushAsync(ct);
+                if (Writable) await CheckHandoverAsync(ct); // another PC asking for the drive (every ~10 s)
                 if (DateTime.UtcNow < nextBeat && !_beatNow) continue;
                 _beatNow = false;
                 nextBeat = DateTime.UtcNow + _o.HeartbeatInterval;

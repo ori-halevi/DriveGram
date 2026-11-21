@@ -381,6 +381,42 @@ public sealed class DriveSession : IAsyncDisposable
         return MountPoint + path;
     }
 
+    /// <summary>
+    /// Another PC asked for the drive and this PC agreed: stop taking changes, upload and journal what is
+    /// still here, then write the other PC into the lease. Files an app is still writing cannot be
+    /// finished now: they stay on this PC and are sent the next time it gets the drive back.
+    /// Returns true when the drive was handed over.
+    /// </summary>
+    public async Task<bool> HandOverAsync(HandoverRequest r, Action<int>? progress, CancellationToken ct)
+    {
+        await Sync.BeginHandoverAsync(r, Engine.Status.PendingFiles, ct);
+        try
+        {
+            Engine.CommitAllNow();
+            var lastReport = DateTime.UtcNow;
+            while (Engine.PendingClosedFiles() > 0)
+            {
+                if (!Sync.Writable) return false; // the other PC took the drive meanwhile ("take now")
+                int pending = Engine.Status.PendingFiles;
+                progress?.Invoke(pending);
+                if (DateTime.UtcNow - lastReport > TimeSpan.FromSeconds(10))
+                {
+                    await Sync.ReportHandoverAsync(r, pending, ct);
+                    lastReport = DateTime.UtcNow;
+                }
+                await Task.Delay(1000, ct);
+            }
+            for (int attempt = 0; attempt < 30; attempt++)
+            {
+                if (!Sync.Writable) return false;
+                if (await Sync.CompleteHandoverAsync(r, ct)) return true;
+                await Task.Delay(2000, ct);
+            }
+            return false;
+        }
+        finally { Sync.EndHandover(); }
+    }
+
     public void DeleteForever(string id)
     {
         if (!Writable) throw new InvalidOperationException(L.T("הכונן במצב קריאה בלבד במחשב הזה כרגע.", "The drive is read-only on this PC right now."));
