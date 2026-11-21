@@ -844,12 +844,28 @@ sealed class DrivePage : WizardPage
         _error.Text = "";
         var pw = _pw.Text;
         var cfg = Ctx.State.Config;
-        if (_wasVanished)
+        // Binding this profile to a different drive (another account, another drive, a new one, or the
+        // old one vanished): its local index and cache belong to the old drive and must be reset — but
+        // never while files exist only here, unless the old drive is gone anyway.
+        var target = _mode == Mode.Create ? null : _selected?.Channels ?? cfg.Channels;
+        bool rebinding = Ctx.UsesTelegram && Ctx.OriginalChannels is { } original
+                         && (target is null || target.JournalId != original.JournalId);
+        if (rebinding && !_wasVanished)
         {
-            // the old local index points at chunks that no longer exist: start this profile clean
+            var (pending, unsent) = DriveDeletion.LocalOnly(Ctx.State);
+            if (pending > 0 || unsent > 0)
+            {
+                _error.Text = L.T(
+                    $"בכונן הקודם יש {pending} קבצים שעוד לא עלו ו־{unsent} שינויים שעוד לא נשלחו, והם קיימים רק במחשב הזה. חבר אותו קודם (אם צריך, התחבר מחדש) וחכה שיעלו, או הסר אותו מהמחשב.",
+                    $"The previous drive has {pending} files not yet uploaded and {unsent} changes not yet sent, existing only on this PC. Connect it first (sign in again if needed) and let them upload, or remove it from this PC.");
+                return false;
+            }
+        }
+        void ResetIfRebinding()
+        {
+            if (!rebinding) return;
             Ctx.State.ResetLocalData();
-            cfg.Channels = null;
-            cfg.DriveId = "";
+            rebinding = false;
             _wasVanished = false;
         }
 
@@ -871,6 +887,7 @@ sealed class DrivePage : WizardPage
             }
             var remote = _remote!;
             keys = await Task.Run(() => SyncService.CreateDriveAsync(remote, pw, default, identity: identity));
+            ResetIfRebinding();
             Log.Info($"setup: created drive '{cfg.VolumeLabel}' ({Ctx.State.Id})");
         }
         else
@@ -892,6 +909,7 @@ sealed class DrivePage : WizardPage
                 _pw.Focus();
                 return false;
             }
+            ResetIfRebinding();
         }
         Ctx.State.Save();
         if (_remember.Checked) Ctx.State.RememberMaster(keys.ExportMaster());
@@ -938,7 +956,7 @@ sealed class FinishPage : WizardPage
         char pick = free.Contains(current) ? current : "TUVWXYZSRQPONMLKJIHGFED".FirstOrDefault(free.Contains, 'T');
         _letter.SelectedItem = $"{pick}:";
         _label.Text = cfg.VolumeLabel;
-        _autostart.Checked = true;
+        _autostart.Checked = Ctx.IsNew || ShellIntegration.AutostartEnabled; // a new drive: on; otherwise keep the choice
 
         var account = Ctx.State.Folder ?? (string.IsNullOrEmpty(cfg.AccountName) ? null : cfg.AccountName);
         _summary.Text = (account is null ? "" : L.T($"חשבון: {account}\n", $"Account: {account}\n")) +

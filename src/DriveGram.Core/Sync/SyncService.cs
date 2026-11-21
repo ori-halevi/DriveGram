@@ -364,6 +364,20 @@ public sealed class SyncService : IAsyncDisposable
         }
     }
 
+    /// <summary>Windows is shutting down: push the journal and give the lease back, nothing slower.</summary>
+    public async Task QuickReleaseAsync(CancellationToken ct)
+    {
+        _cts.Cancel();
+        if (!Writable) return;
+        await FlushAsync(ct);
+        if (_db.OutboxCount() == 0 && _db.PendingNodes().Count == 0)
+        {
+            var ctrl = (await ReadControlAsync(_remote, ct))!;
+            if (ctrl.Lease?.Dev == _db.DeviceId)
+                await _remote.WriteControlAsync((ctrl with { Lease = null }).ToJson(), ct);
+        }
+    }
+
     /// <summary>Flush, then give the lease back so another PC can write.</summary>
     public async Task StopAsync(bool releaseLease, CancellationToken ct)
     {

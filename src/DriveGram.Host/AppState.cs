@@ -62,8 +62,19 @@ public sealed class AppState
         Dir = dir;
         Directory.CreateDirectory(Dir);
         if (File.Exists(ConfigPath))
-            Config = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(ConfigPath), Json) ?? new AppConfig();
+        {
+            try { Config = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(ConfigPath), Json) ?? new AppConfig(); }
+            catch (Exception ex) when (ex is JsonException or IOException)
+            {
+                // e.g. a zero-length file after a power cut: never let one bad profile stop all drives
+                Broken = true;
+                Log.Error($"profile {Path.GetFileName(dir)}: config.json is unreadable ({ex.Message}); skipped");
+            }
+        }
     }
+
+    /// <summary>The profile's config.json could not be read (skipped by All()).</summary>
+    public bool Broken { get; }
 
     /// <summary>Open a profile by folder name.</summary>
     public static AppState Open(string id) => new(Path.Combine(Root, id));
@@ -97,13 +108,19 @@ public sealed class AppState
         return Directory.GetDirectories(Root)
             .Where(d => File.Exists(Path.Combine(d, "config.json")))
             .Select(d => new AppState(d))
-            .Where(s => s.Folder is not null || s.Config.ApiId != 0)
+            .Where(s => !s.Broken && (s.Folder is not null || s.Config.ApiId != 0))
             .OrderBy(s => s.Id == "telegram" ? "" : s.Id)
             .ThenBy(s => Directory.GetCreationTimeUtc(s.Dir))
             .ToList();
     }
 
-    public void Save() => File.WriteAllText(ConfigPath, JsonSerializer.Serialize(Config, Json));
+    /// <summary>Atomic: a power cut leaves the old file or the new one, never half of one.</summary>
+    public void Save()
+    {
+        var tmp = ConfigPath + ".tmp";
+        File.WriteAllText(tmp, JsonSerializer.Serialize(Config, Json));
+        File.Move(tmp, ConfigPath, overwrite: true);
+    }
 
     /// <summary>Remove this profile and everything this PC stored for it (not the files in Telegram).</summary>
     public void Delete()
@@ -130,7 +147,19 @@ public sealed class AppState
     public static byte[] Unprotect(byte[] data) => ProtectedData.Unprotect(data, "DriveGram"u8.ToArray(), DataProtectionScope.CurrentUser);
 
     public void RememberMaster(byte[] master) => File.WriteAllBytes(MasterKeyPath, Protect(master));
-    public byte[]? RememberedMaster() => File.Exists(MasterKeyPath) ? Unprotect(File.ReadAllBytes(MasterKeyPath)) : null;
+    /// <summary>The remembered drive key, or null. If Windows can no longer decrypt it (e.g. the user's
+    /// password was reset by an admin, or the profile was copied), it is forgotten so the password is asked.</summary>
+    public byte[]? RememberedMaster()
+    {
+        if (!File.Exists(MasterKeyPath)) return null;
+        try { return Unprotect(File.ReadAllBytes(MasterKeyPath)); }
+        catch (CryptographicException ex)
+        {
+            Log.Warn($"remembered key of {Id} cannot be decrypted ({ex.Message}); asking for the password");
+            ForgetMaster();
+            return null;
+        }
+    }
     public void ForgetMaster() { if (File.Exists(MasterKeyPath)) File.Delete(MasterKeyPath); }
 }
 
@@ -164,9 +193,18 @@ public sealed class DpapiSessionStream : Stream
         _path = path;
         if (File.Exists(path))
         {
-            var plain = AppState.Unprotect(File.ReadAllBytes(path));
-            _mem.Write(plain);
-            _mem.Position = 0;
+            try
+            {
+                var plain = AppState.Unprotect(File.ReadAllBytes(path));
+                _mem.Write(plain);
+                _mem.Position = 0;
+            }
+            catch (CryptographicException ex)
+            {
+                // unreadable for this Windows user: start signed out (setup is offered) instead of failing forever
+                Log.Warn($"sign-in file {path} cannot be decrypted ({ex.Message}); a new sign-in is needed");
+                try { File.Move(path, path + ".unreadable", overwrite: true); } catch (IOException) { }
+            }
         }
     }
 

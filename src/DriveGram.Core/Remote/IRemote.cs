@@ -7,10 +7,10 @@ public sealed class NoDriveException() : Exception("No DriveGram drive yet. Run 
 
 /// <summary>This PC knew a drive on this account, but its channels are gone from Telegram (deleted).
 /// Never silently replaced by a new empty drive: the user must confirm.</summary>
-public sealed class DriveVanishedException() : Exception("The drive's Telegram channels no longer exist (they were deleted).");
+public sealed class DriveVanishedException() : StopRetryingException("The drive's Telegram channels no longer exist (they were deleted).");
 
 /// <summary>This PC has no signed-in Telegram session (or it was revoked from another device).</summary>
-public sealed class NotSignedInException() : Exception("Telegram is not signed in on this PC. Open DriveGram setup (or run `drivegram login`).");
+public sealed class NotSignedInException() : StopRetryingException("Telegram is not signed in on this PC. Open DriveGram setup (or run `drivegram login`).");
 
 /// <summary>
 /// Where the bytes live. Two logical areas:

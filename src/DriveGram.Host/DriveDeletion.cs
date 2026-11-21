@@ -65,6 +65,23 @@ public static class DriveDeletion
         return new DeletionPreview(files, folders, bytes, trashed, pending, owner, remoteExists, elsewhere);
     }
 
+    /// <summary>Files not yet uploaded and changes not yet sent, from the saved index (drive unmounted).
+    /// Removing the profile deletes these for good — they exist nowhere else.</summary>
+    public static (int PendingFiles, int UnsentChanges) LocalOnly(AppState state)
+    {
+        if (!File.Exists(state.IndexPath)) return (0, 0);
+        try
+        {
+            using var db = IndexDb.Open(state.IndexPath);
+            return (db.PendingNodes().Count, db.OutboxCount());
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"cannot read the index of {state.Id}: {ex.Message}");
+            return (0, 0);
+        }
+    }
+
     /// <summary>Delete the drive's storage for good. The drive must already be unmounted.</summary>
     public static async Task DeleteStorageAsync(AppState state)
     {

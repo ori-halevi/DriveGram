@@ -151,21 +151,27 @@ public sealed class DriveSession : IAsyncDisposable
         mountPoint ??= state.Config.MountPoint;
         mountPoint = mountPoint.TrimEnd('\\');
         if (!mountPoint.EndsWith(':')) mountPoint += ":";
+        Semaphore? instance = new Semaphore(1, 1, InstanceName(state));
+        if (!instance.WaitOne(0)) { instance.Dispose(); throw new AlreadyMountedException(); }
+
         string? letterNote = null;
         if (LetterInUse(mountPoint[0]))
         {
             // e.g. a USB stick took the letter: use the next free one, and remember it
             var taken = AppState.All().Where(a => a.Dir != state.Dir).Select(a => char.ToUpperInvariant(a.Config.MountPoint[0])).ToHashSet();
             var free = "TUVWXYZSRQPONMLKJIHGFED".FirstOrDefault(c => !LetterInUse(c) && !taken.Contains(c));
-            if (free == default) throw new IOException("No free drive letter.");
+            if (free == default)
+            {
+                instance.Release();
+                instance.Dispose();
+                throw new IOException(L.T("אין אות כונן פנויה.", "No free drive letter."));
+            }
             letterNote = $"{mountPoint} → {free}:";
+            try { ShellIntegration.ClearDriveIcon(mountPoint); } catch { } // the other device must not wear our icon
             mountPoint = $"{free}:";
             state.Config.MountPoint = mountPoint;
             state.Save();
         }
-
-        var instance = new Semaphore(1, 1, InstanceName(state));
-        if (!instance.WaitOne(0)) { instance.Dispose(); throw new AlreadyMountedException(); }
 
         IRemote? remote = null;
         IndexDb? db = null;
@@ -207,12 +213,15 @@ public sealed class DriveSession : IAsyncDisposable
             engine.Start();
 
             var stopEvent = new EventWaitHandle(false, EventResetMode.AutoReset, StopEventName(state));
-            var session = new DriveSession(state, mountPoint, remote, db, engine, sync, instance, stopEvent);
+            var session = new DriveSession(state, mountPoint, remote, db, engine, sync, instance!, stopEvent);
             int status = session._host.Mount(mountPoint, null, false, 0);
             if (status < 0)
             {
                 await session.StopAsync(waitForUploads: false);
-                throw new IOException($"Could not mount {mountPoint} (NTSTATUS 0x{status:X8}). Is the drive letter already in use?");
+                await session.DisposeAsync();            // host, stop event, engine, sync, index, remote, instance
+                sync = null; engine = null; db = null; remote = null; instance = null;
+                throw new IOException(L.T($"לא ניתן לחבר את {mountPoint} (NTSTATUS 0x{status:X8}). אולי האות תפוסה?",
+                                          $"Could not mount {mountPoint} (NTSTATUS 0x{status:X8}). Is the drive letter already in use?"));
             }
             session._mounted = true;
             session.LetterChanged = letterNote;
@@ -228,8 +237,11 @@ public sealed class DriveSession : IAsyncDisposable
             if (engine is not null) await engine.DisposeAsync();
             db?.Dispose();
             if (remote is not null) await remote.DisposeAsync();
-            instance.Release();
-            instance.Dispose();
+            if (instance is not null)
+            {
+                try { instance.Release(); } catch (SemaphoreFullException) { }
+                instance.Dispose();
+            }
             throw;
         }
     }
@@ -246,9 +258,18 @@ public sealed class DriveSession : IAsyncDisposable
             _mounted = false;
             Log.Info($"unmounted {MountPoint}");
         }
+        try { ShellIntegration.ClearDriveIcon(MountPoint); } catch { }
         Engine.ReleaseAllHandles(); // lazily-closed files would otherwise never commit
-        if (waitForUploads && Db.PendingNodes().Count > 0) await Engine.DrainAsync(progress, ct);
-        try { await Sync.StopAsync(releaseLease: true, ct); }
+        if (waitForUploads && Db.PendingNodes().Count > 0)
+        {
+            // waits while uploads make progress; gives up after 3 minutes without any (offline / signed
+            // out) — the files stay on this PC and upload the next time the drive starts here
+            try { await Engine.DrainAsync(progress, ct, stall: TimeSpan.FromMinutes(3)); }
+            catch (OperationCanceledException) { }
+        }
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(30));
+        try { await Sync.StopAsync(releaseLease: true, deadline.Token); }
         catch (Exception ex) { Log.Warn($"stop: could not reach the journal ({ex.Message}); changes stay queued"); }
     }
 
@@ -258,8 +279,10 @@ public sealed class DriveSession : IAsyncDisposable
         try
         {
             if (_mounted) { _host.Unmount(); _mounted = false; }
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
-            Sync.FlushAsync(cts.Token).Wait(cts.Token);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            // the caller is the UI thread: run the async work on the thread pool, or its continuations
+            // would queue behind this very wait and nothing would be sent
+            Task.Run(() => Sync.QuickReleaseAsync(cts.Token)).Wait(cts.Token);
         }
         catch (Exception ex) { Log.Warn($"shutdown stop: {ex.Message}"); }
     }

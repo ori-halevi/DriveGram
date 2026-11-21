@@ -720,12 +720,23 @@ public sealed class ContentEngine : IAsyncDisposable
     }
 
     /// <summary>Wait until every pending file is committed (used before unmount / handing over).</summary>
-    public async Task DrainAsync(Action<EngineStatus>? progress, CancellationToken ct)
+    /// <param name="stall">give up when nothing moved for this long (offline / signed out): the files
+    /// stay pending on disk and upload next time. Null waits as long as it takes.</param>
+    public async Task DrainAsync(Action<EngineStatus>? progress, CancellationToken ct, TimeSpan? stall = null)
     {
         foreach (var node in _db.PendingNodes()) _commitQueue.Writer.TryWrite(node);
+        var last = (Pending: -1, Up: -1L);
+        var movedAt = DateTime.UtcNow;
         while (_db.PendingNodes().Count > 0)
         {
-            progress?.Invoke(Status);
+            var s = Status;
+            progress?.Invoke(s);
+            if ((s.PendingFiles, s.BytesUploaded) != last) { last = (s.PendingFiles, s.BytesUploaded); movedAt = DateTime.UtcNow; }
+            else if (stall is { } limit && DateTime.UtcNow - movedAt > limit)
+            {
+                Log.Warn($"uploads made no progress for {limit.TotalMinutes:0} min; {s.PendingFiles} files stay pending on this PC");
+                return;
+            }
             await Task.Delay(500, ct);
         }
     }

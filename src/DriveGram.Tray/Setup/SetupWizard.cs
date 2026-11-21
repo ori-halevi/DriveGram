@@ -17,10 +17,15 @@ sealed class SetupContext : IDisposable
     /// <summary>Answers a 2FA prompt during QR sign-in (set by the login page).</summary>
     public Func<string?>? AskPassword { get; set; }
 
+    /// <summary>The drive this profile was bound to when the wizard opened (null for a new profile).
+    /// Binding the profile to any OTHER drive means its local index/cache belong to the old one.</summary>
+    public Remote.TelegramChannels? OriginalChannels { get; }
+
     public SetupContext(AppState state, bool isNew)
     {
         State = state;
         IsNew = isNew;
+        OriginalChannels = state.Config.Channels;
     }
 
     AccountLease? _lease;
@@ -55,6 +60,8 @@ sealed class SetupContext : IDisposable
         State.Config.ApiHash = a.ApiHash;
         State.Config.AccountId = a.Id;
         State.Config.AccountName = a.Name;
+        State.Config.Channels = null; // another account: a new binding (never open the old drive's channels with it)
+        State.Config.DriveId = "";
     }
 
     /// <summary>Drop the connection (new API credentials, switching account, or a broken sign-in).

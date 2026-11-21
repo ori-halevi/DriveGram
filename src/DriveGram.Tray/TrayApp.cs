@@ -80,7 +80,7 @@ sealed class TrayApp : ApplicationContext
     // ── mount / unmount ──────────────────────────────────────────────────────
     async Task MountAsync(DriveController d)
     {
-        if (d.Session is not null || d.Starting || _quitting) return;
+        if (d.Session is not null || d.Starting || _quitting || !_drives.Contains(d)) return;
         d.RetryTimer?.Stop();
         d.Starting = true;
         d.Problem = null;
@@ -89,6 +89,13 @@ sealed class TrayApp : ApplicationContext
         try
         {
             var session = await Task.Run(() => DriveSession.StartAsync(d.State, ctrl => UnlockAsync(d, ctrl), null, takeOver: false));
+            if (!_drives.Contains(d) || _quitting)
+            {
+                // the drive was replaced (settings) or removed while it was starting: never leave it orphaned
+                await Task.Run(() => session.StopAsync(waitForUploads: false));
+                await session.DisposeAsync();
+                return;
+            }
             d.Session = session;
             d.RetryDelaySeconds = 15;
             session.StopRequested += () => _ui.Post(async _ => await StopAsync(d, ask: false), null);
@@ -196,7 +203,11 @@ sealed class TrayApp : ApplicationContext
     /// <summary>Unmount one drive. With pending uploads (and ask), let the user choose to wait.</summary>
     async Task<bool> StopAsync(DriveController d, bool ask = true, bool waitForUploads = true)
     {
-        if (d.Stopping) return false;
+        if (d.Stopping)
+        {
+            while (d.Stopping) await Task.Delay(200); // let the stop already running finish
+            return d.Session is null;
+        }
         d.RetryTimer?.Stop();
         if (d.Session is not { } session) return true;
         int pending = session.Status.PendingFiles;
@@ -294,7 +305,9 @@ sealed class TrayApp : ApplicationContext
                     $"To change the settings of {d.Name} it must be disconnected for a moment. Disconnect?")) != DialogResult.Yes) return;
             if (!await StopAsync(d)) return;
         }
-        var state = d?.State ?? AppState.CreateNew();
+        if (d is not null) StopRetrying(d);
+        // the wizard edits a COPY: cancelling it leaves the live drive's settings untouched
+        var state = d is null ? AppState.CreateNew() : AppState.Open(d.State.Id);
         bool isNew = d is null;
         DialogResult result;
         using (_wizard = new Setup.SetupWizard(state, isNew))
@@ -305,6 +318,7 @@ sealed class TrayApp : ApplicationContext
         if (result != DialogResult.OK)
         {
             if (isNew) state.Delete();
+            else if (d is { Session: null, NeedsSetup: false }) ScheduleRetry(d); // it was retrying before
             UpdateIcon();
             return;
         }
@@ -323,8 +337,16 @@ sealed class TrayApp : ApplicationContext
         await MountAsync(d);
     }
 
+    static void StopRetrying(DriveController d)
+    {
+        d.RetryTimer?.Stop();
+        d.RetryTimer?.Dispose();
+        d.RetryTimer = null;
+    }
+
     bool Replace(DriveController old, DriveController fresh)
     {
+        StopRetrying(old);
         int i = _drives.IndexOf(old);
         if (i < 0) return false;
         _drives[i] = fresh;
@@ -340,7 +362,22 @@ sealed class TrayApp : ApplicationContext
                 $"Remove {d.Name} from this PC?\n\nThe files stay in Telegram, and you can connect the drive again at any time (with its password)."),
                 icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
         if (!await StopAsync(d)) return;
+        if (!ConfirmLosingLocalChanges(d)) return;
         await ForgetLocallyAsync(d);
+    }
+
+    /// <summary>Files not yet uploaded / changes not yet sent live only in this PC's profile: removing it
+    /// deletes them for good. Say so plainly and default to keeping them.</summary>
+    static bool ConfirmLosingLocalChanges(DriveController d)
+    {
+        var (pending, unsent) = DriveDeletion.LocalOnly(d.State);
+        if (pending == 0 && unsent == 0) return true;
+        return Ui.Ask(L.T(
+                $"⚠  ב־{d.Name} יש {pending} קבצים שעוד לא עלו לטלגרם ו־{unsent} שינויים שעוד לא נשלחו. הם קיימים רק במחשב הזה.\n\n" +
+                "אם תסיר את הכונן עכשיו, הם יימחקו לצמיתות. כדי לשמור אותם: חבר את הכונן (אם צריך, התחבר מחדש לטלגרם) וחכה שיעלו.\n\nלהסיר בכל זאת?",
+                $"⚠  {d.Name} has {pending} files not yet uploaded to Telegram and {unsent} changes not yet sent. They exist only on this PC.\n\n" +
+                "Removing the drive now deletes them for good. To keep them, connect the drive (sign in again if needed) and let them upload.\n\nRemove anyway?"),
+            icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) == DialogResult.Yes;
     }
 
     /// <summary>Everything this PC keeps for the drive: profile, icon, and the account's sign-in if unused now.</summary>
@@ -372,7 +409,7 @@ sealed class TrayApp : ApplicationContext
         }
         catch (Exception ex)
         {
-            Ui.Error(L.T($"לא ניתן לבדוק את הכונן כרגע: {ex.Message}", $"Cannot check the drive right now: {ex.Message}"));
+            Ui.Error(L.T($"לא ניתן לבדוק את הכונן כרגע: {Setup.TelegramErrors.Text(ex)}", $"Cannot check the drive right now: {Setup.TelegramErrors.Text(ex)}"));
             return;
         }
         finally { UpdateIcon(); }
@@ -390,7 +427,7 @@ sealed class TrayApp : ApplicationContext
             if (Ui.Ask(L.T($"החשבון שמחובר כאן לא הבעלים של {d.Name} (למשל חשבון גיבוי), ולכן הוא לא יכול למחוק אותו מטלגרם. רק הבעלים יכול.\n\nלהסיר את הכונן רק מהמחשב הזה? הקבצים יישארו בטלגרם.",
                     $"The account connected here does not own {d.Name} (e.g. a backup account), so it cannot delete it from Telegram — only the owner can.\n\nRemove the drive from this PC only? The files stay in Telegram."),
                     icon: MessageBoxIcon.Information, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
-            if (await StopAsync(d, ask: false)) await ForgetLocallyAsync(d);
+            if (await StopAsync(d, ask: false) && ConfirmLosingLocalChanges(d)) await ForgetLocallyAsync(d);
             return;
         }
 
@@ -403,8 +440,11 @@ sealed class TrayApp : ApplicationContext
         catch (Exception ex)
         {
             Log.Error($"deleting {d.Name} failed", ex);
-            Ui.Error(L.T($"המחיקה מטלגרם נכשלה: {ex.Message}\nהכונן נשאר ברשימה, אפשר לנסות שוב.",
-                         $"Deleting from Telegram failed: {ex.Message}\nThe drive stays in the list; you can try again."));
+            var why = ex is UnauthorizedAccessException
+                ? L.T("רק החשבון שבבעלותו הכונן יכול למחוק את הערוצים שלו.", "Only the account that owns the drive can delete its channels.")
+                : Setup.TelegramErrors.Text(ex);
+            Ui.Error(L.T($"המחיקה מטלגרם נכשלה: {why}\nהכונן נשאר ברשימה, אפשר לנסות שוב.",
+                         $"Deleting from Telegram failed: {why}\nThe drive stays in the list; you can try again."));
             return;
         }
         var name = d.Name;
@@ -453,6 +493,8 @@ sealed class TrayApp : ApplicationContext
         if (d.Session is not { } s) return d.Problem is null ? L.T("לא מחובר", "not connected") : d.Problem;
         var st = s.Status;
         if (s.Sync.NeedsUpdate) return L.T("קריאה בלבד: צריך לעדכן את DriveGram", "read-only: DriveGram needs an update");
+        if (s.Sync.HeldBackChanges is > 0 and var held)
+            return L.T($"⚠ {held} שינויים מוחזקים: הכונן נפתח לכתיבה ב־{s.Sync.LeaseHolder}", $"⚠ {held} changes held back: the drive was opened for writing on {s.Sync.LeaseHolder}");
         if (!s.Writable) return L.T($"קריאה בלבד (פתוח לכתיבה ב־{s.Sync.LeaseHolder})", $"read-only (open for writing on {s.Sync.LeaseHolder})");
         if (st.PendingFiles > 0 || st.UploadsInFlight > 0)
             return L.T($"מעלה: {st.PendingFiles} קבצים, {Ui.Size(st.StagedBytes)}", $"uploading: {st.PendingFiles} files, {Ui.Size(st.StagedBytes)}");
@@ -467,14 +509,14 @@ sealed class TrayApp : ApplicationContext
     {
         _menu.RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No;
         _menu.Items.Clear();
-        var title = new ToolStripMenuItem("DriveGram") { Enabled = false, Font = new Font(Ui.Font, FontStyle.Bold) };
+        var title = new ToolStripMenuItem("DriveGram") { Enabled = false, Font = BoldFont };
         _menu.Items.Add(title);
         foreach (var d in _drives)
         {
             var account = d.State.Folder is not null ? L.T("תיקייה מקומית", "local folder") : d.State.Config.AccountName;
             var item = new ToolStripMenuItem($"{d.Name}{(string.IsNullOrEmpty(account) ? "" : $" · {account}")} — {StatusOf(d)}")
             {
-                Image = (d.Busy || d.Starting ? _busy : _idle).ToBitmap(),
+                Image = d.Busy || d.Starting ? _busyBitmap : _idleBitmap,
             };
             bool on = d.Session is not null && !d.Stopping;
             item.DropDownItems.Add(Item(L.T("פתח את הכונן", "Open the drive"), () => OpenDrive(d), on, bold: true));
@@ -520,10 +562,15 @@ sealed class TrayApp : ApplicationContext
         _menu.Items.Add(Item(L.T("יציאה", "Exit"), async () => await QuitAsync(ask: true)));
     }
 
+    static readonly Font BoldFont = new(Ui.Font, FontStyle.Bold);
+    Bitmap? _idleBmp, _busyBmp;
+    Bitmap _idleBitmap => _idleBmp ??= _idle.ToBitmap();
+    Bitmap _busyBitmap => _busyBmp ??= _busy.ToBitmap();
+
     static ToolStripMenuItem Item(string text, Action onClick, bool enabled = true, bool bold = false)
     {
         var i = new ToolStripMenuItem(text) { Enabled = enabled };
-        if (bold) i.Font = new Font(Ui.Font, FontStyle.Bold);
+        if (bold) i.Font = BoldFont;
         i.Click += (_, _) => onClick();
         return i;
     }

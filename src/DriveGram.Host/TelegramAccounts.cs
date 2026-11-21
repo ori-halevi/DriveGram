@@ -134,8 +134,15 @@ public static class TelegramAccounts
             return lease;
         }
 
-        bool existing;
-        lock (Gate) existing = Entries.ContainsKey(target) || File.Exists(target);
+        bool live;
+        lock (Gate) live = Entries.ContainsKey(target);
+        // a file left by a revoked or half-finished sign-in must not beat a fresh, valid one
+        bool existing = live || (File.Exists(target) && SignInWorks(info));
+        if (!existing && File.Exists(target))
+        {
+            try { File.Delete(target); } catch (IOException) { }
+            Log.Info($"the saved sign-in of {info.Name} no longer worked; replaced by the new one");
+        }
         if (existing)
         {
             try { TL.SchemaExtensions.Auth_LogOut(lease.Client).Wait(TimeSpan.FromSeconds(10)); } catch { }
@@ -159,6 +166,27 @@ public static class TelegramAccounts
         SaveInfo(info);
         Log.Info($"account {info.Name} signed in on this PC");
         return lease;
+    }
+
+    /// <summary>Does the account's saved sign-in still work? (Checked on a throw-away client.)</summary>
+    static bool SignInWorks(AccountInfo a)
+    {
+        var probe = AppState.Open("__probe-" + Guid.NewGuid().ToString("N")[..8]);
+        try
+        {
+            probe.Config.AccountKey = a.Key;
+            probe.Config.ApiId = a.ApiId;
+            probe.Config.ApiHash = a.ApiHash;
+            using var client = DriveSession.NewTelegramClient(probe, null, out _);
+            Task.Run(() => TelegramRemote.ResumeAsync(client)).GetAwaiter().GetResult();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Info($"saved sign-in of {a.Name} does not work: {ex.Message}");
+            return false;
+        }
+        finally { probe.Delete(); }
     }
 
     /// <summary>

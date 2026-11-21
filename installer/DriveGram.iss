@@ -41,6 +41,8 @@ hebrew.AutoStart=הפעל את DriveGram אוטומטית עם וינדוס
 hebrew.Desktop=צור קיצור דרך בשולחן העבודה
 hebrew.Launch=הפעל את DriveGram עכשיו
 hebrew.InstallingWinFsp=מתקין את WinFsp (רכיב מערכת שנדרש לכונן)...
+hebrew.StillRunning=DriveGram עדיין פועל. סגור אותו מהאייקון ליד השעון (יציאה) והפעל את ההתקנה שוב.
+english.StillRunning=DriveGram is still running. Close it from its tray icon (Exit) and run setup again.
 hebrew.WinFspFailed=התקנת WinFsp לא הושלמה. הכונן לא יעבוד בלעדיו. אפשר להתקין אותו ידנית מ-https://winfsp.dev/rel
 english.AutoStart=Start DriveGram with Windows
 english.Desktop=Create a desktop shortcut
@@ -104,7 +106,7 @@ function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   StopRunningCopy;
   if CheckForMutexes('DriveGramTrayRunning') then
-    Result := 'DriveGram עדיין פועל. סגור אותו מהאייקון ליד השעון (יציאה) והפעל את ההתקנה שוב.'
+    Result := CustomMessage('StillRunning')
   else
     Result := '';
 end;

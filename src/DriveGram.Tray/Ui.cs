@@ -20,9 +20,12 @@ static class Ui
         f.RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No;
         f.RightToLeftLayout = L.Rtl;
         f.Font = Font;
-        var icon = Path.Combine(AppContext.BaseDirectory, "drivegram.ico");
-        if (File.Exists(icon)) f.Icon = new Icon(icon);
+        if (AppIcon is not null) f.Icon = AppIcon;
     }
+
+    static Icon? _appIcon;
+    static Icon? AppIcon => _appIcon ??= File.Exists(Path.Combine(AppContext.BaseDirectory, "drivegram.ico"))
+        ? new Icon(Path.Combine(AppContext.BaseDirectory, "drivegram.ico")) : null;
 
     static MessageBoxOptions Options => L.Rtl ? MessageBoxOptions.RightAlign | MessageBoxOptions.RtlReading : 0;
 
