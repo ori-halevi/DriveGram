@@ -8,7 +8,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>drivegram-tray</AssemblyName>
     <RootNamespace>DriveGram.Tray</RootNamespace>
-    <Version>0.9.1</Version>
+    <Version>1.0.0</Version>
     <ApplicationIcon>..\..\assets\drivegram.ico</ApplicationIcon>
     <OutputPath>..\..\bin\$(Configuration)\</OutputPath>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>

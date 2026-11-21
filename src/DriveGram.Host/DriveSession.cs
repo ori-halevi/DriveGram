@@ -113,7 +113,7 @@ public sealed class DriveSession : IAsyncDisposable
             "api_hash" => cfg.ApiHash,
             "device_model" => "DriveGram on " + Environment.MachineName,
             "system_version" => Environment.OSVersion.VersionString,
-            "app_version" => "DriveGram 0.9",
+            "app_version" => "DriveGram 1.0",
             "password" => askPassword is null ? throw new NotSignedInException() : askPassword(),
             "verification_code" or "first_name" or "last_name" or "email" or "email_verification_code" =>
                 throw new NotSignedInException(),
