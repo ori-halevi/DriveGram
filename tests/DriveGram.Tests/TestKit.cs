@@ -20,6 +20,7 @@ public sealed class Pc : IAsyncDisposable
         Db = IndexDb.Open(Path.Combine(dir, "index.db"));
         Engine = new ContentEngine(Db, remote, keys, dir, eo ?? TestKit.FastEngine);
         Sync = new SyncService(Db, remote, keys, so ?? new SyncOptions { FlushInterval = TimeSpan.FromMilliseconds(100) });
+        Sync.RecoverChunk = Engine.RecoverChunkAsync;
         if (startEngine) Engine.Start();
     }
 

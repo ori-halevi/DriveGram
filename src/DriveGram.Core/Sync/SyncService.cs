@@ -60,7 +60,9 @@ public sealed class SyncOptions
     public TimeSpan SnapshotEvery { get; init; } = TimeSpan.FromHours(24);
     public TimeSpan TrashRetention { get; init; } = TimeSpan.FromDays(30);
     /// <summary>Unreferenced chunks are deleted only after this (a resumed upload dedups against them).</summary>
-    public TimeSpan GarbageGrace { get; init; } = TimeSpan.FromDays(7);
+    // long: a PC away (offline, switched off) with an edit not sent yet may still point at such a chunk;
+    // Telegram's storage is free, so keeping old chunks a few months costs nothing
+    public TimeSpan GarbageGrace { get; init; } = TimeSpan.FromDays(90);
     public TimeSpan GcEvery { get; init; } = TimeSpan.FromHours(6);
     public string DeviceName { get; init; } = Environment.MachineName;
 }
@@ -91,6 +93,15 @@ public sealed partial class SyncService : IAsyncDisposable
     public bool NeedsUpdate { get; private set; }
     /// <summary>False while the content engine is uploading (set by the host); garbage collection waits.</summary>
     public Func<bool>? CanCollectGarbage { get; set; }
+
+    /// <summary>Uploads a deleted chunk again from this PC's copy (or zeros: Lost). Set by the drive.</summary>
+    public Func<ChunkRef, CancellationToken, Task<(ChunkRef Ref, bool Lost)>>? RecoverChunk { get; set; }
+
+    /// <summary>Added to the name of a file whose held-back version could not be completed.</summary>
+    public string IncompleteSuffix { get; set; } = " (incomplete)";
+
+    /// <summary>A held-back version of a file could not be completed (parts were deleted meanwhile).</summary>
+    public event Action<string>? FileIncomplete;
     public string? LeaseHolder { get; private set; }
     /// <summary>Was this device id this very PC (an earlier profile of the same drive, since removed)?</summary>
     public Func<string, bool>? IsFormerSelf { get; set; }
@@ -592,6 +603,13 @@ public sealed partial class SyncService : IAsyncDisposable
                 _db.Applied = item.Id;
             }
             if (!stopped && replaying) _db.SetMeta("replay", null); // the whole journal is applied in order
+            if (!stopped)
+            {
+                long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                if (!long.TryParse(_db.GetMeta("caught_up_at"), out var last) || nowMs - last > CheckAfter.TotalMilliseconds)
+                    _db.SetMeta("verify_outbox", "1");
+                _db.SetMeta("caught_up_at", nowMs.ToString());
+            }
             if (applied > 0) Log.Info($"applied {applied} ops from other PCs");
             if (_db.GetMeta("rebase") is not null)
             {
@@ -723,6 +741,7 @@ public sealed partial class SyncService : IAsyncDisposable
                     (seqs, payload) = (inflight.Seqs, inflight.Payload);
                 else
                 {
+                    await CheckHeldBackContentAsync(ct);
                     var held = _db.UncommittedNewFiles();
                     var batch = _db.PeekOutbox(5000).Where(b => !held.Contains(b.Op.Id)).Take(500).ToList();
                     if (batch.Count == 0) { _db.SetMeta("inflight", null); return; }
@@ -755,6 +774,65 @@ public sealed partial class SyncService : IAsyncDisposable
         }
         catch (LeaseLostException) { /* outbox kept; reported via HeldBackChanges */ }
         finally { _io.Release(); }
+    }
+
+    /// <summary>Changes that waited longer than this (or a PC away longer) are checked before sending.</summary>
+    static readonly TimeSpan CheckAfter = TimeSpan.FromDays(1);
+
+    /// <summary>
+    /// A change that waited long on this PC (offline, or another PC held the drive) may point at chunks the
+    /// writing PC has deleted from Telegram meanwhile (nothing there used them any more). Sent like that,
+    /// the file would be broken on every PC. Before sending: ask Telegram which chunks still exist, upload
+    /// the missing ones again from this PC's copy, and where no copy exists keep the file under a clearly
+    /// marked name (zeros in the missing parts) instead of a broken file under its real name.
+    /// </summary>
+    async Task CheckHeldBackContentAsync(CancellationToken ct)
+    {
+        if (RecoverChunk is null) return;
+        bool all = _db.GetMeta("verify_outbox") == "1";
+        var old = _db.OutboxContentToCheck(DateTimeOffset.UtcNow.Add(-CheckAfter).ToUnixTimeMilliseconds(), all);
+        if (old.Count > 0)
+        {
+            var missing = await _remote.MissingChunksAsync(old.SelectMany(o => o.Op.Chunks.Select(c => c.M)).Distinct().ToList(), ct);
+            var redone = new Dictionary<int, ChunkRef>();
+            var incomplete = new List<string>();
+            bool changed = false;
+            foreach (var (seq, op) in old)
+            {
+                if (!op.Chunks.Any(c => missing.Contains(c.M))) continue;
+                var chunks = op.Chunks.ToArray();
+                bool lost = false;
+                for (int i = 0; i < chunks.Length; i++)
+                {
+                    if (!missing.Contains(chunks[i].M)) continue;
+                    if (!redone.TryGetValue(chunks[i].M, out var r))
+                    {
+                        var (again, gone) = await RecoverChunk(chunks[i], ct);
+                        r = again;
+                        if (gone) lost = true;
+                        else redone[chunks[i].M] = r;
+                    }
+                    chunks[i] = r;
+                }
+                _db.ReplaceOutboxOp(seq, op with { Chunks = chunks });
+                changed = true;
+                if (lost) incomplete.Add(op.Id);
+                Log.Warn($"a held-back version of {op.Id} pointed at {op.Chunks.Count(c => missing.Contains(c.M))} chunks deleted meanwhile; " +
+                         (lost ? "some had no copy here (zeros)" : "uploaded again from this PC"));
+            }
+            if (changed) _db.ReapplyOutbox(); // this PC's index follows the corrected changes
+            foreach (var id in incomplete.Distinct())
+            {
+                if (_db.Get(id) is not { Trashed: 0 } n) continue;
+                var stem = Path.GetFileNameWithoutExtension(n.Name);
+                var name = _db.UniqueName(n.Parent ?? IndexDb.RootId, $"{stem}{IncompleteSuffix}{Path.GetExtension(n.Name)}", n.Id);
+                _db.ApplyLocal(new UpsertOp(n.Id, n.Parent ?? IndexDb.RootId, name, false, n.Attrs, n.Ctime, n.Mtime));
+                Log.Error($"'{n.Name}': parts of the version saved on this PC were deleted while it waited; kept as '{name}'");
+                try { FileIncomplete?.Invoke(name); } catch (Exception ex) { Log.Warn($"incomplete-file listener failed: {ex.Message}"); }
+            }
+            _db.TouchOutbox(old.Select(o => o.Seq));
+        }
+        if (all) _db.SetMeta("verify_outbox", null);
     }
 
     public async Task SnapshotAsync(CancellationToken ct)

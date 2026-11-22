@@ -32,6 +32,10 @@ public interface IRemote : IAsyncDisposable
     /// <summary>When the control record was last changed, by the SERVER's clock (from the last read); null if unknown.</summary>
     DateTime? ControlEditedAtUtc => null;
 
+    /// <summary>Which of these chunk messages no longer exist in the data channel.</summary>
+    Task<IReadOnlySet<int>> MissingChunksAsync(IReadOnlyList<int> msgs, CancellationToken ct) =>
+        Task.FromResult<IReadOnlySet<int>>(new HashSet<int>());
+
     /// <summary>Someone pinned another message as the drive's record (detected on a periodic re-check).</summary>
     bool ControlMoved => false;
 

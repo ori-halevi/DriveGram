@@ -776,6 +776,32 @@ public sealed class ContentEngine : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// A chunk a held-back change points at was deleted from Telegram meanwhile: upload it again from
+    /// this PC's copy (as a NEW message, no dedup). No copy here: zeros of the same size, Lost = true.
+    /// </summary>
+    public async Task<(ChunkRef Ref, bool Lost)> RecoverChunkAsync(ChunkRef c, CancellationToken ct)
+    {
+        byte[]? data = null;
+        if (TrustedPlain(c.C, c.H) is { } path)
+        {
+            try { data = await File.ReadAllBytesAsync(path, ct); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { data = null; }
+            if (data is not null && data.Length != c.Z) data = null;
+        }
+        bool lost = data is null;
+        data ??= new byte[c.Z];
+        var hash = SHA256.HashData(data);
+        var hashHex = Convert.ToHexStringLower(hash);
+        var chunkId = _keys.ChunkId(hash);
+        var payload = ChunkCipher.Encrypt(data, _keys.ChunkKey(hash), Convert.FromHexString(chunkId), _keys.FrameSize);
+        int msg = await Retry.ForeverAsync(() => _remote.UploadChunkAsync($"{chunkId[..32]}.bin", payload, ct),
+            $"upload chunk {chunkId[..12]} again", ct);
+        _db.AddChunk(new StoredChunk(chunkId, msg, data.Length, hashHex));
+        Interlocked.Add(ref _bytesUploaded, data.Length);
+        return (new ChunkRef(chunkId, msg, data.Length, hashHex), lost);
+    }
+
     /// <summary>Upload one S/Z piece and mark it U, unless it was modified meanwhile.</summary>
     async Task<bool> UploadPieceAsync(string id, int idx, CancellationToken ct)
     {

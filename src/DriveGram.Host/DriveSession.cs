@@ -249,6 +249,8 @@ public sealed class DriveSession : IAsyncDisposable
             sync.IsFormerSelf = dev => FormerDevices.Has(driveId, dev);
             var engineRef = engine;
             sync.CanCollectGarbage = () => engineRef.Idle;
+            sync.RecoverChunk = engineRef.RecoverChunkAsync;
+            sync.IncompleteSuffix = L.T(" (לא שלם)", " (incomplete)");
             sync.WritableChanged += () => Log.Warn(sync.Writable ? "the drive is now writable" : $"the drive is now READ-ONLY (open on {sync.LeaseHolder})");
             engine.RepairPending();
             await sync.StartAsync(takeOver, ct);

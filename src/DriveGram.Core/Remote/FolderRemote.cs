@@ -52,6 +52,9 @@ public sealed class FolderRemote : IRemote
         return id;
     }
 
+    public Task<IReadOnlySet<int>> MissingChunksAsync(IReadOnlyList<int> msgs, CancellationToken ct) =>
+        Task.FromResult<IReadOnlySet<int>>(msgs.Where(m => !File.Exists(Path.Combine(_data, $"{m}.bin"))).ToHashSet());
+
     public async Task<byte[]> ReadWindowAsync(int msg, int window, CancellationToken ct)
     {
         await Delay(ct);

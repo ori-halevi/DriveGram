@@ -83,6 +83,9 @@ public sealed class IndexDb : IDisposable
         // migration (0.5 → 0.6): which chunk rows this PC uploaded itself
         if (Scalar("SELECT 1 FROM pragma_table_info('chunks') WHERE name='local'") is null)
             Exec("ALTER TABLE chunks ADD COLUMN local INTEGER NOT NULL DEFAULT 0");
+        // migration (1.0.3): when each held-back change was made (0 = before this version: checked once)
+        if (Scalar("SELECT 1 FROM pragma_table_info('outbox') WHERE name='at'") is null)
+            Exec("ALTER TABLE outbox ADD COLUMN at INTEGER NOT NULL DEFAULT 0");
         var dev = GetMeta("device");
         if (dev is null)
         {
@@ -316,7 +319,7 @@ public sealed class IndexDb : IDisposable
             var op = original;
             if (original is PurgeOp { Ids: null } pg && SubtreeIds(pg.Id) is { Length: <= 50_000 } ids) op = pg with { Ids = ids };
             Apply(op, remote: false);
-            Exec("INSERT INTO outbox(op) VALUES(@o)", ("@o", OpJson.Serialize(op)));
+            Exec("INSERT INTO outbox(op,at) VALUES(@o,@t)", ("@o", OpJson.Serialize(op)), ("@t", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
         }
     });
 
@@ -496,7 +499,7 @@ public sealed class IndexDb : IDisposable
     }
 
     /// <summary>A name in `parent` that no other live node uses ("a.txt" -> "a (2).txt").</summary>
-    string UniqueName(string parent, string name, string selfId)
+    public string UniqueName(string parent, string name, string selfId)
     {
         var other = Child(parent, name);
         if (other is null || other.Id == selfId) return name;
@@ -683,6 +686,22 @@ public sealed class IndexDb : IDisposable
     // ── outbox ───────────────────────────────────────────────────────────────
     public List<(long Seq, Op Op)> PeekOutbox(int max) => Query(
         "SELECT seq, op FROM outbox ORDER BY seq LIMIT @m", r => (r.GetInt64(0), OpJson.Deserialize(r.GetString(1))), ("@m", max));
+
+    /// <summary>Held-back content changes to check against Telegram: made before `olderThan` (ms), or all.</summary>
+    public List<(long Seq, ContentOp Op)> OutboxContentToCheck(long olderThan, bool all) => Query(
+        "SELECT seq, op FROM outbox WHERE op LIKE '{\"t\":\"ct\",%' AND (@all=1 OR at < @cut) ORDER BY seq",
+        r => (r.GetInt64(0), (ContentOp)OpJson.Deserialize(r.GetString(1))), ("@all", all ? 1 : 0), ("@cut", olderThan));
+
+    /// <summary>A held-back change corrected in place (same position in the queue), counted as checked now.</summary>
+    public void ReplaceOutboxOp(long seq, Op op) =>
+        Exec("UPDATE outbox SET op=@o, at=@t WHERE seq=@s", ("@s", seq), ("@o", OpJson.Serialize(op)), ("@t", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
+
+    /// <summary>Held-back changes just checked: checked again only if they wait another day.</summary>
+    public void TouchOutbox(IEnumerable<long> seqs) => InTransaction(() =>
+    {
+        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        foreach (var s in seqs) Exec("UPDATE outbox SET at=@t WHERE seq=@s", ("@s", s), ("@t", now));
+    });
 
     public void DeleteOutboxUpTo(long seq) => Exec("DELETE FROM outbox WHERE seq<=@s", ("@s", seq));
 

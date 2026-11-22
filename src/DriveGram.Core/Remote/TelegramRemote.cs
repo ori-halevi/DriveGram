@@ -527,6 +527,24 @@ public sealed class TelegramRemote : IRemote
         throw new FileNotFoundException($"Telegram message {msg} in '{channel.title}' is missing or has no file.");
     }
 
+    public async Task<IReadOnlySet<int>> MissingChunksAsync(IReadOnlyList<int> msgs, CancellationToken ct)
+    {
+        var missing = new HashSet<int>();
+        foreach (var batch in msgs.Distinct().Chunk(100))
+        {
+            var r = await _ctl.RunAsync(() => _client.Channels_GetMessages(_data, batch.Select(m => (InputMessage)new InputMessageID { id = m }).ToArray()), ct, ReadTimeout);
+            var found = new HashSet<int>();
+            foreach (var m in r.Messages)
+                if (m is Message { media: MessageMediaDocument { document: Document doc } } msg)
+                {
+                    found.Add(msg.id);
+                    _docs[msg.id] = doc;
+                }
+            foreach (var m in batch) if (!found.Contains(m)) missing.Add(m);
+        }
+        return missing;
+    }
+
     public async Task<byte[]> ReadWindowAsync(int msg, int window, CancellationToken ct)
     {
         for (int attempt = 0; ; attempt++)
