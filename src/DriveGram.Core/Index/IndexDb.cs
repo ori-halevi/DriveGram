@@ -153,11 +153,12 @@ public sealed class IndexDb : IDisposable
         var c = new SqliteConnection(new SqliteConnectionStringBuilder
             { DataSource = path, Mode = SqliteOpenMode.ReadWriteCreate, Pooling = false }.ToString());
         c.Open();
-        return new IndexDb(c);
+        return new IndexDb(c) { _path = path };
     }
 
     public void Dispose()
     {
+        lock (_ckptGate) _ckpt?.Dispose();
         lock (_gate) _c.Dispose();
     }
 
@@ -308,7 +309,8 @@ public sealed class IndexDb : IDisposable
     {
         foreach (var original in ops)
         {
-            var op = original is PurgeOp { Ids: null } pg ? pg with { Ids = SubtreeIds(pg.Id) } : original;
+            var op = original;
+            if (original is PurgeOp { Ids: null } pg && SubtreeIds(pg.Id) is { Length: <= 50_000 } ids) op = pg with { Ids = ids };
             Apply(op, remote: false);
             Exec("INSERT INTO outbox(op) VALUES(@o)", ("@o", OpJson.Serialize(op)));
         }
@@ -408,18 +410,28 @@ public sealed class IndexDb : IDisposable
                 {
                     // another PC deleted for good what THIS PC still changes (a file waiting to upload): keep it,
                     // in the root, and tell every PC (the purge then removes everything but it)
-                    foreach (var keep in Query("SELECT p.node FROM pending p WHERE p.node IN (SELECT id FROM temp.purge_ids)", x => x.GetString(0)))
+                    foreach (var keep in Query("SELECT p.node FROM pending p WHERE p.node IN (SELECT id FROM temp.purge_ids) ORDER BY p.node", x => x.GetString(0)))
                     {
                         Exec("DELETE FROM temp.purge_ids WHERE id=@i", ("@i", keep));
                         if (Get(keep) is { } kn)
                         {
-                            ApplyLocal([new RestoreOp(kn.Id, RootId, kn.Name)]);
+                            var chunks = CommittedChunks(kn.Id);
+                            var recreate = new List<Op>
+                            {
+                                new UpsertOp(kn.Id, RootId, kn.Name, kn.Dir, kn.Attrs, kn.Ctime, kn.Mtime),
+                                new RestoreOp(kn.Id, RootId, kn.Name),
+                            };
+                            if (chunks.Count > 0)
+                                recreate.Add(new ContentOp(kn.Id, chunks.Sum(x => (long)x.Size), kn.Mtime,
+                                    chunks.Select(x => new ChunkRef(x.ChunkId, x.Msg, x.Size, x.Hash)).ToArray()));
+                            ApplyLocal(recreate);
+                            SetLocalSize(kn.Id, kn.Size, kn.Mtime); // its newer local changes still upload
                             Log.Warn($"'{kn.Name}' was deleted for good on another PC while it had changes here: kept, in the root");
                         }
                     }
                 }
                 // anything under a deleted folder that is NOT deleted itself (moved there meanwhile) goes to the root
-                foreach (var orphan in Query($"SELECT {NodeCols} FROM nodes WHERE parent IN (SELECT id FROM temp.purge_ids) AND id NOT IN (SELECT id FROM temp.purge_ids)", MapNode))
+                foreach (var orphan in Query($"SELECT {NodeCols} FROM nodes WHERE parent IN (SELECT id FROM temp.purge_ids) AND id NOT IN (SELECT id FROM temp.purge_ids) ORDER BY id", MapNode))
                 {
                     var oname = UniqueName(RootId, orphan.Name, orphan.Id);
                     Exec("UPDATE nodes SET parent=@p, name=@n, nkey=@k WHERE id=@id",
@@ -576,7 +588,27 @@ public sealed class IndexDb : IDisposable
     /// <summary>Everything committed so far is on disk (the WAL is synced into the database file).</summary>
     public void Durable()
     {
-        lock (_gate) Exec("PRAGMA wal_checkpoint(FULL);");
+        if (_path is null) { lock (_gate) Exec("PRAGMA wal_checkpoint(FULL);"); return; }
+        lock (_ckptGate)
+        {
+            // WAL lets another connection checkpoint while this one keeps serving the drive
+            _ckpt ??= OpenSide(_path);
+            using var cmd = _ckpt.CreateCommand();
+            cmd.CommandText = "PRAGMA wal_checkpoint(FULL);";
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    string? _path;
+    SqliteConnection? _ckpt;
+    readonly object _ckptGate = new();
+
+    static SqliteConnection OpenSide(string path)
+    {
+        var c = new SqliteConnection(new SqliteConnectionStringBuilder
+            { DataSource = path, Mode = SqliteOpenMode.ReadWrite, Pooling = false }.ToString());
+        c.Open();
+        return c;
     }
 
     public void Maintain()

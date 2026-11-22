@@ -38,7 +38,8 @@ public sealed record RestoreOp(string Id, string Parent, string Name) : Op(Id);
 /// Null in older entries: the whole subtree, as before.</param>
 public sealed record PurgeOp(string Id, string[]? Ids = null) : Op(Id);
 
-public sealed record JournalEntry(int V, string Dev, long Ts, Op[] Ops);
+/// <param name="Ctl">1 (1.0.3+): the writer signs the control record — every reader then refuses an unsigned one.</param>
+public sealed record JournalEntry(int V, string Dev, long Ts, Op[] Ops, int Ctl = 0);
 
 public static class OpJson
 {

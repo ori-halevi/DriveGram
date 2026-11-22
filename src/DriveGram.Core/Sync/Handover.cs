@@ -69,7 +69,7 @@ public sealed partial class SyncService
     {
         var mine = new HandoverRequest(_db.DeviceId, _o.DeviceName, NowUnix, Updated: NowUnix, Id: Guid.NewGuid().ToString("N"));
         string? busy = null;
-        await UpdateControlAsync(c =>
+        await UpdateControlAsync(asHolder: false, ct: ct, change: c =>
         {
             if (c.Handover is { } other && other.Dev != _db.DeviceId && other.State is "asked" or "seen" or "finishing"
                 && NowUnix - Math.Max(other.At, other.Updated) < HandoverStall.TotalSeconds)
@@ -79,7 +79,7 @@ public sealed partial class SyncService
             }
             busy = null;
             return c with { Handover = mine };
-        }, ct);
+        });
         if (busy is not null) throw new HandoverBusyException(busy);
         Log.Info("handover: asked for the drive");
         return mine;
@@ -89,12 +89,12 @@ public sealed partial class SyncService
     public async Task<(HandoverRequest? Request, LeaseInfo? Lease)> HandoverStatusAsync(HandoverRequest mine, CancellationToken ct)
     {
         var c = (await ReadTrustedAsync(ct))!;
-        if (!ControlTrusted) return (null, null); // nothing in it is believed
+        if (!ControlTrusted) throw new ControlNotTrustedException(); // nothing in it is believed: say so
         if (c.Lease?.Dev == _db.DeviceId) return (c.Handover, c.Lease);
         if (c.Handover?.Id != mine.Id)
         {
             // a rewrite by the other PC that read the record just before our request: ask again (same request)
-            c = await UpdateControlAsync(x => x.Handover is null || x.Handover.State is "done" or "refused" ? x with { Handover = mine } : x, ct);
+            c = await UpdateControlAsync(x => x.Handover is null || x.Handover.State is "done" or "refused" ? x with { Handover = mine } : x, ct, asHolder: false);
         }
         return (c.Handover, c.Lease);
     }
@@ -111,7 +111,7 @@ public sealed partial class SyncService
     }
 
     public async Task CancelHandoverAsync(HandoverRequest mine, CancellationToken ct) =>
-        await UpdateControlAsync(c => c.Handover?.Id == mine.Id ? c with { Handover = null } : c, ct);
+        await UpdateControlAsync(c => c.Handover?.Id == mine.Id ? c with { Handover = null } : c, ct, asHolder: false);
 
     // ── on the PC that writes ────────────────────────────────────────────────
     public async Task RefuseHandoverAsync(HandoverRequest r, CancellationToken ct)

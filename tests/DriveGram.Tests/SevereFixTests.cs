@@ -158,4 +158,24 @@ public class SevereFixTests
         Assert.True(a.Db.IsPending(doc));                        // and still waiting to upload
         a.Engine.Closed(doc, true);
     }
+
+    [Fact]
+    public async Task AskingAnOlderVersionForTheDriveLeavesItsRecordUnsigned()
+    {
+        await using var kit = await TestKit.CreateAsync();
+        // a record as 1.0.2 writes it (no signature), held by a PC still running 1.0.2
+        var ctrl = (await SyncService.ReadControlAsync(kit.Remote, default))!;
+        var legacy = ctrl with { Mac = null, MinWriter = 2,
+            Lease = new LeaseInfo("old-pc", "OLD-PC", DateTimeOffset.UtcNow.AddMinutes(15).ToUnixTimeSeconds()) };
+        await kit.Remote.WriteControlAsync(legacy.ToJson(), default);
+
+        var b = kit.Pc("b", so: Fast("PC-B"));
+        await b.Sync.StartAsync(false, default);
+        Assert.True(b.Sync.ControlTrusted);                       // an unsigned record from before signing: accepted
+        await b.Sync.RequestHandoverAsync(default);              // B (not the holder) asks for the drive
+        var after = (await SyncService.ReadControlAsync(kit.Remote, default))!;
+        Assert.Null(after.Mac);                                  // still unsigned: the old holder's rewrites stay valid
+        Assert.Equal(2, after.MinWriter);
+        Assert.NotNull(after.Handover);
+    }
 }

@@ -61,8 +61,8 @@ public sealed class TelegramRemote : IRemote
         if (client.TLConfig?.date is { } serverDate && serverDate.Year > 2000)
         {
             var off = serverDate.ToUniversalTime() - DateTime.UtcNow;
-            // a config fetched long ago only makes the offset smaller (safe side: less eager to take over)
-            _serverOffset = off > TimeSpan.Zero ? off : TimeSpan.Zero;
+            // a config fetched long ago only makes this more negative: the safe side (less eager to take over)
+            _serverOffset = off;
             if (Math.Abs(off.TotalMinutes) > 2) Log.Warn($"this PC's clock differs from Telegram's by {off.TotalMinutes:0} minutes");
         }
         _ctl.SignedOut += OnSignedOut;

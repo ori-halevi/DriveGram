@@ -134,7 +134,10 @@ public sealed partial class SyncService : IAsyncDisposable
 
     /// <summary>Read-modify-write of the control record, serialized within this PC (the lease heartbeat
     /// rewrites it every minute: an unserialized edit could be overwritten by a stale copy).</summary>
-    async Task<ControlState> UpdateControlAsync(Func<ControlState, ControlState> change, CancellationToken ct)
+    /// <param name="asHolder">false for a PC that does not hold the lease (asking for the drive): it never
+    /// starts signing an unsigned record — an older-version holder rewrites the record every minute and would
+    /// break a signature it does not know about.</param>
+    async Task<ControlState> UpdateControlAsync(Func<ControlState, ControlState> change, CancellationToken ct, bool asHolder = true)
     {
         await _ctrlLock.WaitAsync(ct);
         try
@@ -142,8 +145,15 @@ public sealed partial class SyncService : IAsyncDisposable
             var current = (await ReadTrustedAsync(ct))!;
             if (!ControlTrusted)
                 throw new ControlNotTrustedException();
+            if (current.MinWriter > StorageFormat.Current)
+                throw new NeedsUpdateException($"writing needs format {current.MinWriter}");
             var next = change(current);
             if (ReferenceEquals(next, current)) return current;
+            if (!asHolder && current.Mac is null)
+            {
+                await _remote.WriteControlAsync((next with { Mac = null }).ToJson(), ct); // stays as it was: unsigned
+                return next;
+            }
             // signed, and from now on only versions that sign may write it (older ones would drop the mac)
             next = (next with { MinWriter = Math.Max(next.MinWriter, StorageFormat.Current) }).Signed(_keys.ControlKey);
             await _remote.WriteControlAsync(next.ToJson(), ct);
@@ -253,6 +263,7 @@ public sealed partial class SyncService : IAsyncDisposable
             }, ct);
         }
         catch (LeaseLostException) { SetWritable(false, null); throw; }
+        catch (Exception ex) when (ex is ControlNotTrustedException or NeedsUpdateException) { throw; }
         catch (Exception ex) { Log.Warn($"vault change: write reported {ex.Message}; checking what was stored"); }
         var stored = await ReadTrustedAsync(ct);
         if (stored is null || !applied(stored.Vault))
@@ -275,6 +286,7 @@ public sealed partial class SyncService : IAsyncDisposable
     public async Task<DriveIdentity?> EnsureIdentityAsync(Func<DriveIdentity> make, CancellationToken ct)
     {
         var ctrl = (await ReadTrustedAsync(ct))!;
+        if (!ControlTrusted) return null; // an identity nobody can vouch for is never adopted
         if (ctrl.Drive is not null || !Writable) return ctrl.Drive;
         var id = make();
         ctrl = await UpdateControlAsync(c => c.Drive is null ? c with { Drive = id } : c, ct);
@@ -439,19 +451,37 @@ public sealed partial class SyncService : IAsyncDisposable
                 {
                     // a newer version that adds record kinds also raises minReader in the (signed) record, which
                     // stops this version at start; an unknown name alone (anyone can post one) is just skipped
-                    if (!item.Name.StartsWith("s-")) Log.Warn($"journal #{item.Id}: '{item.Name}' is not a record this version reads; ignored");
+                    if (!item.Name.StartsWith("s-"))
+                    {
+                        if (await NewerFormatRequiredAsync(ct)) { MarkNeedsUpdate($"journal #{item.Id}: '{item.Name}'"); break; }
+                        Log.Warn($"journal #{item.Id}: '{item.Name}' is not a record this version reads; ignored");
+                    }
                 }
                 else
                 {
                     (JournalEntry Entry, string Nonce)? read;
                     try { read = await ReadEntryAsync(item, ct); }
+                    catch (IncompleteDownloadException ex)
+                    {
+                        // stop here for now (nothing skipped); only an entry that never downloads whole is given up
+                        int n = _incomplete[item.Id] = _incomplete.GetValueOrDefault(item.Id) + 1;
+                        if (n < 3) { Log.Warn(ex.Message); break; }
+                        Log.Error($"journal #{item.Id} never downloaded completely ({n} tries); skipped");
+                        _db.Applied = item.Id;
+                        continue;
+                    }
                     catch (Exception ex) when (ex is System.Text.Json.JsonException or NotSupportedException or NewerRecordException)
                     {
                         // an op type / shape from a newer version: stop HERE (skip nothing, advance nothing)
                         MarkNeedsUpdate($"journal #{item.Id}: {ex.Message}");
                         break;
                     }
-                    if (read is null) { _db.Applied = item.Id; continue; } // not a DriveGram record: logged, skipped
+                    if (read is null)
+                    {
+                        if (await NewerFormatRequiredAsync(ct)) { MarkNeedsUpdate($"journal #{item.Id}"); break; }
+                        _db.Applied = item.Id; // not a DriveGram record: logged, skipped
+                        continue;
+                    }
                     if (_db.SeenEntry(read.Value.Nonce))
                     {
                         // the very same entry again (a duplicate after a lost reply, or a re-post): never twice
@@ -487,6 +517,7 @@ public sealed partial class SyncService : IAsyncDisposable
                             foreach (var op in entry.Ops) _db.ApplyRemote(op);
                             _db.Applied = item.Id;
                             _db.MarkSeen(nonce);
+                            if (entry.Ctl == 1) _db.SetMeta("control_mac", "1"); // an unsigned record is never accepted again
                             // changes held back on this PC will be journaled AFTER this entry: mark that the
                             // local index must replay them on top of it (same order as every other PC)
                             if (_db.OutboxCount() > 0) _db.SetMeta("rebase", "1");
@@ -513,6 +544,16 @@ public sealed partial class SyncService : IAsyncDisposable
 
     const long MaxEntryBytes = 64L << 20;
 
+    sealed class IncompleteDownloadException(string m) : IOException(m);
+    readonly Dictionary<int, int> _incomplete = new();
+
+    /// <summary>Does the SIGNED record say a newer DriveGram is needed (then unknown records are its)?</summary>
+    async Task<bool> NewerFormatRequiredAsync(CancellationToken ct)
+    {
+        var c = await ReadTrustedAsync(ct);
+        return ControlTrusted && c is not null && c.MinReader > StorageFormat.Current;
+    }
+
     sealed class NewerRecordException(string m) : Exception(m);
 
     /// <summary>Download and open one journal entry. Null: not a DriveGram record (someone posted or
@@ -523,7 +564,7 @@ public sealed partial class SyncService : IAsyncDisposable
         {
             var raw = await _remote.ReadJournalAsync(item.Id, ct);
             if (item.Size > 0 && raw.Length != item.Size)
-                throw new IOException($"journal #{item.Id}: incomplete download ({raw.Length} of {item.Size} bytes); trying again later");
+                throw new IncompleteDownloadException($"journal #{item.Id}: incomplete download ({raw.Length} of {item.Size} bytes); trying again later");
             if (raw.Length >= 4 && raw[0] == 'D' && raw[1] == 'G' && raw[2] == 'E' && raw[3] != '1')
             {
                 Log.Warn($"journal #{item.Id}: envelope version {(char)raw[3]} is unknown here; ignored");
@@ -596,7 +637,7 @@ public sealed partial class SyncService : IAsyncDisposable
                 var held = _db.UncommittedNewFiles();
                 var batch = _db.PeekOutbox(5000).Where(b => !held.Contains(b.Op.Id)).Take(500).ToList();
                 if (batch.Count == 0) return;
-                var entry = new JournalEntry(1, _db.DeviceId, NowUnix, batch.Select(b => b.Op).ToArray());
+                var entry = new JournalEntry(1, _db.DeviceId, NowUnix, batch.Select(b => b.Op).ToArray(), Ctl: 1);
                 var payload = Envelope.Seal(_keys.JournalKey, OpJson.SerializeEntry(entry));
                 // Checked before EVERY attempt: after a long outage another PC may have taken the lease,
                 // and appending then would put two writers' changes into the journal (diverged indexes).

@@ -231,6 +231,12 @@ public sealed class DriveSession : IAsyncDisposable
 
             db = IndexDb.Open(state.IndexPath);
             if (MachineId() is { } machine) db.BindToMachine(machine);
+            var layout = $"{keys.ChunkSize}/{keys.FrameSize}";
+            if (db.GetMeta("layout") is { } knownLayout && knownLayout != layout)
+                throw new InvalidDataException(L.T(
+                    "רשומת הכונן בטלגרם מראה מבנה אחר מזה שהמחשב הזה מכיר (ייתכן שמישהו שינה אותה בלי הסיסמה). הכונן לא נפתח, כדי לא לפגוע בקבצים.",
+                    "The drive's record in Telegram shows a different layout than this PC knows (someone may have changed it without the password). The drive was not opened, to protect the files."));
+            db.SetMeta("layout", layout);
             var cfg = state.Config;
             engine = new ContentEngine(db, remote, keys, state.Dir, new EngineOptions
             {
