@@ -166,7 +166,7 @@ sealed class SetupWizard : Form
     public SetupWizard(AppState state, bool isNew)
     {
         _ctx = new SetupContext(state, isNew);
-        Text = isNew ? L.T("DriveGram – כונן חדש", "DriveGram – new drive") : $"DriveGram – {state.DisplayName}";
+        Text = isNew ? L.T("DriveGram – כונן חדש", "DriveGram – new drive") : L.T($"DriveGram – הגדרות הכונן {state.DisplayName}", $"DriveGram – drive settings: {state.DisplayName}");
         RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No;
         RightToLeftLayout = L.Rtl;
         Font = Theme.Body;
@@ -178,9 +178,11 @@ sealed class SetupWizard : Form
         var icon = Path.Combine(AppContext.BaseDirectory, "drivegram.ico");
         if (File.Exists(icon)) Icon = new Icon(icon);
 
-        _pages = _ctx.UsesTelegram
+        List<WizardPage> pages = _ctx.UsesTelegram
             ? [new WelcomePage(_ctx), new ApiPage(_ctx), new LoginPage(_ctx), new DrivePage(_ctx), new FinishPage(_ctx)]
             : [new WelcomePage(_ctx), new DrivePage(_ctx), new FinishPage(_ctx)];
+        if (!isNew) pages.RemoveAt(0); // changing a drive's settings: no welcome tour
+        _pages = pages;
         foreach (var p in _pages) p.StateChanged += UpdateButtons;
 
         // header: logo on the reading-start side, step counter on the other

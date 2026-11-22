@@ -632,7 +632,7 @@ sealed class DrivePage : WizardPage
     readonly CheckBox _saved = new() { Text = L.T("שמרתי את הסיסמה במקום בטוח", "I saved the password somewhere safe"), AutoSize = true };
     readonly CheckBox _remember = new()
     {
-        Text = L.T("לזכור את הסיסמה במחשב הזה (נדרש כדי שהכונן יעלה לבד עם וינדוס)", "Remember the password on this PC (needed for the drive to start with Windows)"),
+        Text = L.T("לזכור את הסיסמה במחשב הזה (נדרש כדי שהכונן ייפתח לבד כשהמחשב נדלק)", "Remember the password on this PC (needed for the drive to start with Windows)"),
         AutoSize = true, Checked = true,
     };
     readonly Label _error = Theme.Label("", Theme.Small, Theme.Error);
@@ -682,7 +682,7 @@ sealed class DrivePage : WizardPage
         _meterText.Margin = new Padding(10, 0, 10, 0);
         _strength.Controls.AddRange([_meter, _meterText]);
         _warning.Controls.Add(Theme.Label(L.T(
-            "⚠  אי אפשר לשחזר את הסיסמה. בלעדיה (ובלי מפתח שחזור) אף אחד, כולל אתה, לא יוכל לקרוא את הקבצים, גם עם גישה מלאה לחשבון הטלגרם. שמור אותה במנהל סיסמאות או רשום אותה. אחרי ההגדרה מומלץ ליצור מפתח שחזור: בתפריט ← \"סיסמה ומפתח שחזור…\".",
+            "⚠  אי אפשר לשחזר את הסיסמה. בלעדיה (ובלי מפתח שחזור) אף אחד, גם לא אתה, יוכל לקרוא את הקבצים, גם עם גישה מלאה לחשבון הטלגרם. שמור אותה במנהל סיסמאות או רשום אותה. אחרי ההגדרה מומלץ ליצור מפתח שחזור: בתפריט ← \"סיסמה ומפתח שחזור…\".",
             "⚠  The password cannot be recovered. Without it (or a recovery key) nobody, including you, can read the files, even with full access to the Telegram account. Keep it in a password manager or write it down. After setup, create a recovery key: menu → \"Password and recovery key…\"."),
             Theme.Small, Theme.Text, 640));
         _name.RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No;
@@ -878,7 +878,7 @@ sealed class DrivePage : WizardPage
             var (score, text, color) = Strength(_pw.Text);
             _meterFill.Width = _pw.Text.Length == 0 ? 0 : _meter.Width * score / 4;
             _meterFill.BackColor = color;
-            _meterText.Text = _pw.Text.Length == 0 ? "" : L.T($"חוזק: {text}", $"Strength: {text}");
+            _meterText.Text = _pw.Text.Length == 0 ? "" : L.T($"הסיסמה {text}", $"Strength: {text}");
             _meterText.ForeColor = color;
             bool match = _pw2.Text.Length == 0 || _pw2.Text == _pw.Text;
             _error.Text = match ? "" : L.T("הסיסמאות לא זהות.", "The passwords do not match.");
@@ -976,7 +976,7 @@ sealed class FinishPage : WizardPage
 {
     readonly ComboBox _letter = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 100, Font = Theme.Body, RightToLeft = RightToLeft.No };
     readonly TextBox _label = Theme.Input(240);
-    readonly CheckBox _autostart = new() { Text = L.T("הפעל את DriveGram אוטומטית כשנכנסים לוינדוס", "Start DriveGram automatically when I sign in to Windows"), AutoSize = true, Checked = true };
+    readonly CheckBox _autostart = new() { Text = L.T("הפעל את DriveGram אוטומטית כשנכנסים לווינדוס", "Start DriveGram automatically when I sign in to Windows"), AutoSize = true, Checked = true };
     readonly Label _summary = Theme.Label("", Theme.Body, Theme.Text, 620);
 
     public override string Title => L.T("כמעט סיימנו", "Almost done");

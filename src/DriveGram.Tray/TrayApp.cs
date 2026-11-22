@@ -161,7 +161,7 @@ sealed class TrayApp : ApplicationContext
             session.Sync.HandoverRequested += r => _ui.Post(async _ => await OnHandoverRequestedAsync(d, session, r), null);
             if (session.Sync.NeedsUpdate)
                 Balloon(L.T("צריך לעדכן את DriveGram", "Update DriveGram"),
-                    L.T($"{session.MountPoint} נכתב בגרסה חדשה יותר. הוא פתוח לקריאה בלבד עד שתתקין את הגרסה החדשה.",
+                    L.T($"{L.Ltr(session.MountPoint)} נכתב בגרסה חדשה יותר. הוא פתוח לקריאה בלבד עד שתתקין את הגרסה החדשה.",
                         $"{session.MountPoint} was written by a newer version. It is read-only until you install it."), ToolTipIcon.Warning);
             d.ToldWritable = session.Writable;
             session.Sync.WritableChanged += () => _ui.Post(async _ =>
@@ -169,7 +169,7 @@ sealed class TrayApp : ApplicationContext
                 await Task.Delay(TimeSpan.FromSeconds(8));
                 if (d.Session is not { } s || s.Sync.HandingOver || s.Writable == d.ToldWritable) return; // flipped back / already told
                 d.ToldWritable = s.Writable;
-                Balloon(s.Writable ? L.T($"{d.Letter} ניתן לכתיבה", $"{d.Letter} is writable") : L.T($"{d.Letter} לקריאה בלבד", $"{d.Letter} is read-only"),
+                Balloon(s.Writable ? L.T($"{L.Ltr(d.Letter)} ניתן לכתיבה", $"{d.Letter} is writable") : L.T($"{L.Ltr(d.Letter)} לקריאה בלבד", $"{d.Letter} is read-only"),
                     s.Writable ? L.T("אפשר לשמור קבצים בכונן.", "Files can be saved on the drive.") : ReadOnlyWhy(s),
                     ToolTipIcon.Warning);
             }, null);
@@ -314,7 +314,7 @@ sealed class TrayApp : ApplicationContext
         if (pending > 0 && ask && waitForUploads)
         {
             var answer = Ui.Ask(L.T(
-                    $"{pending} קבצים ב־{d.Name} עדיין עולים לטלגרם.\n\nכן – לחכות שיסיימו (מומלץ)\nלא – לנתק עכשיו; ההעלאה תמשיך בפעם הבאה שהכונן יעלה במחשב הזה",
+                    $"{pending} קבצים ב־{d.Name} עדיין עולים לטלגרם.\n\nכן – לחכות שיסיימו (מומלץ)\nלא – לנתק עכשיו; ההעלאה תמשיך בפעם הבאה שהכונן יתחבר במחשב הזה",
                     $"{pending} files on {d.Name} are still uploading to Telegram.\n\nYes – wait for them to finish (recommended)\nNo – disconnect now; uploading continues next time the drive starts on this PC"),
                 MessageBoxButtons.YesNoCancel);
             if (answer == DialogResult.Cancel) return false;
@@ -401,11 +401,16 @@ sealed class TrayApp : ApplicationContext
         for (int attempt = 0; attempt < 5; attempt++)
         {
             (string pw, bool remember)? input = null;
-            _ui.Send(_ =>
+            PasswordGate.Wait();
+            try
             {
-                using var f = new PasswordForm(d.Name, error);
-                if (f.ShowDialog() == DialogResult.OK) input = (f.Password, f.Remember);
-            }, null);
+                _ui.Send(_ =>
+                {
+                    using var f = new PasswordForm(d.Name, error);
+                    if (f.ShowDialog() == DialogResult.OK) input = (f.Password, f.Remember);
+                }, null);
+            }
+            finally { PasswordGate.Release(); }
             if (input is null) throw new PasswordNotGivenException();
             try
             {
@@ -452,6 +457,18 @@ sealed class TrayApp : ApplicationContext
         // The drive page saves a new binding (other channels / account) as soon as it is chosen, so a
         // cancel AFTER that point cannot restore the old one: the profile on disk is the truth.
         bool rebound = !isNew && Binding(AppState.Open(state.Id)) != Binding(d!.State);
+        if (result != DialogResult.OK && isNew && AppState.Open(state.Id).Config.Channels is not null)
+        {
+            var keep = Ui.Ask(L.T("הכונן כבר נוצר בטלגרם.\n\nכן – לשמור אותו (הוא יתחבר עם הגדרות ברירת מחדל)\nלא – למחוק אותו מטלגרם",
+                    "The drive was already created in Telegram.\n\nYes – keep it (it connects with default settings)\nNo – delete it from Telegram"),
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (keep == DialogResult.Yes) result = DialogResult.OK;
+            else
+            {
+                try { await DriveDeletion.DeleteStorageAsync(AppState.Open(state.Id)); }
+                catch (Exception ex) { Log.Warn($"tray: deleting a cancelled new drive: {ex.Message}"); }
+            }
+        }
         if (result != DialogResult.OK && !rebound)
         {
             if (isNew) state.Delete();
@@ -630,8 +647,8 @@ sealed class TrayApp : ApplicationContext
     async Task ConfirmRecordAsync(DriveController d, DriveSession s)
     {
         if (Ui.Ask(L.T(
-                "רשומת הכונן בטלגרם שונתה על ידי מישהו בלי סיסמת הכונן (או נערכה ידנית). לכן DriveGram לא סומך על מה שכתוב בה, והכונן לקריאה בלבד.\n\n" +
-                "אם אתה יודע שזה בסדר (למשל אתה ערכת אותה), אפשר לאשר: הסיסמה תאמת אותה מחדש, ופרטים שעלולים להטעות (מי מחזיק את הכונן, בקשות העברה, תמונת המצב) יאופסו. הקבצים לא מושפעים.\n\nאם לא – בדוק מי מנהל את הערוצים (\"גיבוי בחשבון נוסף…\").\n\nלאשר?",
+                "מישהו שינה את פרטי הכונן בטלגרם מחוץ ל־DriveGram (בלי סיסמת הכונן), ולכן הכונן פתוח לקריאה בלבד.\n\n" +
+                "אם אתה יודע שזה בסדר, אשר: הקבצים לא ייפגעו. אם לא, בדוק מי מנהל את הכונן, בתפריט של הכונן ← \"גיבוי בחשבון נוסף…\".\n\nלאשר?",
                 "The drive's record in Telegram was changed by someone without the drive's password (or edited by hand). So DriveGram does not trust what it says, and the drive is read-only.\n\n" +
                 "If you know this is fine (e.g. you edited it), you can confirm: the password re-validates it, and details that could mislead (who holds the drive, handover requests, the snapshot) are reset. Files are not affected.\n\nIf not, check who administers the channels (\"Backup on another account…\").\n\nConfirm?"),
                 icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
@@ -663,6 +680,8 @@ sealed class TrayApp : ApplicationContext
             await MountAsync(d);
         }
     }
+
+    static readonly SemaphoreSlim PasswordGate = new(1, 1);
 
     bool _deleting;
 

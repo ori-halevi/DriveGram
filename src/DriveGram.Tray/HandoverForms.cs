@@ -21,6 +21,9 @@ sealed class HandoverAskForm : Form
     public bool Withdrawn { get; private set; }
 
     readonly Func<Task<bool>> _stillOpen;
+
+    // shown on top of whatever the user is doing, but without taking the keyboard from it
+    protected override bool ShowWithoutActivation => true;
     int _polls;
     bool _polling;
 
@@ -57,19 +60,20 @@ sealed class HandoverAskForm : Form
                 $"⚠  {open} files are open for editing right now. After the handover they cannot be saved here; save and close them first. Changes already saved are not lost: they are sent when the drive comes back to this PC."),
                 Theme.Body, Theme.Error, 560));
         col.Controls.Add(_countdown);
-        var give = Theme.Primary(L.T("העבר את הכונן", "Hand it over"));
-        var refuse = Theme.Secondary(L.T("סרב", "Refuse"));
+        var give = Theme.Secondary(L.T("העבר את הכונן", "Hand it over"));
+        var refuse = Theme.Primary(L.T("השאר את הכונן כאן", "Keep the drive here"));
         give.Click += (_, _) => { Approved = true; Close(); };
         refuse.Click += (_, _) => { Approved = false; Close(); };
         var row = Theme.Row();
         row.Margin = new Padding(0, 12, 0, 0);
-        row.Controls.AddRange([give, refuse]);
+        row.Controls.AddRange([refuse, give]);
+        CancelButton = refuse; // Esc keeps it; Enter never gives it away (focus is not taken from the user's app)
         col.Controls.Add(row);
         Controls.Add(col);
 
         Approved = false; // closing the window = refusing (only silence until the countdown ends = yes)
         _tick.Tick += (_, _) => UpdateCountdown();
-        Shown += (_, _) => { Activate(); UpdateCountdown(); _tick.Start(); };
+        Shown += (_, _) => { UpdateCountdown(); _tick.Start(); };
         FormClosed += (_, _) => _tick.Dispose();
     }
 
@@ -78,7 +82,7 @@ sealed class HandoverAskForm : Form
         int left = (int)Math.Ceiling((_deadline - DateTime.UtcNow).TotalSeconds);
         if (left <= 0) { Approved = true; Close(); return; }
         if (++_polls % 3 == 0 && !_polling) _ = CheckStillOpenAsync();
-        _countdown.Text = L.T($"אם לא תענה, הכונן יעבור בעוד {left} שניות. סגירת החלון = סירוב.", $"Without an answer, the drive moves in {left} seconds. Closing this window = refuse.");
+        _countdown.Text = L.T($"אם לא תענה, הכונן יעבור בעוד {left} שניות. סגירת החלון משאירה את הכונן כאן.", $"Without an answer, the drive moves in {left} seconds. Closing this window keeps the drive here.");
     }
 
     async Task CheckStillOpenAsync()
@@ -111,7 +115,7 @@ sealed class HandoverWaitForm : Form
     readonly CancellationTokenSource _cts = new();
     readonly string _holder;
     HandoverRequest? _mine;
-    bool _finished, _taking;
+    bool _finished, _taking, _refusedShown;
 
     public HandoverWaitForm(DriveSession session)
     {
@@ -138,7 +142,13 @@ sealed class HandoverWaitForm : Form
         col.Controls.Add(row);
         Controls.Add(col);
 
-        _takeNow.Click += async (_, _) => await TakeAsync(force: true);
+        _takeNow.Click += async (_, _) =>
+        {
+            if (_refusedShown && Ui.Ask(L.T($"{_holder} סירב. לקחת את הכונן בכל זאת? מי שעובד שם לא יוכל לשמור שינויים בכונן.",
+                    $"{_holder} refused. Take the drive anyway? Whoever works there will not be able to save changes on the drive."),
+                    icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+            await TakeAsync(force: true);
+        };
         _cancel.Click += (_, _) => Close();
         Shown += async (_, _) => await RunAsync();
         FormClosing += (_, _) =>
@@ -207,6 +217,7 @@ sealed class HandoverWaitForm : Form
                             ? L.T($"{_holder} סירב להעביר את הכונן.", $"{_holder} refused to hand the drive over.")
                             : L.T($"{_holder} לא הצליח להעביר את הכונן (אולי אין לו חיבור).", $"{_holder} could not hand the drive over (perhaps it is offline).");
                         _takeNow.Text = L.T("קח בכל זאת", "Take it anyway");
+                        _refusedShown = true;
                         _cancel.Text = L.T("סגור", "Close");
                         break; // keep watching: the drive may still arrive
                     case "finishing":

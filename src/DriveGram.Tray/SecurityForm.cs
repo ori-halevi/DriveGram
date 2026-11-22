@@ -13,6 +13,7 @@ namespace DriveGram.Tray;
 sealed class SecurityForm : Form
 {
     readonly DriveSession _session;
+    bool _hasKey;
     readonly Label _recoveryState = Theme.Label("", Theme.Body, Theme.Text, 640);
     readonly Button _makeKey = Theme.Primary(L.T("צור מפתח שחזור", "Create a recovery key"));
     readonly FlowLayoutPanel _keyPanel = Theme.Column();
@@ -110,10 +111,10 @@ sealed class SecurityForm : Form
         try
         {
             var ctrl = await Task.Run(() => _session.Sync.ReadControlAsync(default));
-            bool has = ctrl?.Vault.Recovery is not null;
+            bool has = _hasKey = ctrl?.Vault.Recovery is not null;
             _recoveryState.ForeColor = has ? Theme.Success : Color.FromArgb(0xB4, 0x6A, 0x00);
             _recoveryState.Text = has
-                ? L.T("✓  לכונן יש מפתח שחזור. יצירת מפתח חדש מחליפה אותו (מי שראה בעבר את רשומת הכונן ושמר גם את המפתח הישן עדיין יכול לפתוח איתו).", "✓  The drive has a recovery key. Creating a new one replaces it (someone who once saw the drive's record and also kept the old key can still open it).")
+                ? L.T("✓  לכונן יש מפתח שחזור.", "✓  The drive has a recovery key.")
                 : L.T("לכונן עדיין אין מפתח שחזור. מומלץ מאוד ליצור אחד.", "The drive has no recovery key yet. Creating one is strongly recommended.");
             _makeKey.Text = has ? L.T("צור מפתח שחזור חדש", "Create a new recovery key") : L.T("צור מפתח שחזור", "Create a recovery key");
         }
@@ -128,6 +129,9 @@ sealed class SecurityForm : Form
     async Task MakeKeyAsync()
     {
         if (_keyPanel.Visible && !_keySaved.Checked) return;
+        if (_hasKey && Ui.Ask(L.T("לכונן כבר יש מפתח שחזור. מפתח חדש יחליף אותו, והמפתח הקודם שרשמת יפסיק לעבוד. להמשיך?",
+                "The drive already has a recovery key. A new one replaces it, and the old key you saved stops working. Continue?"),
+                icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
         _makeKey.Enabled = false;
         try
         {

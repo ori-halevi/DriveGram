@@ -6,13 +6,13 @@ static class Ui
 {
     public static readonly Font Font = new("Segoe UI", 10f);
 
-    public static string Size(long bytes) => bytes switch
+    public static string Size(long bytes) => L.Ltr(bytes switch
     {
         < 1024 => $"{bytes} B",
         < 1024 * 1024 => $"{bytes / 1024.0:0.#} KB",
         < 1024L * 1024 * 1024 => $"{bytes / 1048576.0:0.#} MB",
         _ => $"{bytes / 1073741824.0:0.##} GB",
-    };
+    });
 
     /// <summary>Direction, font and icon for a window, by the UI language.</summary>
     public static void Prepare(Form f)
@@ -31,7 +31,20 @@ static class Ui
 
     public static DialogResult Ask(string text, MessageBoxButtons buttons = MessageBoxButtons.YesNo,
         MessageBoxIcon icon = MessageBoxIcon.Question, MessageBoxDefaultButton def = MessageBoxDefaultButton.Button1) =>
-        MessageBox.Show(text, "DriveGram", buttons, icon, def, Options);
+        OnTop(owner => MessageBox.Show(owner, text, "DriveGram", buttons, icon, def, Options));
+
+    /// <summary>A message box owned by an invisible top-most window: never hidden behind the browser.</summary>
+    static T OnTop<T>(Func<IWin32Window, T> show)
+    {
+        using var owner = new Form
+        {
+            TopMost = true, ShowInTaskbar = false, FormBorderStyle = FormBorderStyle.None,
+            StartPosition = FormStartPosition.CenterScreen, Size = new Size(1, 1), Opacity = 0,
+        };
+        owner.Show();
+        owner.Activate();
+        return show(owner);
+    }
 
     /// <summary>Copy a secret: kept out of Windows clipboard history and cloud clipboard, and cleared after a minute.</summary>
     public static void CopySecret(string text)
@@ -53,7 +66,7 @@ static class Ui
     }
 
     public static void Error(string text) =>
-        MessageBox.Show(text, "DriveGram", MessageBoxButtons.OK, MessageBoxIcon.Error, MessageBoxDefaultButton.Button1, Options);
+        OnTop(owner => MessageBox.Show(owner, text, "DriveGram", MessageBoxButtons.OK, MessageBoxIcon.Error, MessageBoxDefaultButton.Button1, Options));
 }
 
 /// <summary>Asks for a drive's password (when it is not remembered on this PC).</summary>
@@ -62,7 +75,7 @@ sealed class PasswordForm : Form
     readonly TextBox _pw = new() { UseSystemPasswordChar = true, Width = 300, RightToLeft = RightToLeft.No };
     readonly CheckBox _remember = new()
     {
-        Text = L.T("לזכור את הסיסמה במחשב הזה (נדרש כדי לעלות עם וינדוס)", "Remember the password on this PC (needed to start with Windows)"),
+        Text = L.T("לזכור את הסיסמה במחשב הזה (נדרש כדי שהכונן ייפתח לבד)", "Remember the password on this PC (needed to start with Windows)"),
         AutoSize = true, Checked = true,
     };
     readonly Label _error = new() { ForeColor = Color.Firebrick, AutoSize = true };
@@ -133,7 +146,7 @@ sealed class TrashForm : Form
             new Label
             {
                 Text = L.T("פריטים נמחקים לצמיתות אוטומטית אחרי 30 יום. קובץ שנוסף לפני פחות מחצי שעה ועוד לא עלה נמחק מיד, בלי לעבור בסל.", "Items are deleted forever automatically after 30 days. A file added less than half an hour ago that has not uploaded yet is deleted at once, without the bin."),
-                AutoSize = true, Padding = new Padding(12, 8, 0, 0), ForeColor = Color.DimGray,
+                AutoSize = true, MaximumSize = new Size(520, 0), Padding = new Padding(12, 8, 0, 0), ForeColor = Color.DimGray,
             }]);
         Controls.Add(_list);
         Controls.Add(bar);

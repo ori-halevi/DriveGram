@@ -39,7 +39,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [CustomMessages]
 hebrew.Desktop=צור קיצור דרך בשולחן העבודה
 hebrew.Launch=הפעל את DriveGram עכשיו
-hebrew.InstallingWinFsp=מתקין את WinFsp (רכיב מערכת שנדרש לכונן)...
+hebrew.InstallingWinFsp=מתקין את WinFsp (רכיב מערכת שנדרש לכונן)... ייתכן שיופיע חלון אישור של וינדוס: אשר אותו.
 hebrew.StillRunning=DriveGram עדיין מסיים להעלות קבצים לטלגרם. הכוננים כבר מנותקים, ו־DriveGram ייסגר לבד כשההעלאה תסתיים (ההתקדמות מוצגת באייקון ליד השעון). אחר כך הפעל את ההתקנה שוב.
 english.StillRunning=DriveGram is still finishing uploads to Telegram. The drives are already disconnected, and DriveGram closes by itself when the uploads finish (the tray icon shows the progress). Then run setup again.
 hebrew.UninstallStillRunning=DriveGram עדיין מעלה קבצים. ההסרה ממשיכה: קבצים שלא הספיקו לעלות נשמרים במחשב ויעלו אם תתקין שוב.
@@ -54,10 +54,10 @@ hebrew.CleanupAsk=למחוק גם את כל מה ש־DriveGram שמר במחשב
 english.CleanupAsk=Also delete everything DriveGram keeps on this PC (settings, cache, logs) and sign out of Telegram?%n%nThe files in Telegram are not deleted: the drive can be connected again after reinstalling, with its password.%n%nChoose "No" if you plan to reinstall soon.
 hebrew.CleanupLocalOnly=⚠ יש במחשב הזה קבצים שעוד לא עלו לטלגרם, או שינויים שעוד לא נשלחו. אם תמחק עכשיו, הם יאבדו לצמיתות.%n%nלמחוק בכל זאת?
 english.CleanupLocalOnly=⚠ This PC has files not yet uploaded to Telegram, or changes not yet sent. Deleting now loses them for good.%n%nDelete anyway?
-hebrew.WinFspFailed=התקנת WinFsp לא הושלמה. הכונן לא יעבוד בלעדיו. אפשר להתקין אותו ידנית מ-https://winfsp.dev/rel
+hebrew.WinFspFailed=התקנת WinFsp לא הושלמה. הכונן לא יעבוד בלעדיו. אפשר להתקין אותו ידנית מהכתובת https://winfsp.dev/rel
 english.Desktop=Create a desktop shortcut
 english.Launch=Start DriveGram now
-english.InstallingWinFsp=Installing WinFsp (a system component the drive needs)...
+english.InstallingWinFsp=Installing WinFsp (a system component the drive needs)... Windows may ask for permission: approve it.
 english.WinFspFailed=WinFsp was not installed. The drive cannot work without it. Install it from https://winfsp.dev/rel
 
 [Tasks]

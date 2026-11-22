@@ -111,7 +111,7 @@ sealed class BackupForm : Form
             L.T("ב־DriveGram (בכל מחשב): בתפריט של האייקון בחר \"הוסף כונן נוסף\".", "In DriveGram (on any PC): in the tray menu choose \"Add another drive\"."),
             L.T("התחבר עם חשבון הגיבוי (סריקת QR).", "Sign in with the backup account (scan the QR code)."),
             L.T("ברשימת הכוננים בחר את הכונן המסומן \"אתה מנהל בו (גיבוי)\".", "In the list of drives choose the one marked \"you are an admin (backup)\"."),
-            L.T("הקלד את סיסמת הכונן. זהו, הכונן עולה עם כל הקבצים.", "Enter the drive password. That's it: the drive comes up with all its files."),
+            L.T("הקלד את סיסמת הכונן. זהו, הכונן נפתח עם כל הקבצים.", "Enter the drive password. That's it: the drive comes up with all its files."),
         }) Para(col, "•  " + step);
 
         var close = Theme.Secondary(L.T("סגור", "Close"));
