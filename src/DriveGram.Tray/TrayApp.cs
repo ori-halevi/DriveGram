@@ -30,6 +30,8 @@ sealed class DriveController
     public HandoverAskForm? HandoverAsk;
     /// <summary>The writable state the user was last told about (no second balloon for the same news).</summary>
     public bool? ToldWritable;
+    /// <summary>When the user was last told that Telegram cannot be reached for a file (Environment.TickCount64).</summary>
+    public long ToldUnreachableAt;
     /// <summary>Keys just unlocked in the setup wizard: the first mount uses them instead of asking again.</summary>
     public Keys? PendingKeys;
     /// <summary>The last mount failed because Windows refused it (not offline, not a password).</summary>
@@ -89,7 +91,26 @@ sealed class TrayApp : ApplicationContext
         Listen(_quit, async () => await QuitAsync(ask: false));
 
         if (_drives.Count == 0) _ui.Post(async _ => await AddDriveAsync(), null);
-        else foreach (var d in _drives) _ = MountAsync(d);
+        else
+        {
+            foreach (var d in _drives) _ = MountAsync(d);
+            _ui.Post(async _ => { await Task.Delay(TimeSpan.FromSeconds(5)); AskToRestoreAutostart(); }, null);
+        }
+    }
+
+    /// <summary>"Start with Windows" was on, and an uninstall/reinstall removed it: ask once to bring it back.</summary>
+    void AskToRestoreAutostart()
+    {
+        bool lost;
+        try { lost = ShellIntegration.AutostartLost; } catch { return; }
+        if (!lost || _quitting || _drives.Count == 0) return;
+        if (Ui.Ask(L.T("DriveGram הופעל קודם אוטומטית עם Windows, אבל ההגדרה הזו נמחקה (כנראה בהסרה והתקנה מחדש).\n\nלהפעיל אותו שוב אוטומטית עם Windows?",
+                       "DriveGram used to start with Windows, but that setting was removed (probably by an uninstall and reinstall).\n\nStart it with Windows again?"),
+                icon: MessageBoxIcon.Question) == DialogResult.Yes)
+        {
+            try { ShellIntegration.SetAutostart(true); } catch (Exception ex) { Log.Warn($"autostart: {ex.Message}"); }
+        }
+        else ShellIntegration.ForgetAutostartChoice();
     }
 
     /// <summary>Windows asks to end the session (DriveGram is asked after the other apps): send what is
@@ -164,6 +185,7 @@ sealed class TrayApp : ApplicationContext
             session.StopRequested += () => _ui.Post(async _ => await StopAsync(d, ask: false), null);
             session.SignedOut += () => _ui.Post(async _ => await OnSignedOutAsync(d), null);
             session.Sync.HandoverRequested += r => _ui.Post(async _ => await OnHandoverRequestedAsync(d, session, r), null);
+            session.Engine.RemoteUnreachable += () => _ui.Post(_ => OnRemoteUnreachable(d, session), null);
             session.Sync.FileIncomplete += (orig, kept, folderId) => _ui.Post(async _ => await OnFileIncompleteAsync(d, session, orig, kept, folderId), null);
             if (session.Sync.NeedsUpdate)
                 Balloon(L.T("צריך לעדכן את DriveGram", "Update DriveGram"),
@@ -784,15 +806,93 @@ sealed class TrayApp : ApplicationContext
             bool done = await Task.Run(() => s.HandOverAsync(r, null, default));
             if (done) d.ToldWritable = false;
             if (done)
+            {
                 Balloon(L.T($"{L.Ltr(d.Letter)} עבר ל־{r.Name}", $"{d.Letter} moved to {r.Name}"),
                     L.T("המחשב הזה עכשיו לקריאה בלבד. אפשר לבקש את הכונן בחזרה מהתפריט.",
                         "This PC is now read-only. You can ask for the drive back from the menu."));
+                _ = WatchHandoverClaimedAsync(d, s, r);
+            }
         }
         catch (Exception ex)
         {
             Log.Warn($"tray: handover of {d.Name}: {ex.Message}");
             Balloon(L.T("ההעברה לא הושלמה", "The handover did not complete"),
                 L.T($"{d.Name} נשאר במחשב הזה ({Short(Setup.TelegramErrors.Text(ex))}).", $"{d.Name} stays on this PC ({Short(Setup.TelegramErrors.Text(ex))})."),
+                ToolTipIcon.Warning);
+        }
+        UpdateIcon();
+    }
+
+    /// <summary>
+    /// A file whose data is only in Telegram was opened or changed while Telegram could not be reached: the
+    /// app shows only a vague error (or hangs for a while first), so say why — at most every 10 minutes.
+    /// </summary>
+    void OnRemoteUnreachable(DriveController d, DriveSession s)
+    {
+        if (d.Session != s || d.Stopping || _quitting) return;
+        long now = Environment.TickCount64;
+        if (d.ToldUnreachableAt != 0 && now - d.ToldUnreachableAt < 10 * 60_000) return;
+        d.ToldUnreachableAt = now;
+        Balloon(L.T("אין חיבור לטלגרם", "Telegram cannot be reached"),
+            L.T($"קובץ ב־{L.Ltr(d.Letter)} שלא שמור במחשב הזה לא נפתח או לא נשמר, כי אין חיבור לאינטרנט. הוא יהיה זמין כשהחיבור יחזור. קבצים שנפתחו לאחרונה במחשב הזה נפתחים גם בלי חיבור.",
+                $"A file on {d.Letter} that is not stored on this PC could not be opened or saved, because there is no internet connection. It will be available when the connection is back. Files opened recently on this PC open without a connection too."),
+            ToolTipIcon.Warning);
+    }
+
+    /// <summary>
+    /// The PC the drive was given to may have gone away right after asking (switched off, lost its
+    /// connection): then no PC can save files until its hold on the drive runs out. If it still has not
+    /// taken the drive after about two minutes, offer to take it back.
+    /// </summary>
+    async Task WatchHandoverClaimedAsync(DriveController d, DriveSession s, HandoverRequest r)
+    {
+        for (int check = 0; check < 2; check++)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(60));
+            if (d.Session != s || d.Stopping || _quitting || s.Writable) return;
+            try
+            {
+                if (!await Task.Run(() => s.Sync.HandoverUnclaimedAsync(r, default))) return; // it took the drive
+            }
+            catch (Exception ex) { Log.Warn($"tray: checking the handover of {d.Name}: {ex.Message}"); return; }
+        }
+        Log.Warn($"tray: '{r.Name}' was given {d.Name} but has not taken it");
+        Balloon(L.T($"{r.Name} לא לקח את הכונן", $"{r.Name} did not take the drive"),
+            L.T($"הכונן הועבר ל־{r.Name}, אבל נראה שהוא כבר לא מחובר, ולכן כרגע אי אפשר לשמור קבצים באף מחשב. לחץ כאן כדי לקחת את הכונן בחזרה.",
+                $"The drive was handed to {r.Name}, but it seems to be gone, so right now no PC can save files. Click here to take the drive back."),
+            ToolTipIcon.Warning, () => _ = TakeBackAsync(d, s, r));
+    }
+
+    async Task TakeBackAsync(DriveController d, DriveSession s, HandoverRequest r)
+    {
+        if (d.Session != s || s.Writable) return;
+        try
+        {
+            if (!await Task.Run(() => s.Sync.HandoverUnclaimedAsync(r, default)))
+            {
+                Balloon(L.T("הכונן כבר נלקח", "The drive was already taken"),
+                    L.T($"{r.Name} התחבר בינתיים ולקח את הכונן. אפשר לבקש אותו בחזרה מהתפריט.",
+                        $"{r.Name} came back meanwhile and took the drive. You can ask for it back from the menu."));
+                return;
+            }
+            if (Ui.Ask(L.T($"לקחת את הכונן בחזרה מ־{r.Name}?\n\nאם {r.Name} בכל זאת עובד, הוא יעבור לקריאה בלבד, ושינויים שלא הספיק לשלוח יישמרו אצלו עד שיקבל את הכונן שוב.",
+                           $"Take the drive back from {r.Name}?\n\nIf {r.Name} is working after all, it becomes read-only; changes it has not sent yet are kept there until it gets the drive again."),
+                    icon: MessageBoxIcon.Question) != DialogResult.Yes) return;
+            if (d.Session != s) return;
+            await Task.Run(() => s.Sync.TakeDriveAsync(force: true, default));
+            if (s.Writable)
+            {
+                d.ToldWritable = true;
+                Balloon(L.T($"{L.Ltr(d.Letter)} ניתן לכתיבה", $"{d.Letter} is writable"),
+                    L.T("הכונן חזר למחשב הזה. אפשר לשמור קבצים.", "The drive is back on this PC. You can save files."),
+                    onClick: () => OpenDrive(d));
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"tray: taking {d.Name} back: {ex.Message}");
+            Balloon(L.T("לא הצלחתי לקחת את הכונן", "Could not take the drive"),
+                L.T($"{Short(Setup.TelegramErrors.Text(ex))}. אפשר לבקש את הכונן מהתפריט.", $"{Short(Setup.TelegramErrors.Text(ex))}. You can ask for the drive from the menu."),
                 ToolTipIcon.Warning);
         }
         UpdateIcon();

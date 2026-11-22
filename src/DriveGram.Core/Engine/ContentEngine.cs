@@ -576,6 +576,10 @@ public sealed class ContentEngine : IAsyncDisposable
         _lastReadFailure != 0 && Environment.TickCount64 - Interlocked.Read(ref _lastReadFailure) < 30_000
             ? TimeSpan.FromSeconds(5) : _o.ReadTimeout;
 
+    /// <summary>Data that is only in Telegram was needed (to open or to change a file) and Telegram could
+    /// not be reached: the app that asked gets an error, so the user should hear why.</summary>
+    public event Action? RemoteUnreachable;
+
     void Remote(Action read)
     {
         try
@@ -592,6 +596,8 @@ public sealed class ContentEngine : IAsyncDisposable
         {
             // only "cannot reach Telegram" makes the next reads give up early, not one bad message
             Interlocked.Exchange(ref _lastReadFailure, Environment.TickCount64);
+            if (!_cts.IsCancellationRequested && !_waits.IsCancellationRequested) // not a drive being stopped
+                try { RemoteUnreachable?.Invoke(); } catch (Exception e) { Log.Warn($"engine: listener failed: {e.Message}"); }
             throw;
         }
     }

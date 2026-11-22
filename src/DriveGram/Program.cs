@@ -66,6 +66,8 @@ static AppState SelectDrive(string? sel, string command)
         var key = sel.TrimEnd(':', '\\').ToUpperInvariant();
         return all.FirstOrDefault(a => a.Config.MountPoint.TrimEnd(':').Equals(key, StringComparison.OrdinalIgnoreCase)
                                        || a.Id.Equals(sel, StringComparison.OrdinalIgnoreCase))
+               // the letter it uses right now (borrowed for this run, because its usual one was taken)
+               ?? all.FirstOrDefault(a => DriveSession.CurrentMountPoint(a).TrimEnd(':').Equals(key, StringComparison.OrdinalIgnoreCase))
                ?? throw new ArgumentException($"No drive '{sel}'. See: drivegram drives");
     }
     if (all.Count == 0) return AppState.Open("telegram");                 // first drive on this PC
@@ -453,7 +455,7 @@ int Unmount()
 async Task<int> Export(string? target)
 {
     if (string.IsNullOrWhiteSpace(target)) { Console.Error.WriteLine("Usage: drivegram export <folder> [--drive T:]"); return 1; }
-    var root = state.Config.MountPoint.TrimEnd('\\') + "\\";
+    var root = DriveSession.CurrentMountPoint(state).TrimEnd('\\') + "\\"; // the letter it borrowed, if the usual one was taken
     if (!EventWaitHandle.TryOpenExisting(DriveSession.StopEventName(state), out _) || !Directory.Exists(root))
     {
         Console.Error.WriteLine($"{state.Config.MountPoint} is not mounted. Start DriveGram (or `drivegram mount`) first.");
@@ -510,7 +512,9 @@ int Drives()
     foreach (var a in all)
     {
         bool mounted = EventWaitHandle.TryOpenExisting(DriveSession.StopEventName(a), out _);
-        Console.WriteLine($"{a.Config.MountPoint,-3} {a.Config.VolumeLabel,-16} {(a.Folder ?? a.Config.AccountName),-28} {(mounted ? "mounted" : "")}  [{a.Id}]");
+        var at = mounted ? DriveSession.CurrentMountPoint(a) : a.Config.MountPoint;
+        var where = !mounted ? "" : at.Equals(a.Config.MountPoint, StringComparison.OrdinalIgnoreCase) ? "mounted" : $"mounted at {at} (its usual letter was taken)";
+        Console.WriteLine($"{a.Config.MountPoint,-3} {a.Config.VolumeLabel,-16} {(a.Folder ?? a.Config.AccountName),-28} {where}  [{a.Id}]");
     }
     return 0;
 }

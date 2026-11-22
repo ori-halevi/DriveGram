@@ -226,6 +226,17 @@ public sealed partial class SyncService
         return true;
     }
 
+    /// <summary>
+    /// After a handover: true while the drive is still waiting for the PC it was given to (that PC clears
+    /// the request as soon as it starts writing). Asked a minute or two later, true means that PC went
+    /// away right after asking: the user can take the drive back instead of waiting for the lease to run out.
+    /// </summary>
+    public async Task<bool> HandoverUnclaimedAsync(HandoverRequest r, CancellationToken ct)
+    {
+        var c = await ReadTrustedAsync(ct);
+        return ControlTrusted && c?.Lease?.Dev == r.Dev && c.Handover is { State: "done" } h && h.Id == r.Id;
+    }
+
     /// <summary>The handover was abandoned (the requester took the drive, or it failed): back to normal.</summary>
     public void EndHandover()
     {

@@ -475,7 +475,8 @@ public sealed partial class SyncService : IAsyncDisposable
         var lease = new LeaseInfo(_db.DeviceId, _o.DeviceName, NowUnix + (long)_o.LeaseDuration.TotalSeconds);
         var c = await UpdateControlAsync(c =>
             takeFromOthers || c.Lease is null || c.Lease.Dev == _db.DeviceId || IsFormerSelf?.Invoke(c.Lease.Dev) == true || Abandoned(c.Lease)
-                ? c with { Lease = lease } : c, ct);
+                // a finished handover to this PC is closed too: the PC that gave the drive sees it arrived
+                ? c with { Lease = lease, Handover = c.Handover is { State: "done" } h && h.Dev == _db.DeviceId ? null : c.Handover } : c, ct);
         return c.Lease?.Dev == _db.DeviceId;
     }
 

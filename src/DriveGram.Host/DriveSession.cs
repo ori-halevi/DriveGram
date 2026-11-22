@@ -283,6 +283,9 @@ public sealed class DriveSession : IAsyncDisposable
             }
             session._mounted = true;
             session.LetterChanged = letterNote;
+            // where it is right now (a borrowed letter, this run only): the command line finds it here
+            try { File.WriteAllText(MountedAtPath(state), mountPoint); }
+            catch (Exception ex) { Log.Warn($"mounted-at: {ex.Message}"); }
             if (remote is TelegramRemote tr) tr.SignedOut += () => session.SignedOut?.Invoke();
             try { ShellIntegration.SetDriveIcon(mountPoint, cfg.VolumeLabel); }
             catch (Exception ex) { Log.Warn($"drive icon: {ex.Message}"); }
@@ -302,6 +305,25 @@ public sealed class DriveSession : IAsyncDisposable
             }
             throw;
         }
+    }
+
+    static string MountedAtPath(AppState s) => Path.Combine(s.Dir, "mounted-at");
+
+    /// <summary>The letter a mounted drive uses right now: the usual one, or the one it borrowed because
+    /// the usual letter was taken. Not mounted: the usual one.</summary>
+    public static string CurrentMountPoint(AppState s)
+    {
+        try
+        {
+            if (EventWaitHandle.TryOpenExisting(StopEventName(s), out var ev))
+            {
+                ev.Dispose();
+                var at = File.ReadAllText(MountedAtPath(s)).Trim();
+                if (at.Length == 2 && char.IsAsciiLetter(at[0]) && at[1] == ':') return at.ToUpperInvariant();
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        return s.Config.MountPoint;
     }
 
     public EngineStatus Status => Engine.Status;

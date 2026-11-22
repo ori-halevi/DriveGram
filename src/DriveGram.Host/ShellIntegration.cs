@@ -26,9 +26,30 @@ public static class ShellIntegration
 
     public static void SetAutostart(bool on)
     {
-        using var k = Registry.CurrentUser.CreateSubKey(RunKey);
-        if (on) k.SetValue(RunValue, $"\"{TrayExe}\"");
-        else k.DeleteValue(RunValue, throwOnMissingValue: false);
+        using (var k = Registry.CurrentUser.CreateSubKey(RunKey))
+        {
+            if (on) k.SetValue(RunValue, $"\"{TrayExe}\"");
+            else k.DeleteValue(RunValue, throwOnMissingValue: false);
+        }
+        // the user's choice, kept with the drives: an uninstall/reinstall that lost the setting is noticed
+        try
+        {
+            if (on) { Directory.CreateDirectory(AppState.Root); File.WriteAllText(AutostartWantedPath, "1"); }
+            else File.Delete(AutostartWantedPath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+    }
+
+    static string AutostartWantedPath => Path.Combine(AppState.Root, "autostart.wanted");
+
+    /// <summary>The user chose to start DriveGram with Windows, but the setting is gone (removed by an
+    /// uninstall whose reinstall could not bring it back).</summary>
+    public static bool AutostartLost => !AutostartEnabled && File.Exists(AutostartWantedPath);
+
+    /// <summary>The user said not to bring it back: stop asking.</summary>
+    public static void ForgetAutostartChoice()
+    {
+        try { File.Delete(AutostartWantedPath); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
     }
 
     public static void SetDriveIcon(string mountPoint, string label)
