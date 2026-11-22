@@ -112,18 +112,26 @@ catch (Exception ex)
 // when something exists only on this PC (files not uploaded yet / changes not sent).
 async Task<int> UninstallCleanup(bool check)
 {
-    int localOnly = 0;
-    foreach (var s in AppState.All())
+    var dataRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DriveGram");
+    if (check)
     {
-        var (pending, unsent) = DriveDeletion.LocalOnly(s);
-        localOnly += pending < 0 ? 1 : pending + unsent;
+        // exactly the profiles the cleanup deletes; an unreadable one counts as "cannot tell"
+        int localOnly = 0;
+        if (Directory.Exists(dataRoot))
+            foreach (var dir in Directory.GetDirectories(dataRoot).Where(x => File.Exists(Path.Combine(x, "config.json"))))
+            {
+                var s = AppState.At(dir);
+                if (s.Broken) { localOnly++; continue; }
+                var (pending, unsent) = DriveDeletion.LocalOnly(s);
+                localOnly += pending < 0 ? 1 : pending + unsent;
+            }
+        return localOnly > 0 ? 4 : 0;
     }
-    if (check) return localOnly > 0 ? 4 : 0;
     await TelegramAccounts.SignOutAllAsync();
     Log.Close(); // the log file lives in the folder being deleted
     // Only what DriveGram itself keeps there (profiles with a config.json, accounts, logs and its own files),
     // then the folder if that left it empty: a root pointed elsewhere (DRIVEGRAM_ROOT) is never wiped.
-    var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DriveGram");
+    var root = dataRoot;
     bool Ours(string dir)
     {
         var name = Path.GetFileName(dir);

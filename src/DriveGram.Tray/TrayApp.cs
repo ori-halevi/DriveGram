@@ -690,8 +690,43 @@ sealed class TrayApp : ApplicationContext
                 "The drive's record in Telegram was changed by someone without the drive's password (or edited by hand). So DriveGram does not trust what it says, and the drive is read-only.\n\n" +
                 "If you know this is fine (e.g. you edited it), you can confirm: the password re-validates it, and details that could mislead (who holds the drive, handover requests, the snapshot) are reset. Files are not affected.\n\nIf not, check who administers the channels (\"Backup on another account…\").\n\nConfirm?"),
                 icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
-        try { await Task.Run(() => s.Sync.RepairControlAsync(default)); }
-        catch (Exception ex) { Ui.Error(Setup.TelegramErrors.Text(ex)); }
+        string? secret = null, error = null;
+        bool useThisPcsCopy = false;
+        for (int attempt = 0; attempt < 6; attempt++)
+        {
+            try
+            {
+                await Task.Run(() => s.Sync.RepairControlAsync(default, secret, useThisPcsCopy));
+                break;
+            }
+            catch (NewerVaultException ex)
+            {
+                if (ex.WrongSecret && attempt >= 3)
+                {
+                    // the record may be a fake, or the newer password is not known here
+                    useThisPcsCopy = Ui.Ask(L.T(
+                            "הסיסמה לא פותחת את פרטי הכונן שבטלגרם.\n\nאפשר לשחזר את הפרטים שהמחשב הזה מכיר. אבל אם הסיסמה או מפתח השחזור שונו במחשב אחר, השינוי הזה יבוטל: הסיסמה הישנה תחזור לעבוד, ומפתח שחזור חדש יפסיק לעבוד.\n\nעדיף לאשר במחשב שבו הסיסמה שונתה. לשחזר בכל זאת?",
+                            "The password does not open the drive's details in Telegram.\n\nThis PC's copy can be restored. But if the password or recovery key was changed on another PC, that change is undone: the old password works again, and a new recovery key stops working.\n\nBetter confirm on the PC where the password was changed. Restore anyway?"),
+                        icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+                    if (!useThisPcsCopy) break;
+                    continue;
+                }
+                error = ex.WrongSecret ? L.T("הסיסמה לא נכונה.", "Wrong password.")
+                    : L.T("ייתכן שהסיסמה שונתה במחשב אחר. הקלד את הסיסמה הנוכחית של הכונן (או את מפתח השחזור).",
+                          "The password may have been changed on another PC. Type the drive's current password (or the recovery key).");
+                string? typed = null;
+                await PasswordGate.WaitAsync();
+                try
+                {
+                    using var f = new PasswordForm(d.Name, error);
+                    if (f.ShowDialog() == DialogResult.OK) typed = f.Password;
+                }
+                finally { PasswordGate.Release(); }
+                if (typed is null) break;
+                secret = typed;
+            }
+            catch (Exception ex) { Ui.Error(Setup.TelegramErrors.Text(ex)); break; }
+        }
         UpdateIcon();
     }
 

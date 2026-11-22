@@ -198,14 +198,25 @@ public sealed partial class SyncService : IAsyncDisposable
             // a retry, a laptop waking up). Believed when it changes nothing that matters; refused when it
             // would bring back an older password / recovery key or drive settings (an old copy written back)
             var known = ControlState.FromJson(_db.GetMeta("trusted_control"));
-            static string J<T>(T v) => System.Text.Json.JsonSerializer.Serialize(v);
             if (known is not null && J(known.Vault) == J(c.Vault) && J(known.Drive) == J(c.Drive)
-                && known.MinReader == c.MinReader && known.MinWriter == c.MinWriter)
+                && known.MinReader == c.MinReader && known.MinWriter == c.MinWriter && J(known.Extra) == J(c.Extra))
             {
                 Log.Warn($"the drive's record is a late edit (#{c.Seq} after #{seen}); its keys and settings are unchanged");
                 return true;
             }
             Log.Error($"the drive's record is an older copy (#{c.Seq} after #{seen}); not believed");
+            return false;
+        }
+        if (ok && ControlState.FromJson(_db.GetMeta("trusted_control")) is { } prev
+            && J(prev.Vault) != J(c.Vault) && c.Vault.Gen <= prev.Vault.Gen)
+        {
+            if (c.Vault.Gen < prev.Vault.Gen)
+            {
+                // a PC that missed a password / recovery-key change wrote its older copy: put the newer one back
+                _staleVault = true;
+                _beatNow = true;
+            }
+            Log.Error($"the drive's record carries an older password/recovery key (version {c.Vault.Gen}, this PC knows {prev.Vault.Gen}); not believed");
             return false;
         }
         if (ok)
@@ -215,6 +226,36 @@ public sealed partial class SyncService : IAsyncDisposable
         }
         if (ok && !knownSigned) _db.SetMeta("control_mac", "1"); // never accept an unsigned one again
         return ok;
+    }
+
+    static string J<T>(T v) => System.Text.Json.JsonSerializer.Serialize(v);
+    bool _staleVault;
+
+    /// <summary>
+    /// The record is validly signed but its vault is OLDER than the one this PC verified (a PC that was
+    /// off during a password change wrote it back): sign it again with the newer vault, keeping everything
+    /// else. Every PC accepts a newer vault; a PC that still holds the old one then catches up.
+    /// </summary>
+    async Task HealStaleVaultAsync(CancellationToken ct)
+    {
+        if (!_staleVault) return;
+        _staleVault = false;
+        await _ctrlLock.WaitAsync(ct);
+        try
+        {
+            var text = await _remote.ReadControlAsync(ct);
+            var current = ControlState.FromJson(text);
+            var known = ControlState.FromJson(_db.GetMeta("trusted_control"));
+            if (current is null || known is null || text is null || _remote.ControlMoved) return;
+            if (!ControlState.StoredMacValid(text, _keys.ControlKey) || current.Vault.Gen >= known.Vault.Gen) return;
+            Keys.FromMaster(known.Vault, _keys.ExportMaster()); // still this drive's vault
+            long seen = long.TryParse(_db.GetMeta("control_seq"), out var q) ? q : 0;
+            var healed = (current with { Vault = known.Vault, Seq = Math.Max(current.Seq, seen) + 1 }).Signed(_keys.ControlKey);
+            await _remote.WriteControlAsync(healed.ToJson(), ct);
+            Log.Warn($"the drive's record had an older password/recovery key (version {current.Vault.Gen}); the newer one (version {known.Vault.Gen}) was written back");
+        }
+        finally { _ctrlLock.Release(); }
+        await ReadTrustedAsync(ct);
     }
 
     async Task<ControlState?> ReadTrustedAsync(CancellationToken ct)
@@ -243,7 +284,10 @@ public sealed partial class SyncService : IAsyncDisposable
     /// </summary>
     const string L_NoTrustedCopy = "This PC never saw a verified copy of the drive's record, so it cannot confirm it. Confirm it on a PC that used the drive before.";
 
-    public async Task RepairControlAsync(CancellationToken ct)
+    /// <param name="secret">the drive's password or recovery key, when the record says its vault is newer
+    /// than this PC's copy (<see cref="NewerVaultException"/>)</param>
+    /// <param name="useThisPcsCopy">the user chose this PC's (older) password and recovery key anyway</param>
+    public async Task RepairControlAsync(CancellationToken ct, string? secret = null, bool useThisPcsCopy = false)
     {
         await _ctrlLock.WaitAsync(ct);
         try
@@ -253,9 +297,21 @@ public sealed partial class SyncService : IAsyncDisposable
             // verified (vault, identity, format gates) — never re-signed from the altered one
             var known = ControlState.FromJson(_db.GetMeta("trusted_control"))
                 ?? throw new InvalidOperationException(L_NoTrustedCopy);
+            var vault = known.Vault;
+            if (J(current.Vault) != J(known.Vault) && current.Vault.Gen > known.Vault.Gen && !useThisPcsCopy)
+            {
+                // the password may have been changed on another PC after this one last saw the drive: only
+                // someone with the drive's key can make a vault that the password opens to THIS master key
+                if (secret is null) throw new NewerVaultException();
+                Keys opened;
+                try { opened = Keys.UnlockAny(current.Vault, secret); }
+                catch (WrongPasswordException) { throw new NewerVaultException(wrongSecret: true); }
+                if (!opened.ExportMaster().AsSpan().SequenceEqual(_keys.ExportMaster())) throw new NewerVaultException(wrongSecret: true);
+                vault = current.Vault;
+            }
             var c = current with
             {
-                Vault = known.Vault, Drive = known.Drive,
+                Vault = vault, Drive = known.Drive,
                 MinReader = known.MinReader, MinWriter = known.MinWriter,
                 Extra = known.Extra, Seq = Math.Max(current.Seq, known.Seq),
             };
@@ -305,7 +361,7 @@ public sealed partial class SyncService : IAsyncDisposable
             await UpdateControlAsync(c =>
             {
                 if (c.Lease?.Dev != _db.DeviceId) throw new LeaseLostException();
-                return c with { Vault = change(c.Vault), MinWriter = Math.Max(c.MinWriter, 2) };
+                return c with { Vault = change(c.Vault) with { Gen = c.Vault.Gen + 1 }, MinWriter = Math.Max(c.MinWriter, 2) };
             }, ct);
         }
         catch (LeaseLostException) { SetWritable(false, null); throw; }
@@ -909,6 +965,8 @@ public sealed partial class SyncService : IAsyncDisposable
                 if (ShutdownPause) continue;
                 _beatNow = false;
                 nextBeat = DateTime.UtcNow + _o.HeartbeatInterval;
+                try { await HealStaleVaultAsync(ct); }
+                catch (Exception ex) when (ex is not OperationCanceledException) { Log.Warn($"record repair: {ex.Message}"); }
 
                 if (Writable)
                 {

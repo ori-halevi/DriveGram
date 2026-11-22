@@ -94,6 +94,9 @@ public sealed class AppState
     /// <summary>The profile's config.json could not be read (skipped by All()).</summary>
     public bool Broken { get; }
 
+    /// <summary>Open the profile in this exact folder (e.g. under the real data folder, whatever Root is).</summary>
+    public static AppState At(string dir) => new(dir);
+
     /// <summary>Open a profile by folder name.</summary>
     public static AppState Open(string id) => new(Path.Combine(Root, id));
 

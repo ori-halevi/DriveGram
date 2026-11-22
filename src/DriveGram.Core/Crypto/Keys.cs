@@ -26,6 +26,10 @@ public sealed record VaultHeader(int V, string Salt, int Iter, int ChunkSize, in
     /// <summary>Fields written by a NEWER version, kept verbatim so this version never drops them when it
     /// rewrites the record (an older client silently deleting a recovery key was a real risk).</summary>
     [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
+
+    /// <summary>Raised by every password / recovery-key change (never by heartbeats): a signed record
+    /// whose vault is not newer than the one a PC already knows is an old copy, however high its Seq.</summary>
+    public int Gen { get; init; }
 }
 
 public sealed class WrongPasswordException() : Exception("Wrong password for this drive.");

@@ -45,6 +45,14 @@ is acted on, and the PC stays read-only until the user confirms it (the vault is
 are reset, and it is signed again). A record from before signing is accepted once (first sight) and signed
 by the next writer.
 
+`seq` (1.0.3+): raised by every signed write. A signed record older than one a PC already saw is believed only
+if its vault, identity, format gates and unknown fields equal the last verified copy (an honest late edit).
+`vault.gen` (1.0.3+): raised by every password / recovery-key change, never by heartbeats. A signed record
+whose vault differs from the PC's last verified one but whose `gen` is not higher is never believed; a PC that
+knows a newer vault signs the record again with it (a PC that was off during a password change cannot bring
+the old one back). Confirming an altered record whose vault claims a higher `gen` needs the current password
+or recovery key: kept only if it opens that vault to this drive's master key.
+
 `minReader` / `minWriter`: the oldest StorageFormat allowed to read / write the drive. A client
 whose `StorageFormat.Current` is lower must refuse to open (reader) or open read-only (writer).
 
