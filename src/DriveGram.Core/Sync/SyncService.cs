@@ -26,11 +26,20 @@ public sealed record ControlState(int V, VaultHeader Vault, LeaseInfo? Lease, Sn
     /// may READ this pinned message, only someone with the drive's password can WRITE it convincingly.</summary>
     public ControlState Signed(byte[] key) => this with { Mac = ComputeMac(key) };
 
-    public bool MacValid(byte[] key) =>
-        Mac is not null && System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
-            System.Text.Encoding.ASCII.GetBytes(Mac), System.Text.Encoding.ASCII.GetBytes(ComputeMac(key)));
+    /// <summary>Verify a record exactly as stored: the HMAC covers the stored text with its mac value
+    /// replaced by null. Independent of how any version orders or formats the fields.</summary>
+    public static bool StoredMacValid(string json, byte[] key)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(json, "\"mac\":\"([0-9a-f]{64})\"");
+        if (!m.Success) return false;
+        var unsigned = json.Remove(m.Index, m.Length).Insert(m.Index, "\"mac\":null");
+        var given = Convert.FromHexString(m.Groups[1].Value);
+        var expected = System.Security.Cryptography.HMACSHA256.HashData(key, System.Text.Encoding.UTF8.GetBytes(unsigned));
+        return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(given, expected);
+    }
 
-    string ComputeMac(byte[] key) => Convert.ToBase64String(System.Security.Cryptography.HMACSHA256.HashData(key,
+    // hex: nothing in it is ever escaped by a JSON writer, so the stored text is found exactly
+    string ComputeMac(byte[] key) => Convert.ToHexStringLower(System.Security.Cryptography.HMACSHA256.HashData(key,
         System.Text.Encoding.UTF8.GetBytes((this with { Mac = null }).ToJson())));
 
     /// <summary>Fields written by a newer version, kept verbatim on every rewrite.</summary>
@@ -148,21 +157,23 @@ public sealed partial class SyncService : IAsyncDisposable
     /// confirms the record again (RepairControlAsync).</summary>
     public bool ControlTrusted { get; private set; } = true;
 
-    bool Trust(ControlState c)
+    bool Trust(ControlState c, string text)
     {
         bool knownSigned = _db.GetMeta("control_mac") == "1";
         if (c.Mac is null)
             return !knownSigned && c.MinWriter < StorageFormat.Current; // a record from before signing (first time only)
-        bool ok = c.MacValid(_keys.ControlKey);
+        bool ok = ControlState.StoredMacValid(text, _keys.ControlKey);
+        if (ok) _db.SetMeta("trusted_control", text); // the last record known good: a repair restores from it
         if (ok && !knownSigned) _db.SetMeta("control_mac", "1"); // never accept an unsigned one again
         return ok;
     }
 
     async Task<ControlState?> ReadTrustedAsync(CancellationToken ct)
     {
-        var c = await ReadControlAsync(_remote, ct);
+        var text = await _remote.ReadControlAsync(ct);
+        var c = ControlState.FromJson(text);
         if (c is null) return null;
-        bool trusted = Trust(c);
+        bool trusted = Trust(c, text!);
         if (trusted != ControlTrusted)
         {
             ControlTrusted = trusted;
@@ -186,13 +197,22 @@ public sealed partial class SyncService : IAsyncDisposable
         await _ctrlLock.WaitAsync(ct);
         try
         {
-            var c = (await ReadControlAsync(_remote, ct))!;
+            var current = await ReadControlAsync(_remote, ct) ?? throw new InvalidOperationException("The drive's record is missing in Telegram.");
+            // what someone without the password may have changed is taken from the last record this PC
+            // verified (vault, identity, format gates) — never re-signed from the altered one
+            var known = ControlState.FromJson(_db.GetMeta("trusted_control"));
+            var c = known is null ? current : current with
+            {
+                Vault = known.Vault, Drive = known.Drive,
+                MinReader = known.MinReader, MinWriter = known.MinWriter,
+            };
             Keys.FromMaster(c.Vault, _keys.ExportMaster()); // the vault must still be this drive's
+            if (c.MinReader > StorageFormat.Current || c.MinWriter > StorageFormat.Current)
+                throw new NeedsUpdateException("the record asks for a newer DriveGram; update before confirming it");
             var fixedUp = c with
             {
                 Lease = null, Handover = null, Snap = null,
-                MinReader = Math.Min(c.MinReader, StorageFormat.Current),
-                MinWriter = StorageFormat.Current,
+                MinWriter = Math.Max(c.MinWriter, StorageFormat.Current),
             };
             await _remote.WriteControlAsync(fixedUp.Signed(_keys.ControlKey).ToJson(), ct);
             _db.SetMeta("control_mac", "1");

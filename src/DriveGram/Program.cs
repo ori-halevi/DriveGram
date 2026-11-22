@@ -24,6 +24,7 @@ var folder = Opt("--folder");
 var envFile = Opt("--env");
 bool verbose = Flag("--verbose");
 bool checkOnly = Flag("--check");
+bool forceFlag = Flag("--force"); // export into a folder that already holds other files
 bool takeOver = Flag("--take-over");
 bool usePhone = Flag("--phone");
 var pickArg = Opt("--pick");
@@ -83,6 +84,7 @@ try
         "autostart" => Autostart(arg1),
         "forget-password" => ForgetPassword(),
         "uninstall-cleanup" => await UninstallCleanup(checkOnly),
+        "wait-quit" => await WaitQuit(),
         _ => Help(),
     };
 }
@@ -114,7 +116,8 @@ async Task<int> UninstallCleanup(bool check)
     bool Ours(string dir)
     {
         var name = Path.GetFileName(dir);
-        return name is "accounts" or "logs" || name.StartsWith("__") || File.Exists(Path.Combine(dir, "config.json"));
+        return name is "accounts" or "logs" or "telegram" || name.StartsWith("__") || name.StartsWith("drive-") || name.StartsWith("folder-")
+               || File.Exists(Path.Combine(dir, "config.json"));
     }
     for (int attempt = 0; attempt < 5; attempt++)
     {
@@ -132,6 +135,18 @@ async Task<int> UninstallCleanup(bool check)
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { await Task.Delay(1000); }
     }
     return Directory.Exists(root) && Directory.GetDirectories(root).Any(Ours) ? 1 : 0;
+}
+
+// For the uninstaller: wait (up to 10 minutes) until the tray app has finished its uploads and exited.
+async Task<int> WaitQuit()
+{
+    for (int s = 0; s < 600; s++)
+    {
+        if (!System.Threading.Mutex.TryOpenExisting("DriveGramTrayRunning", out var m)) return 0;
+        m.Dispose();
+        await Task.Delay(1000);
+    }
+    return 1;
 }
 
 int Help()
@@ -438,7 +453,7 @@ async Task<int> Export(string? target)
     });
     try
     {
-        var errors = await Exporter.CopyAsync(root, full, progress, cts.Token);
+        var errors = await Exporter.CopyAsync(root, full, progress, cts.Token, allowNonEmpty: forceFlag);
         Console.WriteLine();
         foreach (var e in errors) Console.Error.WriteLine("  failed: " + e);
         Console.WriteLine(errors.Count == 0 ? "Export complete." : $"Done; {errors.Count} files failed (run again to retry them).");

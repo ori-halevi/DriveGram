@@ -37,7 +37,7 @@ sealed class DriveTypeForm : Form
         _disk.Text = L.T("דיסק רגיל (ברירת המחדל)", "Regular disk (the default)");
         col.Controls.Add(Spaced(_disk));
         Bullets(col,
-            L.T("✓  מופיע ב\"מחשב זה\" ליד C: ו־D:, עם האייקון והשם של DriveGram.", "✓  Shown in This PC next to C: and D:, with DriveGram's icon and name."),
+            L.T($"✓  מופיע ב\"מחשב זה\" ליד {L.Ltr("C:")} ו־{L.Ltr("D:")}, עם האייקון והשם של DriveGram.", "✓  Shown in This PC next to C: and D:, with DriveGram's icon and name."),
             L.T("✓  כל התוכנות עובדות איתו כמו עם כל דיסק (גם Lightroom, ‏Outlook, התקנת תוכנות).", "✓  Every program treats it like any disk (Lightroom, Outlook, installing programs too)."),
             L.T("✓  חיפוש מילה בתוך מסמכים עובד, אם מוסיפים את הכונן לאינדקס של וינדוס.", "✓  Searching for words inside documents works, if the drive is added to Windows' index."),
             L.T("✗  תוכנות גיבוי ואנטי־וירוס שסורקות \"את כל הדיסקים\" עלולות לנסות להוריד את כל הכונן מטלגרם. Defender ותוכנות מוכרות נחסמות כבר, אבל לא כל תוכנה מוכרת.",
@@ -49,7 +49,7 @@ sealed class DriveTypeForm : Form
             L.T("✓  רוב תוכנות הגיבוי, האנטי־וירוס והאינדוקס מדלגות על כונני רשת מעצמן: אף תוכנה לא \"תוריד את הכל\" ברקע.",
                 "✓  Most backup, antivirus and indexing programs skip network drives by themselves: nothing \"downloads everything\" in the background."),
             L.T("✓  מחיקה פשוטה: וינדוס לא מנסה להשתמש בסל המחזור שלו (הקובץ עובר לסל של DriveGram).", "✓  Simple deletes: Windows does not try its own recycle bin (the file goes to DriveGram's bin)."),
-            L.T("✗  מופיע ב\"מחשב זה\" בחלק \"מיקומי רשת\", עם אייקון של כונן רשת.", "✗  Shown in This PC under \"Network locations\", with a network-drive icon."),
+            L.T("✗  מופיע ב\"מחשב זה\" בחלק \"מיקומי רשת\", ולא ליד הדיסקים.", "✗  Shown in This PC under \"Network locations\", not next to the disks."),
             L.T("✗  חלק מהתוכנות מסרבות לכונני רשת: קטלוג של Lightroom, קובצי דואר של Outlook (PST), התקנת משחקים ותוכנות, מכונות וירטואליות.",
                 "✗  Some programs refuse network drives: a Lightroom catalog, Outlook mail files (PST), installing games and programs, virtual machines."),
             L.T("✗  אין חיפוש בתוך תוכן מסמכים (חיפוש לפי שם עובד, לאט יותר).", "✗  No searching inside documents (searching by name works, more slowly)."),
@@ -89,8 +89,8 @@ sealed class DriveTypeForm : Form
     {
         foreach (var line in lines)
         {
-            var l = Theme.Label(line, Theme.Body, Theme.Text, 660);
-            l.Margin = new Padding(24, 2, 24, 2);
+            var l = Theme.Label(line, Theme.Body, Theme.Text, 610);
+            l.Margin = new Padding(16, 2, 16, 2);
             col.Controls.Add(l);
         }
     }

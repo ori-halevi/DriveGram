@@ -61,11 +61,9 @@ public static class TelegramAccounts
             if (!Entries.TryGetValue(path, out var e))
             {
                 // the same sign-in used by two programs at once makes Telegram reset it (AUTH_KEY_DUPLICATED)
-                var processLock = new Semaphore(1, 1, @"Local\DriveGram-account-" + Convert.ToHexString(
-                    System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(path.ToUpperInvariant())))[..16]);
-                if (!processLock.WaitOne(0))
+                var processLock = TryLock(path);
+                if (processLock is null)
                 {
-                    processLock.Dispose();
                     throw new InvalidOperationException(L.T("החשבון הזה כבר בשימוש בתוכנת DriveGram אחרת שפתוחה במחשב (למשל שורת הפקודה). סגור אותה ונסה שוב.",
                         "This account is already in use by another DriveGram program on this PC (e.g. the command line). Close it and try again."));
                 }
@@ -97,9 +95,15 @@ public static class TelegramAccounts
             if (--e.Refs > 0) return;
             Entries.Remove(e.Path);
         }
-        e.Healer.Dispose();
-        try { e.Client.Dispose(); } catch (Exception ex) { Log.Warn($"closing a Telegram connection: {ex.Message}"); }
-        if (e.ProcessLock is { } pl) { try { pl.Release(); } catch { } pl.Dispose(); }
+        try
+        {
+            e.Healer.Dispose();
+            try { e.Client.Dispose(); } catch (Exception ex) { Log.Warn($"closing a Telegram connection: {ex.Message}"); }
+        }
+        finally
+        {
+            if (e.ProcessLock is { } pl) { try { pl.Release(); } catch { } pl.Dispose(); }
+        }
     }
 
     static async Task<bool> StillSignedOutAsync(WTelegram.Client client)
@@ -197,10 +201,17 @@ public static class TelegramAccounts
                 if (Entries.ContainsKey(target)) existing = true;
                 else
                 {
-                    Entries.Remove(lease.Entry.Path);
-                    lease.Entry.Stream.Relocate(target);
-                    lease.Entry.Path = target;
-                    Entries[target] = lease.Entry;
+                    var moved = TryLock(target);
+                    if (moved is null) existing = true; // another program uses that sign-in: use it, not ours
+                    else
+                    {
+                        Entries.Remove(lease.Entry.Path);
+                        lease.Entry.Stream.Relocate(target);
+                        lease.Entry.Path = target;
+                        if (lease.Entry.ProcessLock is { } old) { try { old.Release(); } catch { } old.Dispose(); }
+                        lease.Entry.ProcessLock = moved;
+                        Entries[target] = lease.Entry;
+                    }
                 }
             }
         }
@@ -225,7 +236,26 @@ public static class TelegramAccounts
     /// <summary>Does the account's saved sign-in still work? (Checked on a throw-away client.)</summary>
     enum Probe { Works, Revoked, Unknown }
 
+    /// <summary>This process's exclusive use of a sign-in file, or null if another DriveGram program has it.</summary>
+    static Semaphore? TryLock(string sessionPath)
+    {
+        var s = new Semaphore(1, 1, @"Local\DriveGram-account-" + Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(Path.GetFullPath(sessionPath).ToUpperInvariant())))[..16]);
+        if (s.WaitOne(0)) return s;
+        s.Dispose();
+        return null;
+    }
+
     static Probe SignInWorks(AccountInfo a)
+    {
+        // a sign-in another DriveGram program is using right now certainly works: never open it twice
+        var probeLock = TryLock(Path.Combine(AccountsDir, a.Key, "telegram.session"));
+        if (probeLock is null) return Probe.Works;
+        try { return SignInWorksLocked(a); }
+        finally { probeLock.Release(); probeLock.Dispose(); }
+    }
+
+    static Probe SignInWorksLocked(AccountInfo a)
     {
         var probe = AppState.Open("__probe-" + Guid.NewGuid().ToString("N")[..8]);
         try
@@ -317,6 +347,7 @@ public static class TelegramAccounts
                 probe.Config.ApiHash = info.ApiHash;
                 using var client = DriveSession.NewTelegramClient(probe, null, out _);
                 try { await TL.SchemaExtensions.Auth_LogOut(client).WaitAsync(TimeSpan.FromSeconds(15)); }
+                catch (TL.RpcException ex) when (ex.Code == 401) { } // already ended (e.g. from the phone): nothing to keep
                 catch (Exception ex)
                 {
                     Log.Warn($"sign out of {key} did not reach Telegram ({ex.Message}); the sign-in is kept and tried again later");

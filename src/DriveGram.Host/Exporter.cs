@@ -11,7 +11,11 @@ public sealed record ExportProgress(int Files, int Skipped, long Bytes, string C
 /// </summary>
 public static class Exporter
 {
-    public static async Task<List<string>> CopyAsync(string sourceRoot, string target, IProgress<ExportProgress>? progress, CancellationToken ct)
+    /// <summary>The target holds other files: the caller asks the user, then calls again with allowNonEmpty.</summary>
+    public sealed class TargetNotEmptyException() : IOException("the folder is not empty");
+
+    public static async Task<List<string>> CopyAsync(string sourceRoot, string target, IProgress<ExportProgress>? progress, CancellationToken ct,
+        bool allowNonEmpty = false)
     {
         var errors = new List<string>();
         int files = 0, skipped = 0;
@@ -22,9 +26,11 @@ public static class Exporter
         var marker = Path.Combine(target, ".drivegram-export");
         if (!File.Exists(marker))
         {
-            if (Directory.EnumerateFileSystemEntries(target).Any())
-                throw new IOException(L.T("התיקייה לא ריקה. בחר תיקייה ריקה (או תיקייה של ייצוא קודם, כדי להמשיך אותו).",
-                    "The folder is not empty. Choose an empty folder (or the folder of an earlier export, to continue it)."));
+            // Windows' own hidden items (a USB stick's root has them) do not count
+            bool other = new DirectoryInfo(target).EnumerateFileSystemInfos().Any(e =>
+                !e.Attributes.HasFlag(FileAttributes.Hidden | FileAttributes.System)
+                && e.Name is not ("$RECYCLE.BIN" or "System Volume Information" or "desktop.ini"));
+            if (other && !allowNonEmpty) throw new TargetNotEmptyException();
             File.WriteAllText(marker, "DriveGram export\r\n");
             File.SetAttributes(marker, FileAttributes.Hidden);
         }

@@ -102,6 +102,7 @@ sealed class TrayApp : ApplicationContext
         _quitting = true;
         var sessions = _drives.Select(x => x.Session).OfType<DriveSession>().ToList();
         Parallel.ForEach(sessions, s => s.EndForShutdown());
+        _icon.Visible = false;
         Environment.Exit(0); // nothing is left running half-stopped (Restart Manager waits for this)
     }
 
@@ -643,12 +644,24 @@ sealed class TrayApp : ApplicationContext
     {
         using var form = new DriveTypeForm(d.Name, d.State.Config.NetworkDrive);
         if (form.ShowDialog() != DialogResult.OK || form.Network == d.State.Config.NetworkDrive) return;
+        if (!_drives.Contains(d)) return; // removed while the window was open
         bool wasMounted = d.Session is not null;
-        if (wasMounted && !await StopAsync(d)) return; // the usual questions (uploads, open files)
+        // uploads need not finish first: what is staged uploads again right after the remount
+        if (wasMounted && !await StopAsync(d, waitForUploads: false)) return;
+        bool before = d.State.Config.NetworkDrive;
         d.State.Config.NetworkDrive = form.Network;
         d.State.Save();
         Log.Info($"tray: {d.Name} is now a {(form.Network ? "network drive" : "regular disk")}");
-        if (wasMounted) await MountAsync(d);
+        if (!wasMounted) return;
+        await MountAsync(d);
+        if (d.Session is null && !d.Starting)
+        {
+            // Windows refused it this way: back to how it was, and say so
+            d.State.Config.NetworkDrive = before;
+            d.State.Save();
+            Ui.Error(L.T("הכונן לא הצליח להתחבר בסוג החדש, ולכן הוחזר לסוג הקודם.", "The drive could not connect as the new type, so it was set back to the previous one."));
+            await MountAsync(d);
+        }
     }
 
     bool _deleting;
@@ -806,7 +819,10 @@ sealed class TrayApp : ApplicationContext
         return L.T("הכל שמור בטלגרם ✓", "everything is saved in Telegram ✓");
     }
 
-    static string ReadOnlyWhy(DriveSession s) => s.Sync.LeaseHolder is { } h
+    static string ReadOnlyWhy(DriveSession s) => !s.Sync.ControlTrusted
+        ? L.T("רשומת הכונן שונתה מחוץ ל־DriveGram, ולכן הוא לקריאה בלבד. בתפריט: \"אשר את רשומת הכונן…\".",
+              "The drive's record was changed outside DriveGram, so it is read-only. In the menu: \"Confirm the drive's record…\".")
+        : s.Sync.LeaseHolder is { } h
         ? L.T($"הכונן פתוח לכתיבה במחשב {h}. כאן אפשר רק לקרוא. כדי לכתוב כאן: בתפריט, \"בקש את הכונן מ־{h}…\".",
               $"The drive is open for writing on {h}. Here it can only be read. To write here: \"Ask {h} for the drive…\" in the menu.")
         : L.T("הכונן זמין כרגע לקריאה בלבד; DriveGram בודק אם אפשר לכתוב.", "The drive is read-only for now; DriveGram is checking whether it can write.");

@@ -36,8 +36,9 @@ could not finish. Without an answer within 60 s, or when `updated` stops changin
 observed by the requester's own clock), the requester takes the lease itself. Answers are tied to `id`.
 Older clients keep the field untouched and never answer. Adding it changed no minReader/minWriter.
 
-`mac` (StorageFormat 3, 1.0.3+): base64 HMAC-SHA256 of the record's JSON with `mac` set to null, under
-`HMAC(master, "drivegram/control/v1")`. Every writer signs and sets `minWriter` ≥ 3 (older versions, which
+`mac` (StorageFormat 3, 1.0.3+): lowercase hex HMAC-SHA256, under `HMAC(master, "drivegram/control/v1")`, of the
+record text exactly as stored, with the mac's value replaced by `null` (`"mac":"…"` → `"mac":null`).
+Verification works on the stored text, so any version may order or add fields freely. Every writer signs and sets `minWriter` ≥ 3 (older versions, which
 would drop the field, may only read). A record whose mac is wrong, or missing once a PC has seen a signed one
 (or with `minWriter` ≥ 3), is not believed: nothing in it (lease, handover, snapshot, identity, format gates)
 is acted on, and the PC stays read-only until the user confirms it (the vault is kept, lease/handover/snap

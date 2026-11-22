@@ -44,7 +44,19 @@ sealed class ExportForm : Form
             });
             try
             {
-                var errors = await Task.Run(() => Exporter.CopyAsync(session.MountPoint + "\\", target, progress, _cts.Token));
+                List<string> errors;
+                try { errors = await Task.Run(() => Exporter.CopyAsync(session.MountPoint + "\\", target, progress, _cts.Token)); }
+                catch (Exporter.TargetNotEmptyException)
+                {
+                    if (Ui.Ask(L.T("בתיקייה כבר יש קבצים. קבצים עם אותו שם כמו בכונן יוחלפו בגרסה שבכונן. להמשיך?",
+                            "The folder already holds files. Files with the same name as on the drive will be replaced by the drive's version. Continue?"),
+                            icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+                    {
+                        Close();
+                        return;
+                    }
+                    errors = await Task.Run(() => Exporter.CopyAsync(session.MountPoint + "\\", target, progress, _cts.Token, allowNonEmpty: true));
+                }
                 _bar.Style = ProgressBarStyle.Continuous;
                 _bar.Value = 100;
                 _current.Text = errors.Count == 0

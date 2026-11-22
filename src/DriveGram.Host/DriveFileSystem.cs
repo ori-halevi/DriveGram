@@ -71,8 +71,11 @@ public sealed class DriveFileSystem : FileSystemBase
     readonly string _label;
     readonly byte[] _sd;
 
-    public DriveFileSystem(IndexDb db, ContentEngine engine, SyncService sync, string label)
+    readonly bool _network;
+
+    public DriveFileSystem(IndexDb db, ContentEngine engine, SyncService sync, string label, bool network = false)
     {
+        _network = network;
         _db = db;
         _engine = engine;
         _sync = sync;
@@ -281,7 +284,7 @@ public sealed class DriveFileSystem : FileSystemBase
             return STATUS_ACCESS_DENIED;
         // Explorer's thumbnail cache files (written into every photo folder on network drives): never
         // uploaded and synced; Explorer simply does without them
-        if (name.Equals("Thumbs.db", StringComparison.OrdinalIgnoreCase) || name.Equals("ehthumbs_vista.db", StringComparison.OrdinalIgnoreCase))
+        if (_network && (name.Equals("Thumbs.db", StringComparison.OrdinalIgnoreCase) || name.Equals("ehthumbs_vista.db", StringComparison.OrdinalIgnoreCase)))
             return STATUS_ACCESS_DENIED;
 
         bool dir = (createOptions & FILE_DIRECTORY_FILE) != 0;

@@ -119,6 +119,11 @@ public class SevereFixTests
         var b = kit.Pc("b", so: Fast("PC-B"));
         await b.Sync.StartAsync(false, default);                 // not locked out by the forged minReader
         Assert.False(b.Sync.ControlTrusted);
+        await b.DisposeAsync();
+        // a PC that knew the drive before (A): the repair restores what the password protects from ITS copy
+        b = new Pc(a.Dir, kit.Remote, kit.Keys, so: Fast("PC-A"));
+        await b.Sync.StartAsync(false, default);
+        Assert.False(b.Sync.ControlTrusted);
         Assert.False(b.Sync.Writable);                           // and does not act on anything in it
 
         await b.Sync.RepairControlAsync(default);                // the user confirms: signed again, misleading parts dropped

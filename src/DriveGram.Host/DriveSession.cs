@@ -81,9 +81,10 @@ public sealed class DriveSession : IAsyncDisposable
         Keys = keys;
         _instance = instance;
         _stopEvent = stopEvent;
-        _host = new FileSystemHost(new DriveFileSystem(db, engine, sync, state.Config.VolumeLabel));
-        // a network drive: Windows (and the programs that scan "all disks") treat it as remote
-        if (state.Config.NetworkDrive) _host.Prefix = $@"\DriveGram\{state.Id}";
+        _host = new FileSystemHost(new DriveFileSystem(db, engine, sync, state.Config.VolumeLabel, state.Config.NetworkDrive));
+        // a network drive: Windows (and the programs that scan "all disks") treat it as remote. Explorer shows
+        // the share name, so it is the drive's name (made path-safe), unique among this PC's drives.
+        if (state.Config.NetworkDrive) _host.Prefix = $@"\DriveGram\{ShareName(state)}";
         sync.RemoteOpsApplying += NoteOldPaths;
         sync.RemoteOpsApplied += NotifyExplorer;
         new Thread(() =>
@@ -109,6 +110,16 @@ public sealed class DriveSession : IAsyncDisposable
             return key?.GetValue("MachineGuid") as string;
         }
         catch { return null; }
+    }
+
+    static string ShareName(AppState state)
+    {
+        var bad = Path.GetInvalidFileNameChars();
+        var name = new string(state.Config.VolumeLabel.Where(ch => !bad.Contains(ch)).ToArray()).Trim();
+        if (name.Length == 0) name = "DriveGram";
+        bool shared = AppState.All().Any(a => a.Dir != state.Dir && a.Config.NetworkDrive
+                                              && string.Equals(a.Config.VolumeLabel, state.Config.VolumeLabel, StringComparison.OrdinalIgnoreCase));
+        return shared ? $"{name}-{state.Id[^4..]}" : name;
     }
 
     public static bool WinFspInstalled()

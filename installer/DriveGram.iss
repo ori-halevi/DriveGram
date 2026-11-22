@@ -109,12 +109,16 @@ begin
     Exec(ExpandConstant('{app}\drivegram.exe'), 'unmount', '', SW_HIDE, ewWaitUntilTerminated, Code);
     Exec(ExpandConstant('{app}\drivegram.exe'), 'quit', '', SW_HIDE, ewWaitUntilTerminated, Code);
     Waited := 0;
-    while CheckForMutexes('DriveGramTrayRunning') and (Waited < 600) do
-    begin
-      if Progress <> nil then Progress.SetProgress(Waited, 600);
-      Sleep(1000);
-      Waited := Waited + 1;
-    end;
+    if Progress = nil then
+      { uninstall: let the program wait, so this window keeps responding meanwhile }
+      Exec(ExpandConstant('{app}\drivegram.exe'), 'wait-quit', '', SW_HIDE, ewWaitUntilTerminated, Code)
+    else
+      while CheckForMutexes('DriveGramTrayRunning') and (Waited < 600) do
+      begin
+        Progress.SetProgress(Waited, 600);
+        Sleep(1000);
+        Waited := Waited + 1;
+      end;
   finally
     if Progress <> nil then Progress.Hide;
   end;
@@ -173,8 +177,10 @@ begin
   { only after the user confirmed the uninstall: a "No" must never have stopped their drives }
   if CurUninstallStep = usUninstall then
   begin
-    UninstallProgressForm.StatusLabel.Caption := CustomMessage('StoppingDetail');
+    if CheckForMutexes('DriveGramTrayRunning') then
+      UninstallProgressForm.StatusLabel.Caption := CustomMessage('StoppingDetail');
     StopRunningCopy(nil);
+    UninstallProgressForm.StatusLabel.Caption := '';
     if CheckForMutexes('DriveGramTrayRunning') then
     begin
       { still uploading after 10 minutes: what is staged stays on disk (the profile is kept) }
@@ -207,5 +213,5 @@ end;
 { right after the WinFsp installer itself (not before it, whatever the step order) }
 procedure CheckWinFspInstalled;
 begin
-  if NeedsWinFsp then MsgBox(CustomMessage('WinFspFailed'), mbError, MB_OK);
+  if NeedsWinFsp then SuppressibleMsgBox(CustomMessage('WinFspFailed'), mbError, MB_OK, IDOK);
 end;

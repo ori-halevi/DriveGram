@@ -93,11 +93,15 @@ public static class DriveDeletion
                         && Directory.Exists(Path.Combine(state.Folder, "data"));
             if (!ours) return;
             // only DriveGram's own entries: the folder may be the user's (Desktop, a disk root…)
+            var ownFile = new System.Text.RegularExpressions.Regex(@"^\d{10}_.+$");
+            foreach (var f in Directory.GetFiles(Path.Combine(state.Folder, "journal")).Where(f => ownFile.IsMatch(Path.GetFileName(f))))
+                File.Delete(f);
+            foreach (var f in Directory.GetFiles(Path.Combine(state.Folder, "data"), "*.bin"))
+                if (int.TryParse(Path.GetFileNameWithoutExtension(f), out _)) File.Delete(f);
             foreach (var dir in new[] { "journal", "data" })
-                Directory.Delete(Path.Combine(state.Folder, dir), recursive: true);
-            foreach (var file in Directory.GetFiles(state.Folder))
-                if (Path.GetFileName(file) is "control.json" or "next-id" || file.EndsWith(".tmp"))
-                    File.Delete(file);
+                try { Directory.Delete(Path.Combine(state.Folder, dir)); } catch (IOException) { } // only if empty now
+            foreach (var name in new[] { "control.json", "next-id", "control.json.tmp", "next-id.tmp" })
+                File.Delete(Path.Combine(state.Folder, name));
             try { if (!Directory.EnumerateFileSystemEntries(state.Folder).Any()) Directory.Delete(state.Folder); } catch (IOException) { }
             return;
         }
