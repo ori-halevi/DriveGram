@@ -125,6 +125,10 @@ public sealed class IndexDb : IDisposable
         Exec("INSERT OR IGNORE INTO seen_entries(nonce) VALUES(@n)", ("@n", nonce));
     });
 
+    /// <summary>Are all these outbox rows still there (nothing changed them meanwhile)?</summary>
+    public bool OutboxHas(long[] seqs) =>
+        seqs.Length > 0 && seqs.All(s => Scalar("SELECT 1 FROM outbox WHERE seq=@s", ("@s", s)) is not null);
+
     public bool IsOwnAppend(int msg) => Scalar("SELECT 1 FROM own_appends WHERE msg=@m", ("@m", msg)) is not null;
     public bool SeenEntry(string nonce) => Scalar("SELECT 1 FROM seen_entries WHERE nonce=@n", ("@n", nonce)) is not null;
     public void MarkSeen(string nonce) => Exec("INSERT OR IGNORE INTO seen_entries(nonce) VALUES(@n)", ("@n", nonce));
@@ -410,7 +414,13 @@ public sealed class IndexDb : IDisposable
                 {
                     // another PC deleted for good what THIS PC still changes (a file waiting to upload): keep it,
                     // in the root, and tell every PC (the purge then removes everything but it)
-                    foreach (var keep in Query("SELECT p.node FROM pending p WHERE p.node IN (SELECT id FROM temp.purge_ids) ORDER BY p.node", x => x.GetString(0)))
+                    // ...and a file whose saved change (new content, a rename/move) is still held back here
+                    var held = PeekOutbox(int.MaxValue).Where(o => o.Op is ContentOp or UpsertOp { Dir: false })
+                        .Select(o => o.Op.Id).ToHashSet();
+                    var keepIds = Query("SELECT p.node FROM pending p WHERE p.node IN (SELECT id FROM temp.purge_ids)", x => x.GetString(0))
+                        .Concat(Query("SELECT id FROM temp.purge_ids", x => x.GetString(0)).Where(held.Contains))
+                        .Distinct().Order(StringComparer.Ordinal).ToList();
+                    foreach (var keep in keepIds)
                     {
                         Exec("DELETE FROM temp.purge_ids WHERE id=@i", ("@i", keep));
                         if (Get(keep) is { } kn)
@@ -425,7 +435,7 @@ public sealed class IndexDb : IDisposable
                                 recreate.Add(new ContentOp(kn.Id, chunks.Sum(x => (long)x.Size), kn.Mtime,
                                     chunks.Select(x => new ChunkRef(x.ChunkId, x.Msg, x.Size, x.Hash)).ToArray()));
                             ApplyLocal(recreate);
-                            SetLocalSize(kn.Id, kn.Size, kn.Mtime); // its newer local changes still upload
+                            if (IsPending(kn.Id)) SetLocalSize(kn.Id, kn.Size, kn.Mtime); // its newer local changes still upload
                             Log.Warn($"'{kn.Name}' was deleted for good on another PC while it had changes here: kept, in the root");
                         }
                     }

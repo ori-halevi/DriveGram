@@ -353,8 +353,9 @@ public sealed class DriveFileSystem : FileSystemBase
             bool gitScratch = InGitDir(fileName) && (n.Name.EndsWith(".lock") || n.Name.StartsWith("tmp_") || LooksTemporary(n.Name));
             if (!n.Dir && (n.Name.StartsWith("~$") || gitScratch || (neverStored && (LooksTemporary(n.Name) || justMade))))
             {
-                _engine.Discard(n.Id); // first: the purge removes the rows Discard uses to find the pieces
+                var dropFiles = _engine.DiscardLater(n.Id); // first: the purge removes the rows it uses
                 _db.ApplyLocal(new PurgeOp(n.Id));
+                if (dropFiles is not null) { _db.Durable(); dropFiles(); }
                 Log.Debug($"deleted for good (never uploaded / lock / git file) {fileName}");
                 return;
             }
@@ -489,8 +490,9 @@ public sealed class DriveFileSystem : FileSystemBase
         // a save via "temp file + rename over the original" keeps the document's creation date
         long ctime = existing is not null && existing.Id != n.Id && !existing.Dir ? existing.Ctime : n.Ctime;
         ops.Add(new UpsertOp(n.Id, newParent.Id, newName, n.Dir, n.Attrs, ctime, n.Mtime));
-        if (dropExisting) _engine.Discard(existing!.Id);
-        _db.ApplyLocal(ops); // a trashed replaced file keeps its content (an unfinished upload still completes)
+        var dropFiles = dropExisting ? _engine.DiscardLater(existing!.Id) : null;
+        _db.ApplyLocal(ops);
+        if (dropFiles is not null) { _db.Durable(); dropFiles(); } // a trashed replaced file keeps its content (an unfinished upload still completes)
         return STATUS_SUCCESS;
     }
 

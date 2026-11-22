@@ -234,19 +234,32 @@ public sealed class ContentEngine : IAsyncDisposable
     }
 
     /// <summary>Drop uncommitted local changes (the file was deleted).</summary>
-    public void Discard(string id)
+    public void Discard(string id) => DiscardLater(id)?.Invoke();
+
+    /// <summary>
+    /// Forget a file's local changes now; the returned action deletes its piece files. The caller runs it
+    /// only after the index change that drops the file is on disk (<see cref="IndexDb.Durable"/>): a power
+    /// cut in between must not leave a file whose pieces are gone (it would come back with zeros inside).
+    /// </summary>
+    public Action? DiscardLater(string id)
     {
         var st = State(id);
+        List<int> pieces;
         lock (st.Lock)
         {
-            foreach (var row in _db.DirtyRows(id).Where(r => r.Staged)) DeletePiece(id, row.Idx);
+            pieces = _db.DirtyRows(id).Where(r => r.Staged).Select(r => r.Idx).ToList();
             _db.DeleteAllDirty(id);
             _db.ClearPending(id);
             foreach (var k in st.PieceGen.Keys.ToList()) st.PieceGen[k] = Interlocked.Increment(ref _stamp);
             st.LastWrite.Clear();
             st.Gen++;
         }
-        TryDeleteDir(Path.Combine(_staging, id));
+        if (pieces.Count == 0) { TryDeleteDir(Path.Combine(_staging, id)); return null; }
+        return () =>
+        {
+            lock (st.Lock) foreach (var idx in pieces) if (_db.GetDirty(id, idx) is null) DeletePiece(id, idx);
+            TryDeleteDir(Path.Combine(_staging, id));
+        };
     }
 
     // ── read ─────────────────────────────────────────────────────────────────
@@ -708,7 +721,10 @@ public sealed class ContentEngine : IAsyncDisposable
     /// <summary>Free disk by dropping local copies of pieces already safely uploaded.</summary>
     void EvictUploadedPieces()
     {
-        foreach (var row in _db.DirtyWhere("kind='U' AND staged=1"))
+        var rows = _db.DirtyWhere("kind='U' AND staged=1").ToList();
+        if (rows.Count == 0) return;
+        _db.Durable(); // the 'U' rows: after a power cut a missing piece of an uploaded chunk is harmless
+        foreach (var row in rows)
         {
             var st = State(row.Node);
             lock (st.Lock)

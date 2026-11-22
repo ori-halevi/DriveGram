@@ -333,7 +333,7 @@ sealed class TrayApp : ApplicationContext
         try
         {
             await Task.Run(() => session.StopAsync(waitForUploads, st => _ui.Post(_ =>
-                SetTooltip(L.T($"מסיים העלאות ב־{d.Letter}: נותרו {st.PendingFiles} קבצים", $"Finishing uploads on {d.Letter}: {st.PendingFiles} files left")), null)));
+                SetTooltip(L.T($"מסיים העלאות ב־{L.Ltr(d.Letter)}: נותרו {st.PendingFiles} קבצים", $"Finishing uploads on {d.Letter}: {st.PendingFiles} files left")), null)));
             await session.DisposeAsync();
         }
         catch (Exception ex) { Log.Error($"tray: stopping {d.Name} failed", ex); }
@@ -612,7 +612,7 @@ sealed class TrayApp : ApplicationContext
         {
             if (form.Received) d.ToldWritable = true;
             if (form.Received)
-                Balloon(L.T($"{d.Letter} ניתן לכתיבה", $"{d.Letter} is writable"),
+                Balloon(L.T($"{L.Ltr(d.Letter)} ניתן לכתיבה", $"{d.Letter} is writable"),
                     L.T("הכונן עבר למחשב הזה. אפשר לשמור קבצים.", "The drive moved to this PC. You can save files."));
             UpdateIcon();
         };
@@ -639,12 +639,32 @@ sealed class TrayApp : ApplicationContext
         if (d.Session != s || withdrawn) return;
         try
         {
-            if (!approved) { await Task.Run(() => s.Sync.RefuseHandoverAsync(r, default)); return; }
+            if (!approved)
+            {
+                // the other PC takes the drive when no answer arrives: a refusal is retried while it still counts
+                for (int attempt = 0; ; attempt++)
+                {
+                    try { await Task.Run(() => s.Sync.RefuseHandoverAsync(r, default)); return; }
+                    catch (Exception ex) when (attempt < 5 && d.Session == s)
+                    {
+                        Log.Warn($"tray: refusing the handover of {d.Name}: {ex.Message}; trying again");
+                        await Task.Delay(5000);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warn($"tray: refusing the handover of {d.Name}: {ex.Message}");
+                        Balloon(L.T("הסירוב לא נשלח", "The refusal was not sent"),
+                            L.T($"אין חיבור לטלגרם, ולכן {r.Name} עלול לקבל את הכונן בכל זאת.", $"No connection to Telegram, so {r.Name} may take the drive anyway."),
+                            ToolTipIcon.Warning);
+                        return;
+                    }
+                }
+            }
             UpdateIcon();
             bool done = await Task.Run(() => s.HandOverAsync(r, null, default));
             if (done) d.ToldWritable = false;
             if (done)
-                Balloon(L.T($"{d.Letter} עבר ל־{r.Name}", $"{d.Letter} moved to {r.Name}"),
+                Balloon(L.T($"{L.Ltr(d.Letter)} עבר ל־{r.Name}", $"{d.Letter} moved to {r.Name}"),
                     L.T("המחשב הזה עכשיו לקריאה בלבד. אפשר לבקש את הכונן בחזרה מהתפריט.",
                         "This PC is now read-only. You can ask for the drive back from the menu."));
         }

@@ -72,7 +72,10 @@ public class Cr6Tests
         await a.Sync.StartAsync(false, default);
         await a.Sync.PrepareForShutdownAsync(default);
         await Task.Delay(1500);                                   // several heartbeats
-        Assert.Null((await SyncService.ReadControlAsync(kit.Remote, default))!.Lease);
+        var lease = (await SyncService.ReadControlAsync(kit.Remote, default))!.Lease;
+        // kept as expired (not renewed): another PC may take it once this one stays silent, but not grab
+        // it within a minute when the shutdown is cancelled
+        Assert.True(lease is null || lease.Until < DateTimeOffset.UtcNow.ToUnixTimeSeconds());
     }
 
     [Fact]

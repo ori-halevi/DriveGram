@@ -183,7 +183,17 @@ public sealed partial class SyncService : IAsyncDisposable
         long seen = long.TryParse(_db.GetMeta("control_seq"), out var q) ? q : 0;
         if (ok && c.Seq < seen)
         {
-            // validly signed, but OLDER than one this PC already saw: an earlier copy written back
+            // validly signed but OLDER than one already seen: usually an honest PC's late edit (slow network,
+            // a retry, a laptop waking up). Believed when it changes nothing that matters; refused when it
+            // would bring back an older password / recovery key or drive settings (an old copy written back)
+            var known = ControlState.FromJson(_db.GetMeta("trusted_control"));
+            static string J<T>(T v) => System.Text.Json.JsonSerializer.Serialize(v);
+            if (known is not null && J(known.Vault) == J(c.Vault) && J(known.Drive) == J(c.Drive)
+                && known.MinReader == c.MinReader && known.MinWriter == c.MinWriter)
+            {
+                Log.Warn($"the drive's record is a late edit (#{c.Seq} after #{seen}); its keys and settings are unchanged");
+                return true;
+            }
             Log.Error($"the drive's record is an older copy (#{c.Seq} after #{seen}); not believed");
             return false;
         }
@@ -416,7 +426,8 @@ public sealed partial class SyncService : IAsyncDisposable
         var key = (l.Dev, l.Until);
         long now = Environment.TickCount64;
         if (_seenLease != key) { _seenLease = key; _seenLeaseAt = now; }
-        if (l.Until >= NowUnix) return false;
+        // expired by BOTH clocks: a PC whose clock runs fast does not take over a live holder
+        if (l.Until >= Math.Min(NowUnix, new DateTimeOffset(_remote.ServerNowUtc).ToUnixTimeSeconds())) return false;
         // the record's last edit, stamped by Telegram's server: untouched for a whole lease (plus margin
         // for this PC's own clock) means the holder is gone — at once, also right after this PC starts
         if (_remote.ControlEditedAtUtc is { } edited && _remote.ServerNowUtc - edited > _o.LeaseDuration + TimeSpan.FromMinutes(2))
@@ -451,14 +462,19 @@ public sealed partial class SyncService : IAsyncDisposable
             // does not know (crash, restored backup, duplicate after a lost reply) — every later own entry
             // is applied again, so this index follows JOURNAL order exactly like every other PC. This is
             // what keeps all PCs identical even if two of them ever wrote at the same time.
-            bool replaying = false;
+            // kept on disk: a pass cut short (network error, crash) must not forget that later own entries
+            // still have to be applied again — skipping them would leave this PC different from all others
+            bool replaying = _db.GetMeta("replay") == "1";
+            bool stopped = false;
             foreach (var item in await _remote.ListJournalAsync(_db.Applied, ct))
             {
                 if (_db.IsOwnAppend(item.Id))
                 {
                     if (replaying)
                     {
-                        var own = await ReadEntryAsync(item, ct);
+                        (JournalEntry Entry, string Nonce)? own;
+                        try { own = await ReadEntryAsync(item, ct); }
+                        catch (IncompleteDownloadException ex) { Log.Warn(ex.Message); stopped = true; break; } // again next pass
                         if (own is not null)
                             _db.InTransaction(() => { _db.ApplyAsOwn(own.Value.Entry.Ops); _db.Applied = item.Id; });
                         else _db.Applied = item.Id;
@@ -478,7 +494,7 @@ public sealed partial class SyncService : IAsyncDisposable
                     // stops this version at start; an unknown name alone (anyone can post one) is just skipped
                     if (!item.Name.StartsWith("s-"))
                     {
-                        if (await NewerFormatRequiredAsync(ct)) { MarkNeedsUpdate($"journal #{item.Id}: '{item.Name}'"); break; }
+                        if (await NewerFormatRequiredAsync(ct)) { MarkNeedsUpdate($"journal #{item.Id}: '{item.Name}'"); stopped = true; break; }
                         Log.Warn($"journal #{item.Id}: '{item.Name}' is not a record this version reads; ignored");
                     }
                 }
@@ -490,7 +506,7 @@ public sealed partial class SyncService : IAsyncDisposable
                     {
                         // stop here for now (nothing skipped); only an entry that never downloads whole is given up
                         int n = _incomplete[item.Id] = _incomplete.GetValueOrDefault(item.Id) + 1;
-                        if (n < 3) { Log.Warn(ex.Message); break; }
+                        if (n < 3) { Log.Warn(ex.Message); stopped = true; break; }
                         Log.Error($"journal #{item.Id} never downloaded completely ({n} tries); skipped");
                         _db.Applied = item.Id;
                         continue;
@@ -500,11 +516,11 @@ public sealed partial class SyncService : IAsyncDisposable
                         // decrypted with the drive's key (so written by a key holder) but not understood: an op
                         // type / shape from a newer version: stop HERE (skip nothing, advance nothing)
                         MarkNeedsUpdate($"journal #{item.Id}: {ex.Message}");
-                        break;
+                        stopped = true; break;
                     }
                     if (read is null)
                     {
-                        if (await NewerFormatRequiredAsync(ct)) { MarkNeedsUpdate($"journal #{item.Id}"); break; }
+                        if (await NewerFormatRequiredAsync(ct)) { MarkNeedsUpdate($"journal #{item.Id}"); stopped = true; break; }
                         _db.Applied = item.Id; // not a DriveGram record: logged, skipped
                         continue;
                     }
@@ -520,16 +536,33 @@ public sealed partial class SyncService : IAsyncDisposable
                     if (entry.V > StorageFormat.Current)
                     {
                         MarkNeedsUpdate($"journal #{item.Id} is format {entry.V}");
-                        break;
+                        stopped = true; break;
                     }
                     if (entry.Dev == _db.DeviceId)
                     {
+                        var inflight = Inflight();
+                        if (inflight is not null && inflight.Value.Nonce == nonce)
+                        {
+                            // the batch this PC sent whose reply never arrived (lost, or a power cut): it IS in
+                            // the journal — those changes are sent, and must never be sent again later
+                            bool again = replaying;
+                            _db.InTransaction(() =>
+                            {
+                                if (again) _db.ApplyAsOwn(entry.Ops);
+                                _db.Sent(inflight.Value.Seqs, item.Id, nonce);
+                                _db.SetMeta("inflight", null);
+                                _db.Applied = item.Id;
+                                if (again && _db.OutboxCount() > 0) _db.SetMeta("rebase", "1");
+                            });
+                            continue;
+                        }
                         // ours, but this index does not know it was applied (see above): apply in order
                         _db.InTransaction(() =>
                         {
                             _db.ApplyAsOwn(entry.Ops);
                             _db.Applied = item.Id;
                             _db.MarkSeen(nonce);
+                            _db.SetMeta("replay", "1");
                             if (_db.OutboxCount() > 0) _db.SetMeta("rebase", "1");
                         });
                         replaying = true;
@@ -543,6 +576,7 @@ public sealed partial class SyncService : IAsyncDisposable
                             foreach (var op in entry.Ops) _db.ApplyRemote(op);
                             _db.Applied = item.Id;
                             _db.MarkSeen(nonce);
+                            _db.SetMeta("replay", "1");
                             if (entry.Ctl == 1) _db.SetMeta("control_mac", "1"); // an unsigned record is never accepted again
                             // changes held back on this PC will be journaled AFTER this entry: mark that the
                             // local index must replay them on top of it (same order as every other PC)
@@ -557,6 +591,7 @@ public sealed partial class SyncService : IAsyncDisposable
                 }
                 _db.Applied = item.Id;
             }
+            if (!stopped && replaying) _db.SetMeta("replay", null); // the whole journal is applied in order
             if (applied > 0) Log.Info($"applied {applied} ops from other PCs");
             if (_db.GetMeta("rebase") is not null)
             {
@@ -569,6 +604,17 @@ public sealed partial class SyncService : IAsyncDisposable
     }
 
     const long MaxEntryBytes = 16L << 20; // 500 ops are far smaller
+
+    /// <summary>The journal entry this PC sent last whose reply it has not recorded yet.</summary>
+    (string Nonce, long[] Seqs, byte[] Payload)? Inflight()
+    {
+        var v = _db.GetMeta("inflight");
+        if (string.IsNullOrEmpty(v)) return null;
+        var p = v.Split('|');
+        if (p.Length != 3) return null;
+        try { return (p[0], p[1].Split(',', StringSplitOptions.RemoveEmptyEntries).Select(long.Parse).ToArray(), Convert.FromBase64String(p[2])); }
+        catch (FormatException) { return null; }
+    }
 
     sealed class IncompleteDownloadException(string m) : IOException(m);
     readonly Dictionary<int, int> _incomplete = new();
@@ -668,11 +714,30 @@ public sealed partial class SyncService : IAsyncDisposable
             {
                 // Ops of a NEW file still uploading wait (in order) for its content: sent now, other PCs
                 // would show it as an empty file for minutes, and copying it there gives an empty copy.
-                var held = _db.UncommittedNewFiles();
-                var batch = _db.PeekOutbox(5000).Where(b => !held.Contains(b.Op.Id)).Take(500).ToList();
-                if (batch.Count == 0) return;
-                var entry = new JournalEntry(1, _db.DeviceId, NowUnix, batch.Select(b => b.Op).ToArray(), Ctl: 1);
-                var payload = Envelope.Seal(_keys.JournalKey, OpJson.SerializeEntry(entry));
+                // the batch being sent is kept (with its nonce) BEFORE it goes out: after a lost reply or a power
+                // cut the very same entry is sent again (or found in the journal), never the same changes under
+                // a new nonce (that would undo newer changes other PCs made meanwhile)
+                long[] seqs;
+                byte[] payload;
+                if (Inflight() is { } inflight && _db.OutboxHas(inflight.Seqs))
+                    (seqs, payload) = (inflight.Seqs, inflight.Payload);
+                else
+                {
+                    var held = _db.UncommittedNewFiles();
+                    var batch = _db.PeekOutbox(5000).Where(b => !held.Contains(b.Op.Id)).Take(500).ToList();
+                    if (batch.Count == 0) { _db.SetMeta("inflight", null); return; }
+                    while (true)
+                    {
+                        var entry = new JournalEntry(1, _db.DeviceId, NowUnix, batch.Select(b => b.Op).ToArray(), Ctl: 1);
+                        payload = Envelope.Seal(_keys.JournalKey, OpJson.SerializeEntry(entry));
+                        // every reader takes entries up to MaxEntryBytes: big purges are split well below it
+                        if (payload.Length <= MaxEntryBytes / 4 || batch.Count == 1) break;
+                        batch = batch.Take(batch.Count / 2).ToList();
+                    }
+                    seqs = batch.Select(b => b.Seq).ToArray();
+                    _db.SetMeta("inflight", $"{Convert.ToHexString(payload, 4, 12)}|{string.Join(',', seqs)}|{Convert.ToBase64String(payload)}");
+                    _db.Durable();
+                }
                 // Checked before EVERY attempt: after a long outage another PC may have taken the lease,
                 // and appending then would put two writers' changes into the journal (diverged indexes).
                 int msgId = await Retry.ForeverAsync(async () =>
@@ -680,8 +745,12 @@ public sealed partial class SyncService : IAsyncDisposable
                     if (!await StillHoldLeaseAsync(ct)) throw new LeaseLostException();
                     return await _remote.AppendJournalAsync($"j-{_db.DeviceId[..8]}.bin", payload, ct);
                 }, "journal append", ct);
-                _db.Sent(batch.Select(b => b.Seq), msgId, Convert.ToHexString(payload, 4, 12));
-                _opsSinceSnapshot += batch.Count;
+                _db.InTransaction(() =>
+                {
+                    _db.Sent(seqs, msgId, Convert.ToHexString(payload, 4, 12));
+                    _db.SetMeta("inflight", null);
+                });
+                _opsSinceSnapshot += seqs.Length;
             }
         }
         catch (LeaseLostException) { /* outbox kept; reported via HeldBackChanges */ }
@@ -733,6 +802,7 @@ public sealed partial class SyncService : IAsyncDisposable
             return;
         }
         int claimed = _db.ClaimGarbage(_o.GarbageGrace);
+        if (claimed > 0) _db.Durable(); // on disk before Telegram deletes anything
         while (true)
         {
             var msgs = _db.PendingDeletions();
@@ -784,6 +854,7 @@ public sealed partial class SyncService : IAsyncDisposable
                     await CatchUpAsync(ct);
                     if (lease.Until <= NowUnix)
                     {
+                        _releasedForShutdown = false;
                         Log.Info("the write lease expired while this PC slept or was offline; taking it again");
                         await TryAcquireLeaseAsync(false, ct);
                         continue;
@@ -828,9 +899,10 @@ public sealed partial class SyncService : IAsyncDisposable
         await FlushAsync(ct);
         if (_db.OutboxCount() == 0 && _db.PendingNodes().Count == 0)
         {
-            await UpdateControlAsync(c => c.Lease?.Dev == _db.DeviceId ? c with { Lease = null } : c, ct);
-            // if Windows really shuts down, the other PCs may write right away; if the shutdown is cancelled,
-            // the lease is taken back properly (catch-up first) once this pause is over
+            // marked expired, not given away: if the shutdown is cancelled (an app asks "Save?"), no other PC
+            // grabs the drive within a minute; a real shutdown frees it on the way out (QuickRelease), or
+            // the others take it once this PC stays silent (~2 heartbeats)
+            await UpdateControlAsync(c => c.Lease?.Dev == _db.DeviceId ? c with { Lease = c.Lease with { Until = NowUnix - 1 } } : c, ct);
             _leaseConfirmedAt = DateTime.MinValue;
             _shutdownPauseUntil = DateTime.UtcNow.AddMinutes(2);
             _releasedForShutdown = true;

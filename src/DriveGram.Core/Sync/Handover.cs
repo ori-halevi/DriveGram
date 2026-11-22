@@ -37,8 +37,16 @@ public sealed partial class SyncService
     {
         if (DateTime.UtcNow < _nextHandoverCheck || HandingOver) return;
         _nextHandoverCheck = DateTime.UtcNow.AddSeconds(10);
-        var r = (await ReadTrustedAsync(ct))?.Handover;
+        var rec = await ReadTrustedAsync(ct);
         if (!ControlTrusted) return; // a forged request is never shown
+        if (rec?.Lease is { } l && l.Dev != _db.DeviceId && !ShutdownPause)
+        {
+            // another PC took the drive: noticed within ~10 s, not at the next heartbeat
+            SetWritable(false, l.Name);
+            Log.Error($"lease taken by '{l.Name}'; {_db.OutboxCount()} local changes are held back");
+            return;
+        }
+        var r = rec?.Handover;
         if (r is null || r.Dev == _db.DeviceId || r.Id == _surfacedRequest) return;
         if (!(r.State == "asked" || (r.State == "seen" && _resurface))) return;
         _resurface = false;
@@ -60,8 +68,24 @@ public sealed partial class SyncService
     public async Task<bool> RequestStillOpenAsync(HandoverRequest r, CancellationToken ct)
     {
         var c = await ReadTrustedAsync(ct);
-        return ControlTrusted && c?.Lease?.Dev == _db.DeviceId && c.Handover?.Id == r.Id && c.Handover.State is "asked" or "seen";
+        bool open = ControlTrusted && c?.Lease?.Dev == _db.DeviceId && c.Handover?.Id == r.Id && c.Handover.State is "asked" or "seen";
+        if (!open) return false;
+        // a request whose PC stopped refreshing it (gone, asleep, shut down) closes: never approved by silence
+        long now = Environment.TickCount64;
+        if (_watchId != r.Id || _watchUpdated != c!.Handover!.Updated) (_watchId, _watchUpdated, _watchSince) = (r.Id, c!.Handover!.Updated, now);
+        else if (now - _watchSince > RequestSilence.TotalMilliseconds)
+        {
+            Log.Warn($"handover: '{r.Name}' stopped waiting for an answer; the question is closed");
+            return false;
+        }
+        return true;
     }
+
+    /// <summary>The asking PC refreshes its request this often while it waits; silent this long = gone.</summary>
+    static readonly TimeSpan RequestRefresh = TimeSpan.FromSeconds(15);
+    static readonly TimeSpan RequestSilence = TimeSpan.FromSeconds(40);
+    string? _watchId;
+    long _watchUpdated, _watchSince, _refreshedAt;
 
     // ── on the PC that wants the drive ───────────────────────────────────────
     /// <summary>Ask the PC that writes for the drive. Fails if another request is already being served.</summary>
@@ -91,7 +115,15 @@ public sealed partial class SyncService
         var c = (await ReadTrustedAsync(ct))!;
         if (!ControlTrusted) throw new ControlNotTrustedException(); // nothing in it is believed: say so
         if (c.Lease?.Dev == _db.DeviceId) return (c.Handover, c.Lease);
-        if (c.Handover?.Id != mine.Id)
+        if (c.Handover is { State: "asked" or "seen" } h && h.Id == mine.Id
+            && Environment.TickCount64 - _refreshedAt > RequestRefresh.TotalMilliseconds)
+        {
+            // still here and waiting (the holder closes a question nobody waits for any more)
+            _refreshedAt = Environment.TickCount64;
+            c = await UpdateControlAsync(x => x.Handover?.Id == mine.Id && x.Handover.State is "asked" or "seen"
+                ? x with { Handover = x.Handover with { Updated = Math.Max(NowUnix, x.Handover.Updated + 1) } } : x, ct, asHolder: false);
+        }
+        else if (c.Handover?.Id != mine.Id)
         {
             // a rewrite by the other PC that read the record just before our request: ask again (same request)
             c = await UpdateControlAsync(x => x.Handover is null || x.Handover.State is "done" or "refused" ? x with { Handover = mine } : x, ct, asHolder: false);
