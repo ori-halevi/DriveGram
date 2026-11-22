@@ -217,7 +217,7 @@ sealed class HandoverWaitForm : Form
                             ? L.T($"{_holder} סירב להעביר את הכונן.", $"{_holder} refused to hand the drive over.")
                             : L.T($"{_holder} לא הצליח להעביר את הכונן (אולי אין לו חיבור).", $"{_holder} could not hand the drive over (perhaps it is offline).");
                         _takeNow.Text = L.T("קח בכל זאת", "Take it anyway");
-                        _refusedShown = true;
+                        _refusedShown = state == "refused";
                         _cancel.Text = L.T("סגור", "Close");
                         break; // keep watching: the drive may still arrive
                     case "finishing":

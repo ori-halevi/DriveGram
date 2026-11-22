@@ -31,8 +31,11 @@ public static class Exporter
                 !e.Attributes.HasFlag(FileAttributes.Hidden | FileAttributes.System)
                 && e.Name is not ("$RECYCLE.BIN" or "System Volume Information" or "desktop.ini"));
             if (other && !allowNonEmpty) throw new TargetNotEmptyException();
-            File.WriteAllText(marker, "DriveGram export\r\n");
-            File.SetAttributes(marker, FileAttributes.Hidden);
+            if (!other) // a folder the user's files share is asked about again every time
+            {
+                File.WriteAllText(marker, "DriveGram export\r\n");
+                File.SetAttributes(marker, FileAttributes.Hidden);
+            }
         }
         var stack = new Stack<(string Src, string Dst)>();
         stack.Push((sourceRoot, target));
@@ -62,11 +65,20 @@ public static class Exporter
                     var ctime = info.CreationTimeUtc;
                     progress?.Report(new ExportProgress(files, skipped, bytes, f));
                     // FAT32 keeps times in 2 s steps, exFAT in 10 ms: compare with a small tolerance
-                    if (File.Exists(to) && new FileInfo(to) is { } existing
-                        && existing.Length == length && Math.Abs((existing.LastWriteTimeUtc - mtime).TotalSeconds) <= 2)
+                    if (File.Exists(to) && new FileInfo(to) is { } existing)
                     {
-                        skipped++;
-                        continue;
+                        if (existing.Length == length && Math.Abs((existing.LastWriteTimeUtc - mtime).TotalSeconds) <= 2)
+                        {
+                            skipped++;
+                            continue;
+                        }
+                        if (existing.LastWriteTimeUtc > mtime.AddSeconds(2))
+                        {
+                            // changed in the target after it was exported: never replaced by the older drive copy
+                            errors.Add($"{to}: newer than the drive's copy; kept");
+                            skipped++;
+                            continue;
+                        }
                     }
                     var tmp = $"{to}.{Guid.NewGuid():N}.dgpart";
                     long copied = 0;

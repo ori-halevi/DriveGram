@@ -36,6 +36,7 @@ static class Ui
     /// <summary>A message box owned by an invisible top-most window: never hidden behind the browser.</summary>
     static T OnTop<T>(Func<IWin32Window, T> show)
     {
+        if (Form.ActiveForm is { Visible: true } active) return show(active);
         using var owner = new Form
         {
             TopMost = true, ShowInTaskbar = false, FormBorderStyle = FormBorderStyle.None,
@@ -167,7 +168,7 @@ sealed class TrashForm : Form
                    $"DriveGram – {_session.MountPoint} recycle bin ({_list.Items.Count})");
     }
 
-    void Act(bool restore)
+    async void Act(bool restore)
     {
         var items = _list.SelectedItems.Cast<ListViewItem>().Select(i => (TrashItem)i.Tag!).ToList();
         if (items.Count == 0) return;
@@ -177,13 +178,19 @@ sealed class TrashForm : Form
             return;
         try
         {
-            foreach (var t in items)
+            UseWaitCursor = true;
+            Enabled = false;
+            await Task.Run(() =>
             {
-                if (restore) _session.Restore(t.Id);
-                else _session.DeleteForever(t.Id);
-            }
+                foreach (var t in items)
+                {
+                    if (restore) _session.Restore(t.Id);
+                    else _session.DeleteForever(t.Id);
+                }
+            });
         }
         catch (Exception ex) { Ui.Error(ex.Message); }
+        finally { UseWaitCursor = false; Enabled = true; }
         Reload();
     }
 }

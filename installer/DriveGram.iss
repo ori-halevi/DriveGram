@@ -78,6 +78,8 @@ Name: "{userdesktop}\DriveGram"; Filename: "{app}\drivegram-tray.exe"; Tasks: de
 Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\{#WinFspMsi}"" /qb /norestart"; StatusMsg: "{cm:InstallingWinFsp}"; \
   Check: NeedsWinFsp; AfterInstall: CheckWinFspInstalled; Flags: waituntilterminated
 Filename: "{app}\drivegram-tray.exe"; Description: "{cm:Launch}"; Flags: postinstall nowait skipifsilent
+; a silent upgrade (e.g. an updater) stopped the running app: start it again
+Filename: "{app}\drivegram-tray.exe"; Flags: nowait runasoriginaluser; Check: WizardSilent
 
 [Code]
 function WinFspInstalled: Boolean;
@@ -153,7 +155,12 @@ begin
   { exit code 4: something exists only on this PC }
   { anything but "nothing only here" (0) warns: also a check that could not run }
   if (not Exec(Exe, 'uninstall-cleanup --check', '', SW_HIDE, ewWaitUntilTerminated, Code)) or (Code <> 0) then
-    if MsgBox(CustomMessage('CleanupLocalOnly'), mbError, MB_YESNO or MB_DEFBUTTON2) <> IDYES then exit;
+    if MsgBox(CustomMessage('CleanupLocalOnly'), mbError, MB_YESNO or MB_DEFBUTTON2) <> IDYES then
+    begin
+      if RegValueExists(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Run', 'DriveGram') then
+        SaveStringToFile(ExpandConstant('{localappdata}\DriveGram\autostart.reinstall'), '1', False);
+      exit;
+    end;
   Exec(Exe, 'uninstall-cleanup', '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 

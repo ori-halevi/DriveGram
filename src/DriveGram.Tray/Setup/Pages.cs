@@ -299,6 +299,7 @@ sealed class LoginPage : WizardPage
         {
             // a saved sign-in that Telegram revoked (e.g. "terminate all sessions"): start from a clean one,
             // or every new attempt would run on the dead session again
+            _revoked = Ctx.State.Config.AccountKey;
             Ctx.ResetClient(signOut: true);
             _account.Visible = false;
             _signIn.Visible = true;
@@ -320,10 +321,12 @@ sealed class LoginPage : WizardPage
     }
 
     /// <summary>Accounts already signed in on this PC: one click instead of a new sign-in.</summary>
+    string? _revoked;
+
     void ShowKnownAccounts()
     {
         _known.Controls.Clear();
-        var accounts = TelegramAccounts.Known().Where(a => a.Key != Ctx.State.Config.AccountKey).ToList();
+        var accounts = TelegramAccounts.Known().Where(a => a.Key != Ctx.State.Config.AccountKey && a.Key != _revoked).ToList();
         _known.Visible = accounts.Count > 0;
         if (accounts.Count == 0) return;
         _known.Controls.Add(Theme.Label(L.T("חשבון שכבר מחובר במחשב הזה (בלי התחברות נוספת):", "An account already signed in on this PC (no new sign-in):"), Theme.Heading));
@@ -414,6 +417,7 @@ sealed class LoginPage : WizardPage
         {
             _qrCts?.Cancel();
             _tick.Stop();
+            _pwWait?.TrySetResult(null); // a QR sign-in waiting for its 2FA password must not block the switch
             if (_qrTask is not null) { try { await _qrTask; } catch { } }
             _qr.Visible = false;
             _phone.Visible = true;
@@ -935,6 +939,7 @@ sealed class DrivePage : WizardPage
                 identity = new DriveIdentity(driveId, name, channels.DataId);
                 cfg.Channels = channels;
                 cfg.DriveId = driveId;
+                Ctx.CreatedDriveId = driveId;
                 cfg.VolumeLabel = name;
             }
             var remote = _remote!;

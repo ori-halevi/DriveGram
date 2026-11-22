@@ -348,8 +348,10 @@ public sealed class DriveFileSystem : FileSystemBase
             bool neverStored = !n.Dir && _db.IsPending(n.Id) && _db.CommittedChunks(n.Id).Count == 0;
             // never uploaded AND (a temp file, or created minutes ago by this session — a cancelled copy or a
             // download that failed); an offline-saved file deleted by mistake later still goes to the trash
-            bool justMade = _createdAt.TryGetValue(n.Id, out var made) && Environment.TickCount64 - made < 30 * 60_000;
-            if (!n.Dir && (n.Name.StartsWith("~$") || InGitDir(fileName) || (neverStored && (LooksTemporary(n.Name) || justMade))))
+            // a copy cancelled half-way is deleted right after it started; a real new document is not
+            bool justMade = _createdAt.TryGetValue(n.Id, out var made) && Environment.TickCount64 - made < 2 * 60_000;
+            bool gitScratch = InGitDir(fileName) && (n.Name.EndsWith(".lock") || n.Name.StartsWith("tmp_") || LooksTemporary(n.Name));
+            if (!n.Dir && (n.Name.StartsWith("~$") || gitScratch || (neverStored && (LooksTemporary(n.Name) || justMade))))
             {
                 _engine.Discard(n.Id); // first: the purge removes the rows Discard uses to find the pieces
                 _db.ApplyLocal(new PurgeOp(n.Id));
@@ -391,7 +393,7 @@ public sealed class DriveFileSystem : FileSystemBase
     {
         bytesTransferred = 0;
         fileInfo = default;
-        if (ReadOnlyFor(fileNode)) return StatusWriteProtected;
+        if (!constrainedIo && ReadOnlyFor(fileNode)) return StatusWriteProtected; // Windows' delayed writes: always
         var h = (Handle)fileNode;
         var n = _db.Get(h.Id) ?? throw new FileNotFoundException();
         ulong size = (ulong)n.Size;
@@ -426,7 +428,7 @@ public sealed class DriveFileSystem : FileSystemBase
         ulong lastAccessTime, ulong lastWriteTime, ulong changeTime, out FileInfo fileInfo)
     {
         fileInfo = default;
-        if (ReadOnly) return StatusWriteProtected;
+        if (ReadOnlyFor(fileNode)) return StatusWriteProtected;
         var n = NodeOf(fileNode);
         if (n.IsRoot) { fileInfo = Info(n); return STATUS_SUCCESS; }
         uint attrs = fileAttributes != unchecked((uint)-1) ? CleanAttrs(fileAttributes, n.Dir) : n.Attrs;
@@ -480,7 +482,8 @@ public sealed class DriveFileSystem : FileSystemBase
             if (!replaceIfExists) return STATUS_OBJECT_NAME_COLLISION;
             if (existing.Dir) return STATUS_ACCESS_DENIED;
             // replaced file goes to the trash (= old version kept 30 days); git rewrites its own files constantly
-            dropExisting = InGitDir(newFileName) || (_db.IsPending(existing.Id) && _db.CommittedChunks(existing.Id).Count == 0);
+            dropExisting = InGitDir(newFileName) || existing.Size == 0
+                           || (_db.IsPending(existing.Id) && _db.CommittedChunks(existing.Id).Count == 0);
             ops.Add(dropExisting ? new PurgeOp(existing.Id) : new TrashOp(existing.Id, Now));
         }
         // a save via "temp file + rename over the original" keeps the document's creation date

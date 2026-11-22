@@ -390,7 +390,8 @@ public sealed class DriveSession : IAsyncDisposable
         return false;
     }
 
-    public List<TrashItem> Trash() => Db.Trashed().Where(n => n.Parent is null || Db.Get(n.Parent)?.Trashed is null or 0).Select(n =>
+    public List<TrashItem> Trash() => Db.Trashed().Where(n => n.Parent is null || Db.Get(n.Parent)?.Trashed is null or 0)
+        .Where(n => !PathOf(n.Id).Contains(@"\.git\", StringComparison.OrdinalIgnoreCase)).Select(n =>
     {
         var folder = n.Parent is null ? @"\" : PathOf(n.Parent);
         return new TrashItem(n.Id, n.Name, MountPoint + folder, n.Dir, n.Size, DateTime.FromFileTimeUtc(n.Trashed).ToLocalTime());

@@ -32,6 +32,8 @@ sealed class DriveController
     public bool? ToldWritable;
     /// <summary>Keys just unlocked in the setup wizard: the first mount uses them instead of asking again.</summary>
     public Keys? PendingKeys;
+    /// <summary>The last mount failed because Windows refused it (not offline, not a password).</summary>
+    public bool LastMountRefused;
 
     public DriveController(AppState state) => State = state;
 
@@ -139,6 +141,7 @@ sealed class TrayApp : ApplicationContext
         if (d.Session is not null || d.Starting || _quitting || !_drives.Contains(d)) return;
         d.RetryTimer?.Stop();
         d.Starting = true;
+        d.LastMountRefused = false;
         d.Problem = null;
         d.NeedsSetup = false;
         UpdateIcon();
@@ -184,6 +187,7 @@ sealed class TrayApp : ApplicationContext
         catch (PasswordNotGivenException) { StopRetrying(d); d.Problem = L.T("לא הוזנה סיסמה", "no password entered"); }
         catch (MountFailedException ex)
         {
+            d.LastMountRefused = true;
             d.Problem = Short(ex.Message);
             Balloon(L.T("לא ניתן לחבר את הכונן", "The drive could not be connected"), ex.Message, ToolTipIcon.Error);
         }
@@ -448,21 +452,29 @@ sealed class TrayApp : ApplicationContext
         bool isNew = d is null;
         DialogResult result;
         Keys? wizardKeys = null;
+        string? createdDriveId = null;
         using (_wizard = new Setup.SetupWizard(state, isNew))
         {
             result = _wizard.ShowDialog();
             wizardKeys = _wizard.Context.UnlockedKeys;
+            createdDriveId = _wizard.Context.CreatedDriveId;
             _wizard = null;
         }
         // The drive page saves a new binding (other channels / account) as soon as it is chosen, so a
         // cancel AFTER that point cannot restore the old one: the profile on disk is the truth.
         bool rebound = !isNew && Binding(AppState.Open(state.Id)) != Binding(d!.State);
-        if (result != DialogResult.OK && isNew && AppState.Open(state.Id).Config.Channels is not null)
+        var oldAccount = d?.State.Config.AccountKey;
+        if (result != DialogResult.OK && isNew && createdDriveId is not null && !_quitting
+            && AppState.Open(state.Id).Config.DriveId == createdDriveId)
         {
             var keep = Ui.Ask(L.T("הכונן כבר נוצר בטלגרם.\n\nכן – לשמור אותו (הוא יתחבר עם הגדרות ברירת מחדל)\nלא – למחוק אותו מטלגרם",
                     "The drive was already created in Telegram.\n\nYes – keep it (it connects with default settings)\nNo – delete it from Telegram"),
                 MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            if (keep == DialogResult.Yes) result = DialogResult.OK;
+            if (keep == DialogResult.Yes)
+            {
+                result = DialogResult.OK;
+                if (_drives.Count == 0) try { ShellIntegration.SetAutostart(true); } catch { } // as the last page would have
+            }
             else
             {
                 try { await DriveDeletion.DeleteStorageAsync(AppState.Open(state.Id)); }
@@ -492,6 +504,8 @@ sealed class TrayApp : ApplicationContext
         }
         d.PendingKeys = wizardKeys;
         await MountAsync(d);
+        if (!string.IsNullOrEmpty(oldAccount) && oldAccount != d.State.Config.AccountKey)
+            await TelegramAccounts.SignOutIfUnusedAsync(oldAccount);
         if (!string.IsNullOrEmpty(account))
             foreach (var other in _drives.Where(o => o != d && o.NeedsSetup && o.Session is null && o.State.Config.AccountKey == account).ToList())
             {
@@ -671,7 +685,7 @@ sealed class TrayApp : ApplicationContext
         Log.Info($"tray: {d.Name} is now a {(form.Network ? "network drive" : "regular disk")}");
         if (!wasMounted) return;
         await MountAsync(d);
-        if (d.Session is null && !d.Starting)
+        if (d.Session is null && !d.Starting && d.LastMountRefused)
         {
             // Windows refused it this way: back to how it was, and say so
             d.State.Config.NetworkDrive = before;

@@ -366,6 +366,7 @@ public sealed class ContentEngine : IAsyncDisposable
     {
         if (src.IsEmpty) return;
         if (!mayExceedQuota) WaitForRoom(NewRoomFor(id, offset, src.Length));
+        else WaitForRoomPaging(NewRoomFor(id, offset, src.Length));
         var st = State(id);
         lock (st.Lock)
         {
@@ -630,6 +631,36 @@ public sealed class ContentEngine : IAsyncDisposable
             Interlocked.Exchange(ref _freeAt, now);
         }
         return Interlocked.Read(ref _freeBytes);
+    }
+
+    const long HardFloor = 1L << 30; // below this much free disk even already-saved data cannot be taken
+
+    /// <summary>
+    /// Data an app already "saved" (Windows delivers it later): it may not be refused while the disk has
+    /// room, but it must not fill the disk either. Make room (uploaded pieces, cache), wait while uploads
+    /// progress (this slows the copy to the upload speed, which is the point), then accept it over the
+    /// staging quota — only a disk about to be full refuses it.
+    /// </summary>
+    void WaitForRoomPaging(int incoming)
+    {
+        if (incoming <= 0 || Interlocked.Read(ref _stagingBytes) + incoming <= StagingLimit()) return;
+        var deadline = DateTime.UtcNow + _o.BackpressureTimeout;
+        long lastSent = _remote.BytesSent;
+        var movedAt = DateTime.UtcNow;
+        while (Interlocked.Read(ref _stagingBytes) + incoming > StagingLimit())
+        {
+            EvictUploadedPieces();
+            FitCacheToDisk(incoming);
+            if (Interlocked.Read(ref _stagingBytes) + incoming <= StagingLimit()) return;
+            if (FreeDisk() - incoming < HardFloor)
+                throw new IOException("DriveGram: local staging area is full (the local disk is full).");
+            long sent = _remote.BytesSent;
+            if (sent != lastSent) { lastSent = sent; movedAt = DateTime.UtcNow; }
+            // nothing uploads (offline, signed out) or waited long enough: take it, the disk still has room
+            if (DateTime.UtcNow > deadline || DateTime.UtcNow - movedAt > TimeSpan.FromSeconds(20)
+                || _cts.IsCancellationRequested || _waits.IsCancellationRequested) return;
+            WaitHandle.WaitAny([_roomSignal, _cts.Token.WaitHandle, _waits.Token.WaitHandle], 500);
+        }
     }
 
     /// <summary>The cache is only a copy: when the local disk runs low it shrinks (below its current size
@@ -903,6 +934,7 @@ public sealed class ContentEngine : IAsyncDisposable
                 await Task.Delay(1000, ct);
                 if (++_ticks % 60 == 0) ReconcileStaging(adjustCount: true);
                 if (_ticks % 10 == 0) FitCacheToDisk(0);
+                if (Interlocked.Read(ref _stagingBytes) > StagingLimit()) EvictUploadedPieces();
                 long now = Environment.TickCount64;
                 var due = new List<(string, int)>();
                 foreach (var row in _db.DirtyWhere($"kind='S' AND size={CS}"))

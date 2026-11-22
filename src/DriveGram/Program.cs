@@ -34,6 +34,17 @@ DriveGram.Sync.DriveIdentity? newIdentity = null; // set when `init` creates a b
 var driveSel = Opt("--drive");
 Log.Open(Path.Combine(AppState.Root, "logs"));
 var command0 = argv.Count > 0 ? argv[0].ToLowerInvariant() : "help";
+if (folder is null && command0 is "status" && System.Threading.Mutex.TryOpenExisting("DriveGramTrayRunning", out var trayForStatus))
+{
+    trayForStatus.Dispose();
+    foreach (var s in AppState.All().Where(a => a.Folder is null))
+    {
+        var (pendingHere, unsentHere) = DriveDeletion.LocalOnly(s);
+        Console.WriteLine($"{s.Config.MountPoint} {s.Config.VolumeLabel}: {pendingHere} files waiting to upload, {unsentHere} changes waiting to be sent (on this PC)");
+    }
+    Console.WriteLine("(DriveGram is running in the notification area: its icon shows the full status.)");
+    return 0;
+}
 if (folder is null && command0 is "setup" or "login" or "init" or "mount" or "status" or "uninstall-cleanup"
     && System.Threading.Mutex.TryOpenExisting("DriveGramTrayRunning", out var trayRunning))
 {
@@ -112,7 +123,7 @@ async Task<int> UninstallCleanup(bool check)
     Log.Close(); // the log file lives in the folder being deleted
     // Only what DriveGram itself keeps there (profiles with a config.json, accounts, logs and its own files),
     // then the folder if that left it empty: a root pointed elsewhere (DRIVEGRAM_ROOT) is never wiped.
-    var root = AppState.Root;
+    var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DriveGram");
     bool Ours(string dir)
     {
         var name = Path.GetFileName(dir);
@@ -168,7 +179,7 @@ int Help()
           drivegram unmount                Ask the running drive (console or tray) to unmount.
           drivegram status                 Show what is stored and what is waiting to upload.
           drivegram drives                 List the drives on this PC.
-          drivegram export <folder>        Copy every file of a mounted drive to a folder (resumable).
+          drivegram export <folder>        Copy every file of a mounted drive to a folder (resumable).   (add --force to export into a folder that holds other files)
           drivegram quit                   Close the tray app (it finishes uploads first).
 
         Several drives: add --drive <letter> (e.g. --drive U:) to choose one; default is the first.
@@ -453,7 +464,13 @@ async Task<int> Export(string? target)
     });
     try
     {
-        var errors = await Exporter.CopyAsync(root, full, progress, cts.Token, allowNonEmpty: forceFlag);
+        List<string> errors;
+        try { errors = await Exporter.CopyAsync(root, full, progress, cts.Token, allowNonEmpty: forceFlag); }
+        catch (Exporter.TargetNotEmptyException)
+        {
+            Console.Error.WriteLine("The folder already holds other files. Add --force to export into it anyway (files with the same names are replaced).");
+            return 2;
+        }
         Console.WriteLine();
         foreach (var e in errors) Console.Error.WriteLine("  failed: " + e);
         Console.WriteLine(errors.Count == 0 ? "Export complete." : $"Done; {errors.Count} files failed (run again to retry them).");

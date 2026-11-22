@@ -16,6 +16,8 @@ sealed class SetupContext : IDisposable
     public TelegramRemote? Remote { get; set; }
     /// <summary>The drive's keys, once unlocked in the wizard (used for the first mount, in memory only).</summary>
     public DriveGram.Crypto.Keys? UnlockedKeys { get; set; }
+    /// <summary>Set when THIS wizard created a new drive in Telegram (only such a drive may be deleted on cancel).</summary>
+    public string? CreatedDriveId { get; set; }
     /// <summary>Answers a 2FA prompt during QR sign-in (set by the login page).</summary>
     public Func<string?>? AskPassword { get; set; }
 

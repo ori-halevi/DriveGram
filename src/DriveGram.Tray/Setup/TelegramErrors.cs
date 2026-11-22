@@ -70,6 +70,8 @@ static class TelegramErrors
         TimeoutException or System.Net.Sockets.SocketException or System.Net.Http.HttpRequestException
             or IOException { InnerException: System.Net.Sockets.SocketException } =>
             L.T("אין חיבור לשרתי טלגרם. בדוק את החיבור לאינטרנט ונסה שוב.", "Cannot reach Telegram. Check the internet connection and try again."),
+        _ when ex.Message.Any(ch => ch is >= '\u0590' and <= '\u05FF') || ex.GetType().Namespace?.StartsWith("DriveGram") == true
+            => ex.Message, // ours: already written for people
         _ => L.T($"משהו השתבש ({ex.Message}). נסה שוב בעוד רגע; אם זה חוזר, הפרטים ביומן (בתפריט ← \"פתח את תיקיית היומן\").",
                  $"Something went wrong ({ex.Message}). Try again in a moment; if it keeps happening, details are in the log (menu → \"Open the log folder\")."),
     };
