@@ -101,7 +101,7 @@ public sealed partial class SyncService : IAsyncDisposable
     public string IncompleteSuffix { get; set; } = " (incomplete)";
 
     /// <summary>A held-back version of a file could not be completed (parts were deleted meanwhile).</summary>
-    public event Action<string>? FileIncomplete;
+    public event Action<string, string, string>? FileIncomplete; // original name, kept name, folder id
     public string? LeaseHolder { get; private set; }
     /// <summary>Was this device id this very PC (an earlier profile of the same drive, since removed)?</summary>
     public Func<string, bool>? IsFormerSelf { get; set; }
@@ -493,12 +493,13 @@ public sealed partial class SyncService : IAsyncDisposable
         var key = (l.Dev, l.Until);
         long now = Environment.TickCount64;
         if (_seenLease != key) { _seenLease = key; _seenLeaseAt = now; }
-        // expired by BOTH clocks: a PC whose clock runs fast does not take over a live holder
-        if (l.Until >= Math.Min(NowUnix, new DateTimeOffset(_remote.ServerNowUtc).ToUnixTimeSeconds())) return false;
         // the record's last edit, stamped by Telegram's server: untouched for a whole lease (plus margin
-        // for this PC's own clock) means the holder is gone — at once, also right after this PC starts
+        // for this PC's own clock) means the holder is gone — at once, also right after this PC starts, and
+        // also when the holder's clock runs fast (its "until" would look valid for hours)
         if (_remote.ControlEditedAtUtc is { } edited && _remote.ServerNowUtc - edited > _o.LeaseDuration + TimeSpan.FromMinutes(2))
             return true;
+        // by this PC's clock (a live holder is still protected by the "unchanged for 2 heartbeats" rule)
+        if (l.Until >= NowUnix) return false;
         return now - _seenLeaseAt >= 2 * _o.HeartbeatInterval.TotalMilliseconds;
     }
 
@@ -543,7 +544,12 @@ public sealed partial class SyncService : IAsyncDisposable
                         try { own = await ReadEntryAsync(item, ct); }
                         catch (IncompleteDownloadException ex) { Log.Warn(ex.Message); stopped = true; break; } // again next pass
                         if (own is not null)
-                            _db.InTransaction(() => { _db.ApplyAsOwn(own.Value.Entry.Ops); _db.Applied = item.Id; });
+                            _db.InTransaction(() =>
+                            {
+                                _db.ApplyAsOwn(own.Value.Entry.Ops);
+                                _db.Applied = item.Id;
+                                if (_db.OutboxCount() > 0) _db.SetMeta("rebase", "1"); // newer local changes go on top
+                            });
                         else _db.Applied = item.Id;
                     }
                     else _db.Applied = item.Id;
@@ -663,7 +669,12 @@ public sealed partial class SyncService : IAsyncDisposable
             {
                 long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 if (!long.TryParse(_db.GetMeta("caught_up_at"), out var last) || nowMs - last > CheckAfter.TotalMilliseconds)
+                {
                     _db.SetMeta("verify_outbox", "1");
+                    // files not uploaded yet keep pointing at their old chunks: checked once they commit
+                    var waiting = _db.PendingNodes().ToList();
+                    if (waiting.Count > 0) _db.SetMeta("verify_nodes", string.Join(',', waiting));
+                }
                 _db.SetMeta("caught_up_at", nowMs.ToString());
             }
             if (applied > 0) Log.Info($"applied {applied} ops from other PCs");
@@ -793,6 +804,13 @@ public sealed partial class SyncService : IAsyncDisposable
                 // a new nonce (that would undo newer changes other PCs made meanwhile)
                 long[] seqs;
                 byte[] payload;
+                if (Inflight() is { } stale && _db.OutboxHas(stale.Seqs) && await InflightPointsAtDeletedChunksAsync(stale.Seqs, ct))
+                {
+                    // waited so long that chunks it points at were deleted: it can never have been appended
+                    // (the journal would have shown it long ago) — rebuild it, with the check
+                    Log.Warn("a batch saved before a long wait points at deleted chunks; it is rebuilt and checked");
+                    _db.SetMeta("inflight", null);
+                }
                 if (Inflight() is { } inflight && _db.OutboxHas(inflight.Seqs))
                     (seqs, payload) = (inflight.Seqs, inflight.Payload);
                 else
@@ -832,6 +850,19 @@ public sealed partial class SyncService : IAsyncDisposable
         finally { _io.Release(); }
     }
 
+    /// <summary>Does a saved batch that waited long point at chunks deleted from Telegram meanwhile?</summary>
+    async Task<bool> InflightPointsAtDeletedChunksAsync(long[] seqs, CancellationToken ct)
+    {
+        bool all = _db.GetMeta("verify_outbox") == "1";
+        var set = seqs.ToHashSet();
+        var ops = _db.OutboxContentToCheck(DateTimeOffset.UtcNow.Add(-CheckAfter).ToUnixTimeMilliseconds(), all)
+            .Where(o => set.Contains(o.Seq)).ToList();
+        if (ops.Count == 0) return false;
+        var missing = await _remote.MissingChunksAsync(ops.SelectMany(o => o.Op.Chunks.Select(c => c.M)).Distinct().ToList(), ct);
+        if (missing.Count == 0) _db.TouchOutbox(ops.Select(o => o.Seq)); // checked: not again for a day
+        return missing.Count > 0;
+    }
+
     /// <summary>Changes that waited longer than this (or a PC away longer) are checked before sending.</summary>
     static readonly TimeSpan CheckAfter = TimeSpan.FromDays(1);
 
@@ -847,12 +878,24 @@ public sealed partial class SyncService : IAsyncDisposable
         if (RecoverChunk is null) return;
         bool all = _db.GetMeta("verify_outbox") == "1";
         var old = _db.OutboxContentToCheck(DateTimeOffset.UtcNow.Add(-CheckAfter).ToUnixTimeMilliseconds(), all);
+        // files that were still uploading when this PC came back: their content now, whenever it was made
+        var watched = (_db.GetMeta("verify_nodes") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries).ToHashSet();
+        if (watched.Count > 0)
+        {
+            var have = old.Select(o => o.Seq).ToHashSet();
+            old.AddRange(_db.OutboxContentToCheck(long.MaxValue, true).Where(o => watched.Contains(o.Op.Id) && !have.Contains(o.Seq)));
+            old.Sort((x, y) => x.Seq.CompareTo(y.Seq));
+            // a file is done once it is no longer waiting to upload (its content op is among these)
+            watched.RemoveWhere(id => !_db.IsPending(id));
+            _db.SetMeta("verify_nodes", watched.Count > 0 ? string.Join(',', watched) : null);
+        }
         if (old.Count > 0)
         {
             var missing = await _remote.MissingChunksAsync(old.SelectMany(o => o.Op.Chunks.Select(c => c.M)).Distinct().ToList(), ct);
             var redone = new Dictionary<int, ChunkRef>();
             var incomplete = new List<string>();
             bool changed = false;
+            var lostRefs = new Dictionary<int, ChunkRef>();
             foreach (var (seq, op) in old)
             {
                 if (!op.Chunks.Any(c => missing.Contains(c.M))) continue;
@@ -861,31 +904,37 @@ public sealed partial class SyncService : IAsyncDisposable
                 for (int i = 0; i < chunks.Length; i++)
                 {
                     if (!missing.Contains(chunks[i].M)) continue;
-                    if (!redone.TryGetValue(chunks[i].M, out var r))
-                    {
-                        var (again, gone) = await RecoverChunk(chunks[i], ct);
-                        r = again;
-                        if (gone) lost = true;
-                        else redone[chunks[i].M] = r;
-                    }
-                    chunks[i] = r;
+                    if (redone.TryGetValue(chunks[i].M, out var r)) { chunks[i] = r; continue; }
+                    if (lostRefs.TryGetValue(chunks[i].M, out r)) { chunks[i] = r; lost = true; continue; }
+                    var (again, gone) = await RecoverChunk(chunks[i], ct); // uploads only: nothing changed yet
+                    if (gone) { lostRefs[chunks[i].M] = again; lost = true; }
+                    else redone[chunks[i].M] = again;
+                    chunks[i] = again;
                 }
-                _db.ReplaceOutboxOp(seq, op with { Chunks = chunks });
+                var node = _db.Get(op.Id);
+                string? keptAs = null;
+                _db.InTransaction(() =>
+                {
+                    _db.ReplaceOutboxOp(seq, op with { Chunks = chunks });
+                    _db.SetMeta("rebase", "1"); // this PC's own index follows the corrected op (even after a crash)
+                    if (lost && node is { Trashed: 0, Dir: false } && !node.Name.Contains(IncompleteSuffix.Trim()))
+                    {
+                        var stem = Path.GetFileNameWithoutExtension(node.Name);
+                        keptAs = _db.UniqueName(node.Parent ?? IndexDb.RootId, $"{stem}{IncompleteSuffix}{Path.GetExtension(node.Name)}", node.Id);
+                        _db.ApplyLocal(new UpsertOp(node.Id, node.Parent ?? IndexDb.RootId, keptAs, false, node.Attrs, node.Ctime, node.Mtime));
+                    }
+                });
                 changed = true;
-                if (lost) incomplete.Add(op.Id);
                 Log.Warn($"a held-back version of {op.Id} pointed at {op.Chunks.Count(c => missing.Contains(c.M))} chunks deleted meanwhile; " +
                          (lost ? "some had no copy here (zeros)" : "uploaded again from this PC"));
+                if (keptAs is not null)
+                {
+                    Log.Error($"'{node!.Name}': parts of the version saved on this PC were deleted while it waited; kept as '{keptAs}'");
+                    try { FileIncomplete?.Invoke(node.Name, keptAs, node.Parent ?? IndexDb.RootId); }
+                    catch (Exception ex) { Log.Warn($"incomplete-file listener failed: {ex.Message}"); }
+                }
             }
-            if (changed) _db.ReapplyOutbox(); // this PC's index follows the corrected changes
-            foreach (var id in incomplete.Distinct())
-            {
-                if (_db.Get(id) is not { Trashed: 0 } n) continue;
-                var stem = Path.GetFileNameWithoutExtension(n.Name);
-                var name = _db.UniqueName(n.Parent ?? IndexDb.RootId, $"{stem}{IncompleteSuffix}{Path.GetExtension(n.Name)}", n.Id);
-                _db.ApplyLocal(new UpsertOp(n.Id, n.Parent ?? IndexDb.RootId, name, false, n.Attrs, n.Ctime, n.Mtime));
-                Log.Error($"'{n.Name}': parts of the version saved on this PC were deleted while it waited; kept as '{name}'");
-                try { FileIncomplete?.Invoke(name); } catch (Exception ex) { Log.Warn($"incomplete-file listener failed: {ex.Message}"); }
-            }
+            if (changed) { _db.ReapplyOutbox(); _db.SetMeta("rebase", null); }
             _db.TouchOutbox(old.Select(o => o.Seq));
         }
         if (all) _db.SetMeta("verify_outbox", null);
@@ -919,6 +968,18 @@ public sealed partial class SyncService : IAsyncDisposable
         if (!Writable) return;
         long cutoff = DateTime.UtcNow.Add(-_o.TrashRetention).ToFileTimeUtc();
         var expired = _db.Trashed().Where(n => n.Trashed < cutoff).ToList();
+        foreach (var n in expired.ToList())
+        {
+            var held = _db.LocalWorkIn(n.Id);
+            if (held.Count == 0) continue;
+            expired.Remove(n);
+            foreach (var h in held)
+                if (_db.Get(h) is { } hn)
+                {
+                    _db.ApplyLocal(new RestoreOp(hn.Id, n.Id == hn.Id ? (hn.Parent ?? IndexDb.RootId) : IndexDb.RootId, hn.Name));
+                    Log.Warn($"trash: '{hn.Name}' has changes made on this PC that were not sent yet; restored instead of deleted");
+                }
+        }
         if (expired.Count > 0)
         {
             // in small batches: the index lock is released between them, so the drive stays responsive
@@ -939,8 +1000,15 @@ public sealed partial class SyncService : IAsyncDisposable
         if (claimed > 0) _db.Durable(); // on disk before Telegram deletes anything
         while (true)
         {
-            var msgs = _db.PendingDeletions();
-            if (msgs.Count == 0) break;
+            var queued = _db.PendingDeletions();
+            if (queued.Count == 0) break;
+            var msgs = queued.Where(m => !_db.MessageInUse(m)).ToList();
+            if (msgs.Count < queued.Count)
+            {
+                Log.Warn($"gc: {queued.Count - msgs.Count} queued deletions are in use again; kept");
+                _db.DeletionsDone(queued.Except(msgs));
+            }
+            if (msgs.Count == 0) continue;
             await _remote.DeleteChunksAsync(msgs, ct);
             _db.DeletionsDone(msgs);
             Log.Info($"gc: deleted {msgs.Count} unreferenced chunk messages");

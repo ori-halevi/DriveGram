@@ -49,6 +49,7 @@ public sealed partial class SyncService
         var r = rec?.Handover;
         if (r is null || r.Dev == _db.DeviceId || r.Id == _surfacedRequest) return;
         if (!(r.State == "asked" || (r.State == "seen" && _resurface))) return;
+        if (r.State == "asked" && !await AskerStillThereAsync(r, ct)) return;
         _resurface = false;
         // (re)shown now: a fresh stamp lets the asking PC count its answer time from this moment
         _surfacedRequest = r.Id;
@@ -68,20 +69,32 @@ public sealed partial class SyncService
     public async Task<bool> RequestStillOpenAsync(HandoverRequest r, CancellationToken ct)
     {
         var c = await ReadTrustedAsync(ct);
-        bool open = ControlTrusted && c?.Lease?.Dev == _db.DeviceId && c.Handover?.Id == r.Id && c.Handover.State is "asked" or "seen";
-        if (!open) return false;
-        // a request whose PC stopped refreshing it (gone, asleep, shut down) closes: never approved by silence
-        long now = Environment.TickCount64;
-        if (_watchId != r.Id || _watchUpdated != c!.Handover!.Updated) (_watchId, _watchUpdated, _watchSince) = (r.Id, c!.Handover!.Updated, now);
-        else if (now - _watchSince > RequestSilence.TotalMilliseconds)
-        {
-            Log.Warn($"handover: '{r.Name}' stopped waiting for an answer; the question is closed");
-            return false;
-        }
-        return true;
+        return ControlTrusted && c?.Lease?.Dev == _db.DeviceId && c.Handover?.Id == r.Id && c.Handover.State is "asked" or "seen";
     }
 
-    /// <summary>The asking PC refreshes its request this often while it waits; silent this long = gone.</summary>
+    /// <summary>
+    /// A request found waiting (this PC slept, or the asking PC went away meanwhile): shown only if it is
+    /// recent by the server's clock, or the asking PC refreshes it (it does every 15 s while it waits for
+    /// the question to appear). One nobody refreshes for 40 s is closed as failed — never approved by silence.
+    /// Only the "asked" stage is refreshed by the asking PC: once the question is up, the record is written
+    /// by the holder alone, so an answer can never be overwritten by a refresh.
+    /// </summary>
+    async Task<bool> AskerStillThereAsync(HandoverRequest r, CancellationToken ct)
+    {
+        long serverNow = new DateTimeOffset(_remote.ServerNowUtc).ToUnixTimeSeconds();
+        if (Math.Abs(serverNow - r.Updated) < 45) return true;
+        long now = Environment.TickCount64;
+        if (_watchId != r.Id) { (_watchId, _watchUpdated, _watchSince) = (r.Id, r.Updated, now); return false; }
+        if (r.Updated != _watchUpdated) return true; // refreshed: the asking PC is there (its clock may differ)
+        if (now - _watchSince <= RequestSilence.TotalMilliseconds) return false;
+        _surfacedRequest = r.Id;
+        Log.Warn($"handover: '{r.Name}' asked for the drive but is no longer there; the request is closed");
+        await UpdateControlAsync(c => c.Handover?.Id == r.Id && c.Handover.State == "asked"
+            ? c with { Handover = c.Handover with { State = "failed", Updated = NowUnix } } : c, ct);
+        return false;
+    }
+
+    /// <summary>The asking PC refreshes its request this often until it is seen; silent this long = gone.</summary>
     static readonly TimeSpan RequestRefresh = TimeSpan.FromSeconds(15);
     static readonly TimeSpan RequestSilence = TimeSpan.FromSeconds(40);
     string? _watchId;
@@ -115,12 +128,12 @@ public sealed partial class SyncService
         var c = (await ReadTrustedAsync(ct))!;
         if (!ControlTrusted) throw new ControlNotTrustedException(); // nothing in it is believed: say so
         if (c.Lease?.Dev == _db.DeviceId) return (c.Handover, c.Lease);
-        if (c.Handover is { State: "asked" or "seen" } h && h.Id == mine.Id
+        if (c.Handover is { State: "asked" } h && h.Id == mine.Id
             && Environment.TickCount64 - _refreshedAt > RequestRefresh.TotalMilliseconds)
         {
             // still here and waiting (the holder closes a question nobody waits for any more)
             _refreshedAt = Environment.TickCount64;
-            c = await UpdateControlAsync(x => x.Handover?.Id == mine.Id && x.Handover.State is "asked" or "seen"
+            c = await UpdateControlAsync(x => x.Handover?.Id == mine.Id && x.Handover.State == "asked"
                 ? x with { Handover = x.Handover with { Updated = Math.Max(NowUnix, x.Handover.Updated + 1) } } : x, ct, asHolder: false);
         }
         else if (c.Handover?.Id != mine.Id)

@@ -356,6 +356,12 @@ public sealed class DriveSession : IAsyncDisposable
         try
         {
             Engine.Abort();
+            try
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                Task.Run(() => Sync.QuickReleaseAsync(cts.Token)).Wait(TimeSpan.FromSeconds(2.5));
+            }
+            catch (Exception ex) { Log.Warn($"shutdown: release: {ex.Message}"); }
             Sync.Halt();
             try { if (LetterChanged is not null) ShellIntegration.ClearDriveIcon(MountPoint); } catch { } // a borrowed letter
             lock (_notifyGate) _mounted = false;

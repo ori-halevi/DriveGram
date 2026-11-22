@@ -128,6 +128,16 @@ public sealed class IndexDb : IDisposable
         Exec("INSERT OR IGNORE INTO seen_entries(nonce) VALUES(@n)", ("@n", nonce));
     });
 
+    /// <summary>Is this chunk message used by any chunk row (a record uses it again)?</summary>
+    public bool MessageInUse(int msg) => Scalar("SELECT 1 FROM chunks WHERE msg=@m LIMIT 1", ("@m", msg)) is not null;
+
+    /// <summary>Files in this subtree with changes made here that are not sent yet (uploading, or held back).</summary>
+    public List<string> LocalWorkIn(string id)
+    {
+        var held = PeekOutbox(int.MaxValue).Where(o => o.Op is ContentOp or UpsertOp { Dir: false }).Select(o => o.Op.Id).ToHashSet();
+        return SubtreeIds(id).Where(x => held.Contains(x) || IsPending(x)).Where(x => Get(x) is { Dir: false }).ToList();
+    }
+
     /// <summary>Are all these outbox rows still there (nothing changed them meanwhile)?</summary>
     public bool OutboxHas(long[] seqs) =>
         seqs.Length > 0 && seqs.All(s => Scalar("SELECT 1 FROM outbox WHERE seq=@s", ("@s", s)) is not null);
@@ -381,12 +391,21 @@ public sealed class IndexDb : IDisposable
                             local = 0
                         """, ("@id", k.C), ("@m", k.M), ("@z", k.Z), ("@h", k.H), ("@t", now));
                     Exec("INSERT INTO file_chunks(node,idx,chunk) VALUES(@n,@i,@c)", ("@n", c.Id), ("@i", i), ("@c", k.C));
+                    Exec("DELETE FROM pending_gc WHERE msg=@m", ("@m", k.M)); // used again: never delete it
                 }
                 Exec("UPDATE nodes SET size=@s, mtime=@m WHERE id=@id", ("@id", c.Id), ("@s", c.Size), ("@m", c.Mtime));
                 break;
             }
             case TrashOp t:
                 Exec("UPDATE nodes SET trashed=@t WHERE id=@id AND id<>@root", ("@id", t.Id), ("@t", t.At), ("@root", RootId));
+                if (remote && Get(t.Id) is { Dir: false } tn && (IsPending(tn.Id) || OutboxHasContent(tn.Id)))
+                {
+                    // another PC deleted a file THIS PC changed and did not send yet: the newer work stays
+                    // visible (and every PC gets it back), instead of waiting in the trash to expire
+                    var back = tn.Parent is { } tp && Get(tp) is { Trashed: 0 } ? tp : RootId;
+                    ApplyLocal(new RestoreOp(tn.Id, back, tn.Name));
+                    Log.Warn($"'{tn.Name}' was deleted on another PC while it had changes here: kept");
+                }
                 break;
             case RestoreOp r0:
             {

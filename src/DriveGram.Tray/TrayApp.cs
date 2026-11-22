@@ -162,9 +162,9 @@ sealed class TrayApp : ApplicationContext
             session.StopRequested += () => _ui.Post(async _ => await StopAsync(d, ask: false), null);
             session.SignedOut += () => _ui.Post(async _ => await OnSignedOutAsync(d), null);
             session.Sync.HandoverRequested += r => _ui.Post(async _ => await OnHandoverRequestedAsync(d, session, r), null);
-            session.Sync.FileIncomplete += name => _ui.Post(_ => Balloon(L.T("קובץ לא נשמר במלואו", "A file was not saved completely"),
-                L.T($"חלקים מהגרסה של \"{name}\" שנשמרה במחשב הזה נמחקו בזמן שחיכתה לשליחה. היא נשמרה בשם הזה, והגרסה המקורית לא נדרסה.",
-                    $"Parts of the version of \"{name}\" saved on this PC were deleted while it waited to be sent. It was kept under this name; the original was not overwritten."),
+            session.Sync.FileIncomplete += (orig, kept, _) => _ui.Post(_ => Balloon(L.T("קובץ נשמר חלקית", "A file was saved only in part"),
+                L.T($"חלק מהגרסה של \"{orig}\" ששמרת במחשב הזה אבד בזמן שחיכתה לשליחה. מה שנשאר נשמר בשם \"{kept}\", וחסרים בו חלקים.",
+                    $"Part of the version of \"{orig}\" you saved on this PC was lost while it waited to be sent. What is left was kept as \"{kept}\"; parts of it are missing."),
                 ToolTipIcon.Warning), null);
             if (session.Sync.NeedsUpdate)
                 Balloon(L.T("צריך לעדכן את DriveGram", "Update DriveGram"),

@@ -70,7 +70,7 @@ public class LongAwayTests
         await a.Engine.DisposeAsync();                            // no local copies of the old parts
         Directory.Delete(Path.Combine(a.Dir, "cache"), recursive: true);
         string? told = null;
-        a.Sync.FileIncomplete += n => told = n;
+        a.Sync.FileIncomplete += (_, kept, _) => told = kept;
         await a.Sync.TakeDriveAsync(force: false, default);
         await a.Sync.FlushAsync(default);
 
