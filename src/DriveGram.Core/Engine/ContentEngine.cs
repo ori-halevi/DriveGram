@@ -58,6 +58,8 @@ public sealed class ContentEngine : IAsyncDisposable
         public readonly Dictionary<int, long> PieceGen = new();
         public readonly Dictionary<int, long> LastWrite = new();
         public long LastReadEnd = -1;
+        /// <summary>Pieces uploaded once and then changed again while the file stayed open.</summary>
+        public readonly HashSet<int> Rewritten = new();
         public int Committing;
         /// <summary>A commit is already scheduled for a write that came with no writer handle open.</summary>
         public int OrphanCommit;
@@ -121,6 +123,7 @@ public sealed class ContentEngine : IAsyncDisposable
     /// </summary>
     void ReconcileStaging(bool adjustCount)
     {
+        _db.Durable(); // pieces are judged against the index as it is on disk
         foreach (var dir in Directory.EnumerateDirectories(_staging))
         {
             var node = Path.GetFileName(dir);
@@ -157,6 +160,16 @@ public sealed class ContentEngine : IAsyncDisposable
             }
     }
 
+    static bool PieceMatches(string path, string hash)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            return Convert.ToHexStringLower(SHA256.HashData(fs)) == hash;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return false; }
+    }
+
     public void Start()
     {
         ReconcileStaging(adjustCount: false); // before counting: the count starts from what is really staged
@@ -165,6 +178,12 @@ public sealed class ContentEngine : IAsyncDisposable
         foreach (var row in _db.AllDirty())
         {
             var path = PiecePath(row.Node, row.Idx);
+            if (row.Staged && row.Kind == 'U' && row.Hash is { } want && File.Exists(path) && !PieceMatches(path, want))
+            {
+                // its bytes did not reach the disk before a power cut (zeros): Telegram has the real ones
+                Log.Warn($"staged copy of uploaded piece {row.Node}#{row.Idx} is damaged; using Telegram's copy");
+                try { File.Delete(path); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            }
             if (row.Staged && !File.Exists(path))
             {
                 if (row.Kind == 'U') _db.PutDirty(row with { Staged = false });
@@ -416,6 +435,8 @@ public sealed class ContentEngine : IAsyncDisposable
         {
             var node = _db.Get(id) ?? throw new FileNotFoundException(id);
             if (node.Size == newSize) return;
+            if (newSize > node.Size && FreeDisk() < HardFloor)
+                throw new IOException("DriveGram: local staging area is full (the local disk is full).");
             ResizeLocked(st, id, node.Size, newSize);
             _db.SetLocalSize(id, newSize, Now);
             _db.SetPending(id);
@@ -445,13 +466,19 @@ public sealed class ContentEngine : IAsyncDisposable
         }
         else
         {
+            var gone = new List<int>();
             foreach (var row in _db.DirtyRows(id).Where(r => r.Idx >= newCount))
             {
-                if (row.Staged) DeletePiece(id, row.Idx);
+                if (row.Staged) gone.Add(row.Idx);
                 st.PieceGen[row.Idx] = Interlocked.Increment(ref _stamp); // invalidate any upload in flight
                 st.LastWrite.Remove(row.Idx);
             }
             _db.DeleteDirtyFrom(id, newCount);
+            if (gone.Count > 0)
+            {
+                _db.Durable(); // a power cut must not leave rows whose pieces are already deleted (zeros)
+                foreach (var idx in gone) DeletePiece(id, idx);
+            }
             if (newCount > 0 && PieceLen(newCount - 1, newSize) != PieceLen(newCount - 1, oldSize))
                 ResizePiece(st, id, newCount - 1, PieceLen(newCount - 1, newSize));
         }
@@ -466,11 +493,14 @@ public sealed class ContentEngine : IAsyncDisposable
         Touched(st, idx);
     }
 
+    static readonly TimeSpan RewriteSealIdle = TimeSpan.FromMinutes(5);
+
     /// <summary>Make piece idx a local modifiable file of exactly `len` bytes; returns its path.</summary>
     string EnsureStagedLocked(NodeState st, string id, int idx, int len)
     {
         var path = PiecePath(id, idx);
         var row = _db.GetDirty(id, idx);
+        if (row is { Kind: 'U' }) st.Rewritten.Add(idx);
         if (row is { Staged: true } && File.Exists(path))
         {
             SetPieceLength(path, len);
@@ -631,7 +661,7 @@ public sealed class ContentEngine : IAsyncDisposable
         }
     }
 
-    long _freeAt, _freeBytes = long.MaxValue;
+    long _freeAt, _freeBytes = long.MaxValue, _stagedAtMeasure;
 
     /// <summary>Free space on the disk that holds staging and cache (re-measured every 2 s).</summary>
     long FreeDisk()
@@ -641,9 +671,12 @@ public sealed class ContentEngine : IAsyncDisposable
         {
             try { Interlocked.Exchange(ref _freeBytes, new DriveInfo(Path.GetPathRoot(Path.GetFullPath(_staging))!).AvailableFreeSpace); }
             catch (Exception) { }
+            Interlocked.Exchange(ref _stagedAtMeasure, Interlocked.Read(ref _stagingBytes));
             Interlocked.Exchange(ref _freeAt, now);
         }
-        return Interlocked.Read(ref _freeBytes);
+        // a fast copy can stage gigabytes between two measurements: count what was staged since
+        long grown = Interlocked.Read(ref _stagingBytes) - Interlocked.Read(ref _stagedAtMeasure);
+        return Interlocked.Read(ref _freeBytes) - Math.Max(0, grown);
     }
 
     const long HardFloor = 1L << 30; // below this much free disk even already-saved data cannot be taken
@@ -657,23 +690,35 @@ public sealed class ContentEngine : IAsyncDisposable
     void WaitForRoomPaging(int incoming)
     {
         if (incoming <= 0 || Interlocked.Read(ref _stagingBytes) + incoming <= StagingLimit()) return;
-        var deadline = DateTime.UtcNow + _o.BackpressureTimeout;
-        long lastSent = _remote.BytesSent;
-        var movedAt = DateTime.UtcNow;
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5); // per write: Windows' writer threads are few
         while (Interlocked.Read(ref _stagingBytes) + incoming > StagingLimit())
         {
             EvictUploadedPieces();
             FitCacheToDisk(incoming);
             if (Interlocked.Read(ref _stagingBytes) + incoming <= StagingLimit()) return;
-            if (FreeDisk() - incoming < HardFloor)
+            if (FreeDisk() - incoming < PagingFloor)
                 throw new IOException("DriveGram: local staging area is full (the local disk is full).");
-            long sent = _remote.BytesSent;
-            if (sent != lastSent) { lastSent = sent; movedAt = DateTime.UtcNow; }
-            // nothing uploads (offline, signed out) or waited long enough: take it, the disk still has room
-            if (DateTime.UtcNow > deadline || DateTime.UtcNow - movedAt > TimeSpan.FromSeconds(20)
+            // waiting helps only when the staging quota is the limit AND uploads are moving; when the disk
+            // is the limit, or nothing uploads (offline, signed out), take it now — the disk still has room
+            bool quotaBound = StagingLimit() >= _o.StagingQuota;
+            if (!quotaBound || !UploadsMoving() || DateTime.UtcNow > deadline
                 || _cts.IsCancellationRequested || _waits.IsCancellationRequested) return;
             WaitHandle.WaitAny([_roomSignal, _cts.Token.WaitHandle, _waits.Token.WaitHandle], 500);
         }
+    }
+
+    /// <summary>Data Windows already took from an app is refused only this close to a full disk.</summary>
+    const long PagingFloor = 256L << 20;
+
+    long _progressSent = -1, _progressAt;
+
+    /// <summary>Did uploads make progress in the last 20 s (engine-wide, so no write waits to find out)?</summary>
+    bool UploadsMoving()
+    {
+        long sent = _remote.BytesSent, now = Environment.TickCount64;
+        long before = Interlocked.Exchange(ref _progressSent, sent);
+        if (before != -1 && sent != before) Interlocked.Exchange(ref _progressAt, now); // first look: not "moving" yet
+        return now - Interlocked.Read(ref _progressAt) < 20_000;
     }
 
     /// <summary>The cache is only a copy: when the local disk runs low it shrinks (below its current size
@@ -731,7 +776,15 @@ public sealed class ContentEngine : IAsyncDisposable
             {
                 var cur = _db.GetDirty(row.Node, row.Idx);
                 if (cur is not { Kind: 'U', Staged: true }) continue;
-                DeletePiece(row.Node, row.Idx);
+                if (Volatile.Read(ref st.OpenWriters) > 0 && cur.ChunkId is { } cid)
+                {
+                    var path = PiecePath(row.Node, row.Idx);
+                    long len = 0;
+                    try { len = new FileInfo(path).Length; } catch (IOException) { }
+                    _cache.AdoptPlain(cid, path);
+                    if (!File.Exists(path)) Interlocked.Add(ref _stagingBytes, -len);
+                }
+                else DeletePiece(row.Node, row.Idx);
                 _db.PutDirty(cur with { Staged = false });
             }
             if (Interlocked.Read(ref _stagingBytes) <= _o.StagingQuota / 2) return;
@@ -828,6 +881,8 @@ public sealed class ContentEngine : IAsyncDisposable
         else
         {
             data = new byte[row.Size];
+            using (var f = new FileStream(PiecePath(id, idx), FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete))
+                f.Flush(flushToDisk: true);
             using var h = File.OpenHandle(PiecePath(id, idx), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             int got = 0;
             while (got < data.Length)
@@ -986,7 +1041,8 @@ public sealed class ContentEngine : IAsyncDisposable
                     {
                         if (st.OpenWriters == 0) continue; // closed files are handled by commit
                         long last = st.LastWrite.GetValueOrDefault(row.Idx);
-                        if (now - last >= _o.SealIdle.TotalMilliseconds) due.Add((row.Node, row.Idx));
+                        var idle = st.Rewritten.Contains(row.Idx) ? RewriteSealIdle : _o.SealIdle;
+                        if (now - last >= idle.TotalMilliseconds) due.Add((row.Node, row.Idx));
                     }
                 }
                 if (due.Count > 0)
@@ -999,6 +1055,12 @@ public sealed class ContentEngine : IAsyncDisposable
 
     /// <summary>An app asked for its data to be on disk (FlushFileBuffers): this file's staged pieces and the
     /// index are made durable.</summary>
+    public void FlushAllToDisk()
+    {
+        foreach (var id in _db.AllDirty().Where(r => r.Staged).Select(r => r.Node).Distinct().ToList()) FlushToDisk(id);
+        _db.Durable();
+    }
+
     public void FlushToDisk(string id)
     {
         var st = State(id);

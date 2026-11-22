@@ -18,6 +18,8 @@ public sealed class DriveFileSystem : FileSystemBase
 {
     sealed class Handle(string id, bool dir, bool writer, bool canWrite)
     {
+        /// <summary>This handle created the file (and nothing of it was ever stored remotely before).</summary>
+        public bool Created { get; init; }
         public string Id { get; } = id;
         public bool Dir { get; } = dir;
         public bool Writer { get; set; } = writer;
@@ -232,7 +234,8 @@ public sealed class DriveFileSystem : FileSystemBase
 
     static bool LooksTemporary(string name) =>
         name.StartsWith("~") || name.StartsWith(".~lock") ||
-        Path.GetExtension(name).ToLowerInvariant() is ".tmp" or ".temp" or ".crdownload" or ".part" or ".partial" or ".download";
+        Path.GetExtension(name).ToLowerInvariant() is ".tmp" or ".temp" or ".crdownload" or ".part" or ".partial" or ".download"
+            or ".lock" or ".lck" or ".ldb" or ".laccdb" or ".swp" or ".swo";
 
     static bool InGitDir(string path) =>
         path.Contains("\\.git\\", StringComparison.OrdinalIgnoreCase);
@@ -302,7 +305,7 @@ public sealed class DriveFileSystem : FileSystemBase
         }
         bool writer = !dir && (grantedAccess & WriteAccess) != 0;
         _engine.Opened(id, writer);
-        fileNode = new Handle(id, dir, writer, writer);
+        fileNode = new Handle(id, dir, writer, writer) { Created = true };
         fileInfo = Info(_db.Get(id)!);
         normalizedName = FullPath(_db.Get(id)!);
         return STATUS_SUCCESS;
@@ -351,7 +354,8 @@ public sealed class DriveFileSystem : FileSystemBase
             // a copy cancelled half-way is deleted right after it started; a real new document is not
             bool justMade = _createdAt.TryGetValue(n.Id, out var made) && Environment.TickCount64 - made < 2 * 60_000;
             bool gitScratch = InGitDir(fileName) && (n.Name.EndsWith(".lock") || n.Name.StartsWith("tmp_") || LooksTemporary(n.Name));
-            if (!n.Dir && (n.Name.StartsWith("~$") || gitScratch || (neverStored && (LooksTemporary(n.Name) || justMade))))
+            bool ownCopy = h.Created && h.Writer; // cancelled through the handle that was writing it
+            if (!n.Dir && (n.Name.StartsWith("~$") || gitScratch || (neverStored && (LooksTemporary(n.Name) || justMade || ownCopy))))
             {
                 var dropFiles = _engine.DiscardLater(n.Id); // first: the purge removes the rows it uses
                 _db.ApplyLocal(new PurgeOp(n.Id));
@@ -415,6 +419,7 @@ public sealed class DriveFileSystem : FileSystemBase
     public override int Flush(object fileNode, object fileDesc, out FileInfo fileInfo)
     {
         if (fileNode is Handle { Dir: false } fh) _engine.FlushToDisk(fh.Id); // the app wants it on disk: really
+        else if (fileNode is null) _engine.FlushAllToDisk();                  // the whole volume
         fileInfo = fileNode is Handle h && _db.Get(h.Id) is { } n ? Info(n) : default;
         return STATUS_SUCCESS;
     }
