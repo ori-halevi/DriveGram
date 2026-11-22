@@ -32,6 +32,12 @@ public interface IRemote : IAsyncDisposable
     /// <summary>When the control record was last changed, by the SERVER's clock (from the last read); null if unknown.</summary>
     DateTime? ControlEditedAtUtc => null;
 
+    /// <summary>Someone pinned another message as the drive's record (detected on a periodic re-check).</summary>
+    bool ControlMoved => false;
+
+    /// <summary>The user confirmed the record: write it, and make it the pinned record again.</summary>
+    Task ConfirmControlAsync(string text, CancellationToken ct) => WriteControlAsync(text, ct);
+
     /// <summary>The server's current time (as far as known): compare server timestamps with this.</summary>
     DateTime ServerNowUtc => DateTime.UtcNow;
 

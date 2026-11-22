@@ -237,7 +237,7 @@ public static class TelegramAccounts
     enum Probe { Works, Revoked, Unknown }
 
     /// <summary>This process's exclusive use of a sign-in file, or null if another DriveGram program has it.</summary>
-    static Semaphore? TryLock(string sessionPath)
+    public static Semaphore? TryLock(string sessionPath)
     {
         var s = new Semaphore(1, 1, @"Local\DriveGram-account-" + Convert.ToHexString(
             System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(Path.GetFullPath(sessionPath).ToUpperInvariant())))[..16]);
@@ -323,6 +323,8 @@ public static class TelegramAccounts
         targets.AddRange(AppState.All().Where(s => s.Folder is null && string.IsNullOrEmpty(s.Config.AccountKey) && File.Exists(s.SessionPath)));
         foreach (var t in targets)
         {
+            using var held = TryLock(t.SessionPath);
+            if (held is null) { Log.Warn("sign out: the account is in use by another DriveGram program; skipped"); continue; }
             try
             {
                 using var client = DriveSession.NewTelegramClient(t, null, out _);

@@ -599,9 +599,31 @@ public sealed class TelegramRemote : IRemote
 
     async Task<int> ControlIdAsync(CancellationToken ct)
     {
-        if (_controlId != 0) return _controlId;
+        if (_controlId != 0 && Environment.TickCount64 - _controlCheckedAt < 5 * 60_000) return _controlId;
         var full = await _ctl.RunAsync(() => _client.Channels_GetFullChannel(_journal), ct, ReadTimeout);
-        return _controlId = full.full_chat is ChannelFull cf ? cf.pinned_msg_id : 0;
+        int pinned = full.full_chat is ChannelFull cf ? cf.pinned_msg_id : 0;
+        _controlCheckedAt = Environment.TickCount64;
+        if (_controlId == 0) return _controlId = pinned;
+        // the record stays the message this session started with; a different pinned one is not followed
+        if (pinned != _controlId && !ControlMoved)
+        {
+            ControlMoved = true;
+            Log.Error($"the pinned record message changed ({_controlId} → {pinned})");
+        }
+        return _controlId;
+    }
+
+    long _controlCheckedAt;
+    public bool ControlMoved { get; private set; }
+
+    public async Task ConfirmControlAsync(string text, CancellationToken ct)
+    {
+        await WriteControlAsync(text, ct);
+        if (ControlMoved && _controlId != 0)
+        {
+            await _ctl.RunAsync(() => _client.Messages_UpdatePinnedMessage(_journal, _controlId, silent: true), ct, ReadTimeout);
+            ControlMoved = false;
+        }
     }
 
     public async Task<string?> ReadControlAsync(CancellationToken ct)

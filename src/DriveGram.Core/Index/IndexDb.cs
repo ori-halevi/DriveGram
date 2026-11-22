@@ -701,7 +701,7 @@ public sealed class IndexDb : IDisposable
     public const int SnapshotFormat = 1;
 
     sealed record Snap(List<Node> Nodes, List<string[]> FileChunks, List<StoredChunk> Chunks, int V = SnapshotFormat, int Upto = 0,
-        List<string>? Seen = null);
+        List<string>? Seen = null, bool Signed = false);
 
     public byte[] ExportSnapshot(int upto = 0)
     {
@@ -715,7 +715,8 @@ public sealed class IndexDb : IDisposable
                 FileChunks: Query("SELECT node, idx, chunk FROM file_chunks", r => new[] { r.GetString(0), r.GetInt32(1).ToString(), r.GetString(2) }),
                 Chunks: Query("SELECT id,msg,size,hash FROM chunks c WHERE EXISTS (SELECT 1 FROM file_chunks f WHERE f.chunk=c.id)",
                     r => new StoredChunk(r.GetString(0), r.GetInt32(1), r.GetInt32(2), r.GetString(3))),
-                Seen: Query("SELECT nonce FROM seen_entries", r => r.GetString(0)));
+                Seen: Query("SELECT nonce FROM seen_entries", r => r.GetString(0)),
+                Signed: true);
         }
         using var ms = new MemoryStream();
         using (var gz = new GZipStream(ms, CompressionLevel.SmallestSize, leaveOpen: true))
@@ -740,6 +741,7 @@ public sealed class IndexDb : IDisposable
             foreach (var c in snap.Chunks)
                 Exec("INSERT INTO chunks(id,msg,size,hash,created) VALUES(@id,@m,@z,@h,@t) ON CONFLICT(id) DO NOTHING",
                     ("@id", c.ChunkId), ("@m", c.Msg), ("@z", c.Size), ("@h", c.Hash), ("@t", now));
+            if (snap.Signed) SetMeta("control_mac", "1"); // the drive's record is signed: never accept an unsigned one
             foreach (var n in snap.Seen ?? [])
                 Exec("INSERT OR IGNORE INTO seen_entries(nonce) VALUES(@n)", ("@n", n));
             foreach (var f in snap.FileChunks)

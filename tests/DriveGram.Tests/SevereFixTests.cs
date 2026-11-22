@@ -178,4 +178,36 @@ public class SevereFixTests
         Assert.Equal(2, after.MinWriter);
         Assert.NotNull(after.Handover);
     }
+
+    [Fact]
+    public async Task AnOldSignedRecordWrittenBackIsNotBelieved()
+    {
+        await using var kit = await TestKit.CreateAsync();
+        var a = kit.Pc("a", so: Fast("PC-A"));
+        await a.Sync.StartAsync(false, default);
+        var oldText = await kit.Remote.ReadControlAsync(default);            // someone keeps a copy...
+        await a.Sync.ChangePasswordAsync(kit.Keys, "a brand new password 123", default);
+        await kit.Remote.WriteControlAsync(oldText!, default);              // ...and writes it back later
+        await a.Sync.ReadControlAsync(default);
+        Assert.False(a.Sync.ControlTrusted);                                 // an older copy: not believed
+        Assert.False(a.Sync.Writable);
+    }
+
+    [Fact]
+    public async Task ASnapshotPostedAgainAsAnEntryDoesNotStopTheDrive()
+    {
+        await using var kit = await TestKit.CreateAsync();
+        var a = kit.Pc("a", so: Fast("PC-A"));
+        await a.Sync.StartAsync(false, default);
+        a.NewFile("x.txt");
+        await a.SettleAsync();
+        await a.Sync.StopAsync(true, default);                               // writes a snapshot
+        var snap = Directory.GetFiles(Path.Combine(kit.Root, "remote", "journal"), "*_s-*").First();
+        await kit.Remote.AppendJournalAsync("j-copy.bin", File.ReadAllBytes(snap), default);
+
+        var b = kit.Pc("b", so: Fast("PC-B"));
+        await b.Sync.StartAsync(false, default);
+        Assert.False(b.Sync.NeedsUpdate);
+        Assert.True(b.Sync.Writable);
+    }
 }

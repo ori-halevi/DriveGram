@@ -20,7 +20,7 @@ public sealed record DriveIdentity(string Id, string Name, long DataChannel);
 /// <summary>The one editable record of a drive (Telegram: the pinned text message of the journal channel).</summary>
 /// <param name="MinReader">/<param name="MinWriter">oldest StorageFormat that may read / write this drive (see StorageFormat).</param>
 public sealed record ControlState(int V, VaultHeader Vault, LeaseInfo? Lease, SnapInfo? Snap, DriveIdentity? Drive = null,
-    int MinReader = 1, int MinWriter = 1, HandoverRequest? Handover = null, string? Mac = null)
+    int MinReader = 1, int MinWriter = 1, HandoverRequest? Handover = null, string? Mac = null, long Seq = 0)
 {
     /// <summary>HMAC of the whole record (without the mac itself), under the drive's control key: anyone
     /// may READ this pinned message, only someone with the drive's password can WRITE it convincingly.</summary>
@@ -154,8 +154,10 @@ public sealed partial class SyncService : IAsyncDisposable
                 await _remote.WriteControlAsync((next with { Mac = null }).ToJson(), ct); // stays as it was: unsigned
                 return next;
             }
-            // signed, and from now on only versions that sign may write it (older ones would drop the mac)
-            next = (next with { MinWriter = Math.Max(next.MinWriter, StorageFormat.Current) }).Signed(_keys.ControlKey);
+            // signed, numbered, and from now on only versions that sign may write it (older ones would drop the mac)
+            long seen = long.TryParse(_db.GetMeta("control_seq"), out var q) ? q : 0;
+            next = (next with { MinWriter = Math.Max(next.MinWriter, StorageFormat.Current), Seq = Math.Max(current.Seq, seen) + 1 })
+                .Signed(_keys.ControlKey);
             await _remote.WriteControlAsync(next.ToJson(), ct);
             return next;
         }
@@ -170,10 +172,26 @@ public sealed partial class SyncService : IAsyncDisposable
     bool Trust(ControlState c, string text)
     {
         bool knownSigned = _db.GetMeta("control_mac") == "1";
+        if (_remote.ControlMoved)
+        {
+            Log.Error("another message was pinned as the drive's record; not believed");
+            return false;
+        }
         if (c.Mac is null)
             return !knownSigned && c.MinWriter < StorageFormat.Current; // a record from before signing (first time only)
         bool ok = ControlState.StoredMacValid(text, _keys.ControlKey);
-        if (ok) _db.SetMeta("trusted_control", text); // the last record known good: a repair restores from it
+        long seen = long.TryParse(_db.GetMeta("control_seq"), out var q) ? q : 0;
+        if (ok && c.Seq < seen)
+        {
+            // validly signed, but OLDER than one this PC already saw: an earlier copy written back
+            Log.Error($"the drive's record is an older copy (#{c.Seq} after #{seen}); not believed");
+            return false;
+        }
+        if (ok)
+        {
+            _db.SetMeta("trusted_control", text); // the last record known good: a repair restores from it
+            if (c.Seq > seen) _db.SetMeta("control_seq", c.Seq.ToString());
+        }
         if (ok && !knownSigned) _db.SetMeta("control_mac", "1"); // never accept an unsigned one again
         return ok;
     }
@@ -202,6 +220,8 @@ public sealed partial class SyncService : IAsyncDisposable
     /// proves (the vault) and what is checked elsewhere (identity), drop what could mislead (lease,
     /// handover request, snapshot pointer), and sign it again.
     /// </summary>
+    const string L_NoTrustedCopy = "This PC never saw a verified copy of the drive's record, so it cannot confirm it. Confirm it on a PC that used the drive before.";
+
     public async Task RepairControlAsync(CancellationToken ct)
     {
         await _ctrlLock.WaitAsync(ct);
@@ -210,11 +230,13 @@ public sealed partial class SyncService : IAsyncDisposable
             var current = await ReadControlAsync(_remote, ct) ?? throw new InvalidOperationException("The drive's record is missing in Telegram.");
             // what someone without the password may have changed is taken from the last record this PC
             // verified (vault, identity, format gates) — never re-signed from the altered one
-            var known = ControlState.FromJson(_db.GetMeta("trusted_control"));
-            var c = known is null ? current : current with
+            var known = ControlState.FromJson(_db.GetMeta("trusted_control"))
+                ?? throw new InvalidOperationException(L_NoTrustedCopy);
+            var c = current with
             {
                 Vault = known.Vault, Drive = known.Drive,
                 MinReader = known.MinReader, MinWriter = known.MinWriter,
+                Extra = known.Extra, Seq = Math.Max(current.Seq, known.Seq),
             };
             Keys.FromMaster(c.Vault, _keys.ExportMaster()); // the vault must still be this drive's
             if (c.MinReader > StorageFormat.Current || c.MinWriter > StorageFormat.Current)
@@ -224,8 +246,11 @@ public sealed partial class SyncService : IAsyncDisposable
                 Lease = null, Handover = null, Snap = null,
                 MinWriter = Math.Max(c.MinWriter, StorageFormat.Current),
             };
-            await _remote.WriteControlAsync(fixedUp.Signed(_keys.ControlKey).ToJson(), ct);
+            long seen = long.TryParse(_db.GetMeta("control_seq"), out var q) ? q : 0;
+            fixedUp = fixedUp with { Seq = Math.Max(fixedUp.Seq, seen) + 1 };
+            await _remote.ConfirmControlAsync(fixedUp.Signed(_keys.ControlKey).ToJson(), ct);
             _db.SetMeta("control_mac", "1");
+            _db.SetMeta("control_seq", fixedUp.Seq.ToString());
             ControlTrusted = true;
             Log.Warn("the drive's record was confirmed by the user and signed again");
         }
@@ -472,7 +497,8 @@ public sealed partial class SyncService : IAsyncDisposable
                     }
                     catch (Exception ex) when (ex is System.Text.Json.JsonException or NotSupportedException or NewerRecordException)
                     {
-                        // an op type / shape from a newer version: stop HERE (skip nothing, advance nothing)
+                        // decrypted with the drive's key (so written by a key holder) but not understood: an op
+                        // type / shape from a newer version: stop HERE (skip nothing, advance nothing)
                         MarkNeedsUpdate($"journal #{item.Id}: {ex.Message}");
                         break;
                     }
@@ -542,7 +568,7 @@ public sealed partial class SyncService : IAsyncDisposable
         finally { _io.Release(); }
     }
 
-    const long MaxEntryBytes = 64L << 20;
+    const long MaxEntryBytes = 16L << 20; // 500 ops are far smaller
 
     sealed class IncompleteDownloadException(string m) : IOException(m);
     readonly Dictionary<int, int> _incomplete = new();
@@ -572,12 +598,19 @@ public sealed partial class SyncService : IAsyncDisposable
             }
             try
             {
-                var entry = OpJson.DeserializeEntry(Envelope.Open(_keys.JournalKey, raw));
+                var plain = Envelope.Open(_keys.JournalKey, raw);
+                if (plain.Length >= 2 && plain[0] == 0x1F && plain[1] == 0x8B)
+                {
+                    // a snapshot (gzip) posted again under an entry's name: not an entry
+                    Log.Warn($"journal #{item.Id} holds a snapshot, not an entry; ignored");
+                    return null;
+                }
+                var entry = OpJson.DeserializeEntry(plain);
                 return (entry, Convert.ToHexString(raw, 4, 12));
             }
             catch (Exception ex) when (ex is InvalidDataException or System.Security.Cryptography.CryptographicException)
             {
-                if (attempt < 2) { await Task.Delay(1000 * (attempt + 1), ct); continue; } // a damaged download: fetch again
+                if (attempt < 2 && item.Size <= 0) { await Task.Delay(1000 * (attempt + 1), ct); continue; } // size unknown: fetch again
                 Log.Warn($"journal #{item.Id} ('{item.Name}') is not a valid record of this drive ({ex.Message}); ignored");
                 return null;
             }
@@ -599,6 +632,7 @@ public sealed partial class SyncService : IAsyncDisposable
         if (!Writable || ShutdownPause) return false; // after a shutdown release: append nothing without the lease
         if (DateTime.UtcNow - _leaseConfirmedAt < TimeSpan.FromSeconds(Math.Min(10, _o.HeartbeatInterval.TotalSeconds))) return true;
         var lease = (await ReadTrustedAsync(ct))?.Lease;
+        if (!ControlTrusted) return false;
         if (lease is not null && lease.Dev == _db.DeviceId && lease.Until > NowUnix)
         {
             _leaseConfirmedAt = DateTime.UtcNow;
