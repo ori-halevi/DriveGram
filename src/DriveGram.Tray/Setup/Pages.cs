@@ -917,6 +917,29 @@ sealed class DrivePage : WizardPage
                 return false;
             }
         }
+        else if (rebinding)
+        {
+            // the old drive was not found: often just the wrong Telegram account (or this account was removed
+            // from the drive's channels) — the drive itself still exists, and files only on this PC are lost
+            // for good if this profile is reset now
+            var (pending, unsent) = DriveDeletion.LocalOnly(Ctx.State);
+            if (pending != 0 || unsent > 0)
+            {
+                var what = pending < 0
+                    ? L.T("לא הצלחתי לבדוק אם יש בו קבצים שקיימים רק במחשב הזה.", "I could not check whether it has files that exist only on this PC.")
+                    : L.T($"יש בו {pending} קבצים שעוד לא עלו ו־{unsent} שינויים שעוד לא נשלחו. הם קיימים רק במחשב הזה.",
+                          $"It has {pending} files not yet uploaded and {unsent} changes not yet sent. They exist only on this PC.");
+                if (Ui.Ask(L.T(
+                        $"⚠  הכונן הקודם לא נמצא בחשבון הטלגרם הזה. {what}\n\n" +
+                        "אם התחברת בטעות לחשבון אחר, חזור אחורה והתחבר לחשבון של הכונן: הכל יישמר.\n\n" +
+                        "אם תמשיך, הקבצים והשינויים האלה יימחקו מהמחשב לצמיתות. להמשיך בכל זאת?",
+                        $"⚠  The previous drive was not found in this Telegram account. {what}\n\n" +
+                        "If you signed in to another account by mistake, go back and sign in to the drive's account: everything is kept.\n\n" +
+                        "If you continue, these files and changes are deleted from this PC for good. Continue anyway?"),
+                        icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+                    return false;
+            }
+        }
         void ResetIfRebinding()
         {
             if (!rebinding) return;
