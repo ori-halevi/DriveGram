@@ -34,6 +34,8 @@ sealed class DriveController
     public Keys? PendingKeys;
     /// <summary>The last mount failed because Windows refused it (not offline, not a password).</summary>
     public bool LastMountRefused;
+    /// <summary>Files kept as "(incomplete)" waiting for one shared balloon.</summary>
+    public readonly List<(string Orig, string Kept, string Folder)> Incomplete = [];
 
     public DriveController(AppState state) => State = state;
 
@@ -162,14 +164,11 @@ sealed class TrayApp : ApplicationContext
             session.StopRequested += () => _ui.Post(async _ => await StopAsync(d, ask: false), null);
             session.SignedOut += () => _ui.Post(async _ => await OnSignedOutAsync(d), null);
             session.Sync.HandoverRequested += r => _ui.Post(async _ => await OnHandoverRequestedAsync(d, session, r), null);
-            session.Sync.FileIncomplete += (orig, kept, _) => _ui.Post(_ => Balloon(L.T("קובץ נשמר חלקית", "A file was saved only in part"),
-                L.T($"חלק מהגרסה של \"{orig}\" ששמרת במחשב הזה אבד בזמן שחיכתה לשליחה. מה שנשאר נשמר בשם \"{kept}\", וחסרים בו חלקים.",
-                    $"Part of the version of \"{orig}\" you saved on this PC was lost while it waited to be sent. What is left was kept as \"{kept}\"; parts of it are missing."),
-                ToolTipIcon.Warning), null);
+            session.Sync.FileIncomplete += (orig, kept, folderId) => _ui.Post(async _ => await OnFileIncompleteAsync(d, session, orig, kept, folderId), null);
             if (session.Sync.NeedsUpdate)
                 Balloon(L.T("צריך לעדכן את DriveGram", "Update DriveGram"),
                     L.T($"{L.Ltr(session.MountPoint)} נכתב בגרסה חדשה יותר. הוא פתוח לקריאה בלבד עד שתתקין את הגרסה החדשה.",
-                        $"{session.MountPoint} was written by a newer version. It is read-only until you install it."), ToolTipIcon.Warning);
+                        $"{session.MountPoint} was written by a newer version. It is read-only until you install the new version."), ToolTipIcon.Warning);
             d.ToldWritable = session.Writable;
             session.Sync.WritableChanged += () => _ui.Post(async _ =>
             {
@@ -178,22 +177,23 @@ sealed class TrayApp : ApplicationContext
                 d.ToldWritable = s.Writable;
                 Balloon(s.Writable ? L.T($"{L.Ltr(d.Letter)} ניתן לכתיבה", $"{d.Letter} is writable") : L.T($"{L.Ltr(d.Letter)} לקריאה בלבד", $"{d.Letter} is read-only"),
                     s.Writable ? L.T("אפשר לשמור קבצים בכונן.", "Files can be saved on the drive.") : ReadOnlyWhy(s),
-                    ToolTipIcon.Warning);
+                    ToolTipIcon.Warning, () => OpenDrive(d));
             }, null);
 
             string text = session.Writable
                 ? L.T($"הכונן זמין ב־{L.Ltr(session.MountPoint)}", $"The drive is available as {session.MountPoint}")
                 : $"{L.Ltr(session.MountPoint)} – {ReadOnlyWhy(session)}";
             if (session.LetterChanged is { } moved)
-                text += L.T($"\nהאות הרגילה תפוסה כרגע ({moved}); בפעם הבאה הכונן ינסה אותה שוב.", $"\nThe usual letter is taken right now ({moved}); next time the drive tries it again.");
-            if (!session.Sync.NeedsUpdate) Balloon(L.T("DriveGram מחובר", "DriveGram connected"), text);
+                text += L.T($"\nהאות הרגילה תפוסה כרגע ({L.Ltr(moved)}); בפעם הבאה הכונן ינסה אותה שוב.", $"\nThe usual letter is taken right now ({moved}); next time the drive tries it again.");
+            if (!session.Sync.NeedsUpdate) Balloon(L.T("DriveGram מחובר", "DriveGram connected"), text, onClick: () => OpenDrive(d));
         }
         catch (PasswordNotGivenException) { StopRetrying(d); d.Problem = L.T("לא הוזנה סיסמה", "no password entered"); }
         catch (MountFailedException ex)
         {
             d.LastMountRefused = true;
             d.Problem = Short(ex.Message);
-            Balloon(L.T("לא ניתן לחבר את הכונן", "The drive could not be connected"), ex.Message, ToolTipIcon.Error);
+            Balloon(L.T("לא ניתן לחבר את הכונן", "The drive could not be connected"), ex.Message, ToolTipIcon.Error,
+                () => _ = SetupAsync(d)); // the message suggests another letter in the settings
         }
         catch (NotSignedInException)
         {
@@ -210,12 +210,12 @@ sealed class TrayApp : ApplicationContext
         catch (DriveVanishedException)
         {
             d.NeedsSetup = true;
-            d.Problem = L.T("הערוצים של הכונן נמחקו מטלגרם", "the drive's channels were deleted from Telegram");
+            d.Problem = L.T("הכונן לא נמצא בחשבון הטלגרם", "the drive was not found in the Telegram account");
             _pendingSetup = d; // clicking the balloon opens its settings
             Balloon(L.T("הכונן לא נמצא בטלגרם", "Drive not found in Telegram"),
-                L.T($"הערוצים של {d.Name} נמחקו מהחשבון. פתח את 'הגדרות והתחברות' כדי להחליט מה לעשות.",
-                    $"The channels of {d.Name} were deleted from the account. Open 'Settings and sign-in' to decide what to do."),
-                ToolTipIcon.Error);
+                L.T($"{d.Name} לא נמצא בחשבון הטלגרם (אולי הערוצים שלו נמחקו, או שהחשבון הוסר מהם). פתח את \"הגדרות והתחברות…\" כדי להחליט מה לעשות.",
+                    $"{d.Name} was not found in the Telegram account (its channels may have been deleted, or the account removed from them). Open \"Settings and sign-in…\" to decide what to do."),
+                ToolTipIcon.Error, () => _ = SetupAsync(d));
         }
         catch (NeedsUpdateException)
         {
@@ -245,7 +245,7 @@ sealed class TrayApp : ApplicationContext
             Balloon(L.T("לא ניתן לפתוח את הכונן", "The drive could not be opened"),
                 L.T($"{d.Name}: בעיה במחשב הזה, לא באינטרנט ({Short(Setup.TelegramErrors.Text(ex))}). פרטים ביומן: בתפריט ← \"פתח את תיקיית היומן\".",
                     $"{d.Name}: a problem on this PC, not the internet ({Short(Setup.TelegramErrors.Text(ex))}). Details in the log: menu → \"Open the log folder\"."),
-                ToolTipIcon.Error);
+                ToolTipIcon.Error, () => OpenFolder(Path.Combine(AppState.Root, "logs")));
         }
         catch (Exception ex)
         {
@@ -259,6 +259,55 @@ sealed class TrayApp : ApplicationContext
             d.Starting = false;
             UpdateIcon();
         }
+    }
+
+    /// <summary>Files kept as "(incomplete)" arrive in bursts: one balloon per burst, naming the file and
+    /// its folder when there is only one.</summary>
+    async Task OnFileIncompleteAsync(DriveController d, DriveSession s, string orig, string kept, string folderId)
+    {
+        string folder;
+        try { folder = s.MountPoint + FolderPath(s, folderId); }
+        catch { folder = s.MountPoint + "\\"; }
+        d.Incomplete.Add((orig, kept, folder));
+        if (d.Incomplete.Count > 1) return; // a balloon for this burst is already on its way
+        await Task.Delay(1500);
+        var list = d.Incomplete.ToList();
+        d.Incomplete.Clear();
+        if (d.Session != s) return;
+        var open = list[0].Folder;
+        if (list.Count == 1)
+        {
+            var (o, k, f) = list[0];
+            Balloon(L.T("קובץ נשמר חלקית", "A file was saved only in part"),
+                L.T($"חלק מהגרסה של \"{L.Name(o)}\" ששמרת במחשב הזה אבד בזמן שחיכתה לשליחה. מה שנשאר נשמר בשם \"{L.Name(k)}\" (בתיקייה {L.LtrPath(f)}), וחסרים בו חלקים.",
+                    $"Part of the version of \"{o}\" you saved on this PC was lost while it waited to be sent. What is left was kept as \"{k}\" (in {f}); parts of it are missing."),
+                ToolTipIcon.Warning, () => OpenFolder(open));
+        }
+        else
+            Balloon(L.N(list.Count, "קובץ נשמר חלקית", "{0} קבצים נשמרו חלקית", "A file was saved only in part", "{0} files were saved only in part"),
+                L.T($"חלק מהגרסאות ששמרת במחשב הזה אבדו בזמן שחיכו לשליחה. מה שנשאר נשמר בשמות שמסתיימים ב־\"{s.Sync.IncompleteSuffix.Trim()}\", וחסרים בהם חלקים.",
+                    $"Parts of versions you saved on this PC were lost while they waited to be sent. What is left was kept under names ending in \"{s.Sync.IncompleteSuffix.Trim()}\"; parts of them are missing."),
+                ToolTipIcon.Warning, () => OpenFolder(open));
+    }
+
+    /// <summary>A folder's path inside the drive ("\a\b"), from the index.</summary>
+    static string FolderPath(DriveSession s, string id)
+    {
+        var parts = new List<string>();
+        var n = s.Db.Get(id);
+        for (int guard = 0; n is not null && !n.IsRoot && guard < 4096; guard++)
+        {
+            parts.Add(n.Name);
+            n = n.Parent is null ? null : s.Db.Get(n.Parent);
+        }
+        parts.Reverse();
+        return "\\" + string.Join('\\', parts);
+    }
+
+    static void OpenFolder(string path)
+    {
+        try { Process.Start(new ProcessStartInfo(path.EndsWith('\\') ? path : path + "\\") { UseShellExecute = true }); }
+        catch (Exception ex) { Log.Warn($"tray: opening {path}: {ex.Message}"); }
     }
 
     /// <summary>Failures a retry cannot fix (files on this PC unreadable, no permission, damaged data).</summary>
@@ -279,7 +328,8 @@ sealed class TrayApp : ApplicationContext
 
     void OfferSetup(DriveController d, string text)
     {
-        Balloon(L.T("נדרשת הגדרה", "Setup needed"), text + L.T(" לחץ כאן כדי להמשיך.", " Click here to continue."), ToolTipIcon.Info);
+        Balloon(L.T("נדרשת הגדרה", "Setup needed"), text + L.T(" לחץ כאן כדי להמשיך.", " Click here to continue."), ToolTipIcon.Info,
+            () => _ = SetupAsync(d));
         _pendingSetup = d;
         if (!_autoSetupShown) // first time: open the wizard right away
         {
@@ -298,7 +348,7 @@ sealed class TrayApp : ApplicationContext
         Balloon(L.T("החיבור לטלגרם בוטל", "Telegram sign-in revoked"),
             L.T($"{d.Name} נותק כי החיבור בוטל (למשל מ'סיום כל ההפעלות' בטלפון). קבצים שעוד לא עלו שמורים במחשב ויעלו אחרי התחברות מחדש.",
                 $"{d.Name} was disconnected because its sign-in was revoked (e.g. 'terminate all sessions' on the phone). Files not yet uploaded are kept on this PC and upload after you sign in again."),
-            ToolTipIcon.Warning);
+            ToolTipIcon.Warning, () => _ = SetupAsync(d));
         _pendingSetup = d;
     }
 
@@ -313,31 +363,39 @@ sealed class TrayApp : ApplicationContext
         StopRetrying(d); // the user disconnects: it must not come back by itself (e.g. after sleep)
         if (d.Session is not { } session) return true;
         int open = session.Engine.FilesOpenForWriting;
-        if (open > 0 && ask && Ui.Ask(L.T(
-                $"ב־{d.Name} יש {open} קבצים פתוחים לעריכה באפליקציות. אחרי הניתוק לא יהיה אפשר לשמור אותם (מה שכבר נשמר לא ילך לאיבוד).\n\nלנתק בכל זאת?",
-                $"{d.Name} has {open} files open for editing in apps. After disconnecting they cannot be saved (what was already saved is kept).\n\nDisconnect anyway?"),
+        if (open > 0 && ask && Ui.Ask(
+                L.N(open, $"ב־{d.Name} יש קובץ אחד פתוח לעריכה באפליקציה. אחרי הניתוק לא יהיה אפשר לשמור אותו (מה שכבר נשמר לא ילך לאיבוד).\n\nלנתק בכל זאת?",
+                          $"ב־{d.Name} יש {{0}} קבצים פתוחים לעריכה באפליקציות. אחרי הניתוק לא יהיה אפשר לשמור אותם (מה שכבר נשמר לא ילך לאיבוד).\n\nלנתק בכל זאת?",
+                          $"{d.Name} has 1 file open for editing in an app. After disconnecting it cannot be saved (what was already saved is kept).\n\nDisconnect anyway?",
+                          $"{d.Name} has {{0}} files open for editing in apps. After disconnecting they cannot be saved (what was already saved is kept).\n\nDisconnect anyway?"),
                 icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes)
             return false;
         int pending = session.Status.PendingFiles;
         if (pending > 0 && ask && waitForUploads)
         {
-            var answer = Ui.Ask(L.T(
-                    $"{pending} קבצים ב־{d.Name} עדיין עולים לטלגרם.\n\nכן – לחכות שיסיימו (מומלץ)\nלא – לנתק עכשיו; ההעלאה תמשיך בפעם הבאה שהכונן יתחבר במחשב הזה",
-                    $"{pending} files on {d.Name} are still uploading to Telegram.\n\nYes – wait for them to finish (recommended)\nNo – disconnect now; uploading continues next time the drive starts on this PC"),
-                MessageBoxButtons.YesNoCancel);
-            if (answer == DialogResult.Cancel) return false;
-            waitForUploads = answer == DialogResult.Yes;
+            var answer = Ui.Choose(
+                L.N(pending, $"קובץ אחד ב־{d.Name} עדיין עולה לטלגרם.", $"{{0}} קבצים ב־{d.Name} עדיין עולים לטלגרם.",
+                             $"1 file on {d.Name} is still uploading to Telegram.", $"{{0}} files on {d.Name} are still uploading to Telegram.")
+                + L.T("\n\nאם תנתק עכשיו, ההעלאה תמשיך בפעם הבאה שהכונן יתחבר במחשב הזה.",
+                      "\n\nIf you disconnect now, uploading continues next time the drive starts on this PC."),
+                [L.T("לחכות שיסיימו (מומלץ)", "Wait for them (recommended)"), L.T("לנתק עכשיו", "Disconnect now"), L.T("ביטול", "Cancel")],
+                cancelIndex: 2);
+            if (answer is 2 or -1) return false;
+            waitForUploads = answer == 0;
         }
         d.Stopping = true;
+        while (d.Trash is { IsDisposed: false, Acting: true }) await Task.Delay(200); // a restore / delete still running
         d.Trash?.Close();
         d.Security?.Close();
         d.ExportWindow?.Close();
         d.HandoverWait?.Close();
+        d.HandoverAsk?.Close();
         UpdateIcon();
         try
         {
             await Task.Run(() => session.StopAsync(waitForUploads, st => _ui.Post(_ =>
-                SetTooltip(L.T($"מסיים העלאות ב־{L.Ltr(d.Letter)}: נותרו {st.PendingFiles} קבצים", $"Finishing uploads on {d.Letter}: {st.PendingFiles} files left")), null)));
+                SetTooltip(L.T($"מסיים העלאות ב־{L.Ltr(d.Letter)}: ", $"Finishing uploads on {d.Letter}: ")
+                    + L.N(st.PendingFiles, "נותר קובץ אחד", "נותרו {0} קבצים", "1 file left", "{0} files left")), null)));
             await session.DisposeAsync();
         }
         catch (Exception ex) { Log.Error($"tray: stopping {d.Name} failed", ex); }
@@ -362,20 +420,24 @@ sealed class TrayApp : ApplicationContext
         if (ask)
         {
             int open = _drives.Sum(d => d.Session?.Engine.FilesOpenForWriting ?? 0);
-            if (open > 0 && Ui.Ask(L.T(
-                    $"יש {open} קבצים פתוחים לעריכה באפליקציות. אחרי היציאה לא יהיה אפשר לשמור אותם בכונן (מה שכבר נשמר לא ילך לאיבוד).\n\nלצאת בכל זאת?",
-                    $"{open} files are open for editing in apps. After exiting they cannot be saved on the drive (what was already saved is kept).\n\nExit anyway?"),
+            if (open > 0 && Ui.Ask(
+                    L.N(open, "קובץ אחד פתוח לעריכה באפליקציה. אחרי היציאה לא יהיה אפשר לשמור אותו בכונן (מה שכבר נשמר לא ילך לאיבוד).\n\nלצאת בכל זאת?",
+                              "{0} קבצים פתוחים לעריכה באפליקציות. אחרי היציאה לא יהיה אפשר לשמור אותם בכונן (מה שכבר נשמר לא ילך לאיבוד).\n\nלצאת בכל זאת?",
+                              "1 file is open for editing in an app. After exiting it cannot be saved on the drive (what was already saved is kept).\n\nExit anyway?",
+                              "{0} files are open for editing in apps. After exiting they cannot be saved on the drive (what was already saved is kept).\n\nExit anyway?"),
                     icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes)
                 return;
             int pending = _drives.Sum(d => d.Session?.Status.PendingFiles ?? 0);
             if (pending > 0)
             {
-                var answer = Ui.Ask(L.T(
-                        $"{pending} קבצים עדיין עולים לטלגרם.\n\nכן – לחכות שיסיימו ואז לצאת (מומלץ)\nלא – לצאת עכשיו; ההעלאה תמשיך בהפעלה הבאה",
-                        $"{pending} files are still uploading to Telegram.\n\nYes – wait for them, then exit (recommended)\nNo – exit now; uploading continues next time"),
-                    MessageBoxButtons.YesNoCancel);
-                if (answer == DialogResult.Cancel) return;
-                if (answer == DialogResult.No)
+                var answer = Ui.Choose(
+                    L.N(pending, "קובץ אחד עדיין עולה לטלגרם.", "{0} קבצים עדיין עולים לטלגרם.",
+                                 "1 file is still uploading to Telegram.", "{0} files are still uploading to Telegram.")
+                    + L.T("\n\nאם תצא עכשיו, ההעלאה תמשיך בהפעלה הבאה.", "\n\nIf you exit now, uploading continues next time."),
+                    [L.T("לחכות ואז לצאת (מומלץ)", "Wait, then exit (recommended)"), L.T("לצאת עכשיו", "Exit now"), L.T("ביטול", "Cancel")],
+                    cancelIndex: 2);
+                if (answer is 2 or -1) return;
+                if (answer == 1)
                     foreach (var d in _drives) await StopAsync(d, ask: false, waitForUploads: false);
             }
         }
@@ -448,6 +510,9 @@ sealed class TrayApp : ApplicationContext
         if (d is not null) StopRetrying(d);
         // the wizard edits a COPY: cancelling it leaves the live drive's settings untouched
         var state = d is null ? AppState.CreateNew() : AppState.Open(d.State.Id);
+        // the drive this profile's local data belongs to: choosing any other one resets that data (and
+        // first checks for files that exist only here) — also when the list is shown because of a mismatch
+        var originalChannels = state.Config.Channels;
         if (d?.MustChooseDrive == true)
         {
             state.Config.Channels = null; // its data channel did not match: show the drives to choose from
@@ -457,7 +522,7 @@ sealed class TrayApp : ApplicationContext
         DialogResult result;
         Keys? wizardKeys = null;
         string? createdDriveId = null;
-        using (_wizard = new Setup.SetupWizard(state, isNew))
+        using (_wizard = new Setup.SetupWizard(state, isNew, originalChannels))
         {
             result = _wizard.ShowDialog();
             wizardKeys = _wizard.Context.UnlockedKeys;
@@ -468,26 +533,44 @@ sealed class TrayApp : ApplicationContext
         // cancel AFTER that point cannot restore the old one: the profile on disk is the truth.
         bool rebound = !isNew && Binding(AppState.Open(state.Id)) != Binding(d!.State);
         var oldAccount = d?.State.Config.AccountKey;
-        if (result != DialogResult.OK && isNew && createdDriveId is not null && !_quitting
-            && AppState.Open(state.Id).Config.DriveId == createdDriveId)
+        bool createdHere = result != DialogResult.OK && isNew && createdDriveId is not null
+            && AppState.Open(state.Id).Config.DriveId == createdDriveId;
+        bool keepForNextRun = createdHere && _quitting; // no one to ask now: kept, it mounts next time
+        if (keepForNextRun && _drives.Count == 0) try { ShellIntegration.SetAutostart(true); } catch { }
+        if (createdHere && !_quitting)
         {
-            var keep = Ui.Ask(L.T("הכונן כבר נוצר בטלגרם.\n\nכן – לשמור אותו (הוא יתחבר עם הגדרות ברירת מחדל)\nלא – למחוק אותו מטלגרם",
-                    "The drive was already created in Telegram.\n\nYes – keep it (it connects with default settings)\nNo – delete it from Telegram"),
-                MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            if (keep == DialogResult.Yes)
+            var saved = AppState.Open(state.Id);
+            var keep = Ui.Choose(L.T(
+                    $"הכונן \"{saved.Config.VolumeLabel}\" כבר נוצר בטלגרם, אבל ההגדרה לא הסתיימה.\n\nאם תשמור אותו, הוא יתחבר עם הגדרות ברירת המחדל (אפשר לשנות אותן ב\"הגדרות והתחברות…\").",
+                    $"The drive \"{saved.Config.VolumeLabel}\" was already created in Telegram, but setup did not finish.\n\nIf you keep it, it connects with default settings (they can be changed in \"Settings and sign-in…\")."),
+                [L.T("שמור את הכונן", "Keep the drive"), L.T("מחק אותו מטלגרם", "Delete it from Telegram")]);
+            if (keep != 1)
             {
                 result = DialogResult.OK;
                 if (_drives.Count == 0) try { ShellIntegration.SetAutostart(true); } catch { } // as the last page would have
             }
             else
             {
-                try { await DriveDeletion.DeleteStorageAsync(AppState.Open(state.Id)); }
-                catch (Exception ex) { Log.Warn($"tray: deleting a cancelled new drive: {ex.Message}"); }
+                try
+                {
+                    SetTooltip(L.T("מוחק את הכונן מטלגרם…", "Deleting the drive from Telegram…"));
+                    await Task.Run(() => DriveDeletion.DeleteStorageAsync(saved));
+                }
+                catch (Exception ex)
+                {
+                    Log.Warn($"tray: deleting a cancelled new drive: {ex.Message}");
+                    // kept in the list, so it can still be deleted (or used) later
+                    result = DialogResult.OK;
+                    if (_drives.Count == 0) try { ShellIntegration.SetAutostart(true); } catch { }
+                    Ui.Error(L.T($"המחיקה מטלגרם נכשלה: {Setup.TelegramErrors.Text(ex)}\n\nהכונן נשאר ברשימה. אפשר למחוק אותו אחר כך מהתפריט שלו ← \"מחק את הכונן לצמיתות…\".",
+                                 $"Deleting from Telegram failed: {Setup.TelegramErrors.Text(ex)}\n\nThe drive stays in the list. You can delete it later from its menu → \"Delete the drive permanently…\"."));
+                }
+                finally { UpdateIcon(); }
             }
         }
         if (result != DialogResult.OK && !rebound)
         {
-            if (isNew) state.Delete();
+            if (isNew && !keepForNextRun) state.Delete();
             else if (wasMounted && d is { Session: null }) await MountAsync(d);
             else if (wasRetrying && d is { Session: null }) ScheduleRetry(d);
             UpdateIcon();
@@ -578,12 +661,25 @@ sealed class TrayApp : ApplicationContext
                     $"⚠  לא הצלחתי לבדוק אם ב־{d.Name} יש קבצים או שינויים שקיימים רק במחשב הזה. אם יש, הסרת הכונן תמחק אותם לצמיתות.\n\nלהסיר בכל זאת?",
                     $"⚠  Could not check whether {d.Name} has files or changes that exist only on this PC. If it does, removing the drive deletes them for good.\n\nRemove anyway?"),
                 icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) == DialogResult.Yes;
-        return Ui.Ask(L.T(
-                $"⚠  ב־{d.Name} יש {pending} קבצים שעוד לא עלו לטלגרם ו־{unsent} שינויים שעוד לא נשלחו. הם קיימים רק במחשב הזה.\n\n" +
+        return Ui.Ask(L.T($"⚠  ב־{d.Name} יש ", $"⚠  {d.Name} has ") + LocalOnlyText(pending, unsent) + L.T(". הם קיימים רק במחשב הזה.\n\n" +
                 "אם תסיר את הכונן עכשיו, הם יימחקו לצמיתות. כדי לשמור אותם: חבר את הכונן (אם צריך, התחבר מחדש לטלגרם) וחכה שיעלו.\n\nלהסיר בכל זאת?",
-                $"⚠  {d.Name} has {pending} files not yet uploaded to Telegram and {unsent} changes not yet sent. They exist only on this PC.\n\n" +
+                ". They exist only on this PC.\n\n" +
                 "Removing the drive now deletes them for good. To keep them, connect the drive (sign in again if needed) and let them upload.\n\nRemove anyway?"),
             icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+    }
+
+    /// <summary>"3 files not yet uploaded and one change not yet sent" — only the parts that are not zero.</summary>
+    public static string LocalOnlyText(int pending, int unsent)
+    {
+        var parts = new List<string>();
+        if (pending > 0)
+            parts.Add(L.N(pending, "קובץ אחד שעוד לא עלה לטלגרם", "{0} קבצים שעוד לא עלו לטלגרם",
+                "1 file not yet uploaded to Telegram", "{0} files not yet uploaded to Telegram"));
+        if (unsent > 0)
+            parts.Add(L.N(unsent, "שינוי אחד שעוד לא נשלח", "{0} שינויים שעוד לא נשלחו",
+                "1 change not yet sent", "{0} changes not yet sent"));
+        // Hebrew "and" joins the next word: "ושינוי אחד", but "ו־3 שינויים"
+        return parts.Count == 2 ? parts[0] + L.T(char.IsDigit(parts[1][0]) ? " ו־" : " ו", " and ") + parts[1] : parts.FirstOrDefault() ?? "";
     }
 
     /// <summary>Everything this PC keeps for the drive: profile, icon, and the account's sign-in if unused now.</summary>
@@ -617,7 +713,8 @@ sealed class TrayApp : ApplicationContext
             if (form.Received) d.ToldWritable = true;
             if (form.Received)
                 Balloon(L.T($"{L.Ltr(d.Letter)} ניתן לכתיבה", $"{d.Letter} is writable"),
-                    L.T("הכונן עבר למחשב הזה. אפשר לשמור קבצים.", "The drive moved to this PC. You can save files."));
+                    L.T("הכונן עבר למחשב הזה. אפשר לשמור קבצים.", "The drive moved to this PC. You can save files."),
+                    onClick: () => OpenDrive(d));
             UpdateIcon();
         };
         form.Show();
@@ -634,13 +731,18 @@ sealed class TrayApp : ApplicationContext
         bool approved, withdrawn;
         using (var ask = new HandoverAskForm(s, r, () => s.Sync.RequestStillOpenAsync(r, default)))
         {
+            // not modal: the user's other DriveGram windows (setup, recycle bin, a password being typed)
+            // stay usable while the question waits for an answer
+            var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            ask.FormClosed += (_, _) => closed.TrySetResult();
             d.HandoverAsk = ask;
-            ask.ShowDialog();
+            ask.Show();
+            await closed.Task;
             approved = ask.Approved;
             withdrawn = ask.Withdrawn;
         }
         d.HandoverAsk = null;
-        if (d.Session != s || withdrawn) return;
+        if (d.Session != s || d.Stopping || withdrawn) return; // closed because the drive is disconnecting
         try
         {
             if (!approved)
@@ -649,7 +751,13 @@ sealed class TrayApp : ApplicationContext
                 for (int attempt = 0; ; attempt++)
                 {
                     try { await Task.Run(() => s.Sync.RefuseHandoverAsync(r, default)); return; }
-                    catch (Exception ex) when (attempt < 5 && d.Session == s)
+                    catch (Exception ex) when (d.Session != s)
+                    {
+                        // the drive was disconnected meanwhile: nothing left to refuse from here
+                        Log.Warn($"tray: refusing the handover of {d.Name}: {ex.Message}; the drive is no longer connected");
+                        return;
+                    }
+                    catch (Exception ex) when (attempt < 5)
                     {
                         Log.Warn($"tray: refusing the handover of {d.Name}: {ex.Message}; trying again");
                         await Task.Delay(5000);
@@ -657,9 +765,17 @@ sealed class TrayApp : ApplicationContext
                     catch (Exception ex)
                     {
                         Log.Warn($"tray: refusing the handover of {d.Name}: {ex.Message}");
-                        Balloon(L.T("הסירוב לא נשלח", "The refusal was not sent"),
-                            L.T($"אין חיבור לטלגרם, ולכן {r.Name} עלול לקבל את הכונן בכל זאת.", $"No connection to Telegram, so {r.Name} may take the drive anyway."),
-                            ToolTipIcon.Warning);
+                        if (d.Session != s) return;
+                        if (!s.Writable)
+                            Balloon(L.T("הכונן עבר למחשב אחר", "The drive moved to another PC"),
+                                L.T($"הסירוב לא הגיע ל־{r.Name} בזמן, ולכן הכונן עבר אליו. אפשר לבקש אותו בחזרה מהתפריט.",
+                                    $"The refusal did not reach {r.Name} in time, so the drive moved there. You can ask for it back from the menu."),
+                                ToolTipIcon.Warning);
+                        else
+                            Balloon(L.T("הסירוב לא נשלח", "The refusal was not sent"),
+                                L.T($"לא הצלחתי לשלוח את הסירוב (בדוק את החיבור לאינטרנט). אם {r.Name} ייקח את הכונן, המחשב הזה יעבור לקריאה בלבד, ואפשר לבקש אותו בחזרה מהתפריט.",
+                                    $"The refusal could not be sent (check the internet connection). If {r.Name} takes the drive, this PC becomes read-only, and you can ask for it back from the menu."),
+                                ToolTipIcon.Warning);
                         return;
                     }
                 }
@@ -790,10 +906,11 @@ sealed class TrayApp : ApplicationContext
 
         if (!p.RemoteExists)
         {
-            if (Ui.Ask(L.T($"האחסון של {d.Name} כבר לא קיים (הערוצים נמחקו מטלגרם). להסיר את הכונן מהמחשב הזה?",
-                    $"The storage of {d.Name} no longer exists (its channels were deleted from Telegram). Remove the drive from this PC?"),
+            if (Ui.Ask(L.T($"{d.Name} לא נמצא בחשבון הטלגרם שלו (אולי הערוצים שלו נמחקו, או שהחשבון הוסר מהם), ולכן אין מה למחוק בטלגרם. להסיר את הכונן מהמחשב הזה?",
+                    $"{d.Name} was not found on its Telegram account (its channels may have been deleted, or the account removed from them), so there is nothing to delete in Telegram. Remove the drive from this PC?"),
                     icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
-            if (await StopAsync(d, ask: false, waitForUploads: false)) await ForgetLocallyAsync(d);
+            // the drive may still exist (only this account lost it): files that exist only here are asked about
+            if (await StopAsync(d, ask: false, waitForUploads: false) && ConfirmLosingLocalChanges(d)) await ForgetLocallyAsync(d);
             return;
         }
         if (!p.CanDeleteRemote)
@@ -931,7 +1048,7 @@ sealed class TrayApp : ApplicationContext
         _menu.Items.Add(title);
         foreach (var d in _drives)
         {
-            var account = d.State.Folder is not null ? L.T("תיקייה מקומית", "local folder") : d.State.Config.AccountName;
+            var account = d.State.Folder is not null ? L.T("תיקייה מקומית", "local folder") : L.Name(d.State.Config.AccountName ?? "");
             var item = new ToolStripMenuItem($"{d.Name}{(string.IsNullOrEmpty(account) ? "" : $" · {account}")} — {StatusOf(d)}")
             {
                 Image = d.Busy || d.Starting ? _busyBitmap : _idleBitmap,
@@ -1018,15 +1135,22 @@ sealed class TrayApp : ApplicationContext
         _icon.Text = t.Length > 127 ? t[..126] + "…" : t;
     }
 
-    void Balloon(string title, string text, ToolTipIcon icon = ToolTipIcon.None)
+    /// <summary>A notification. onClick: what clicking it does (nothing when null) — always about the
+    /// balloon on screen, never another drive's pending setup.</summary>
+    void Balloon(string title, string text, ToolTipIcon icon = ToolTipIcon.None, Action? onClick = null)
     {
-        _icon.BalloonTipTitle = title;
-        _icon.BalloonTipText = text;
+        // Hebrew starts with a right-to-left mark: where the direction is guessed from the first letter,
+        // a text opening with a drive letter would otherwise be laid out left-to-right
+        _icon.BalloonTipTitle = L.RtlStart(title);
+        _icon.BalloonTipText = L.RtlStart(text);
         _icon.BalloonTipIcon = icon;
+        _balloonClick = onClick;
         _icon.ShowBalloonTip(5000);
         _icon.BalloonTipClicked -= OnBalloonClicked;
         _icon.BalloonTipClicked += OnBalloonClicked;
     }
 
-    void OnBalloonClicked(object? sender, EventArgs e) => Activate();
+    Action? _balloonClick;
+
+    void OnBalloonClicked(object? sender, EventArgs e) => _balloonClick?.Invoke();
 }

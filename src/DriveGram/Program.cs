@@ -187,7 +187,7 @@ int Help()
           drivegram unmount                Ask the running drive (console or tray) to unmount.
           drivegram status                 Show what is stored and what is waiting to upload.
           drivegram drives                 List the drives on this PC.
-          drivegram export <folder>        Copy every file of a mounted drive to a folder (resumable).   (add --force to export into a folder that holds other files)
+          drivegram export <folder>        Copy every file of a mounted drive to a folder (resumable).   (add --force to export into a folder that holds other files; its newer files are kept)
           drivegram quit                   Close the tray app (it finishes uploads first).
 
         Several drives: add --drive <letter> (e.g. --drive U:) to choose one; default is the first.
@@ -472,16 +472,20 @@ async Task<int> Export(string? target)
     });
     try
     {
-        List<string> errors;
-        try { errors = await Exporter.CopyAsync(root, full, progress, cts.Token, allowNonEmpty: forceFlag); }
+        ExportResult result;
+        try { result = await Exporter.CopyAsync(root, full, progress, cts.Token, allowNonEmpty: forceFlag); }
         catch (Exporter.TargetNotEmptyException)
         {
-            Console.Error.WriteLine("The folder already holds other files. Add --force to export into it anyway (files with the same names are replaced).");
+            Console.Error.WriteLine("The folder already holds other files. Add --force to export into it anyway (files with the same names are replaced by the drive's version, unless the folder's file is newer: then it is kept).");
             return 2;
         }
+        var errors = result.Errors;
         Console.WriteLine();
+        foreach (var k in result.KeptNewer) Console.WriteLine("  kept (newer than the drive's copy): " + k);
         foreach (var e in errors) Console.Error.WriteLine("  failed: " + e);
-        Console.WriteLine(errors.Count == 0 ? "Export complete." : $"Done; {errors.Count} files failed (run again to retry them).");
+        if (result.KeptNewer.Count > 0)
+            Console.WriteLine($"{result.KeptNewer.Count} file(s) in the folder are newer than the drive's copy and were not replaced.");
+        Console.WriteLine(errors.Count == 0 ? "Export complete." : $"Done; {errors.Count} file(s) failed (run again to retry them).");
         return errors.Count == 0 ? 0 : 1;
     }
     catch (OperationCanceledException) { Console.WriteLine("\nStopped. Run the same command again to continue."); return 1; }

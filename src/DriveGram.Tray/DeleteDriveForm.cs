@@ -43,11 +43,15 @@ sealed class DeleteDriveForm : Form
         var what = Theme.Card(Color.FromArgb(0xFD, 0xEC, 0xEA), Color.FromArgb(0xE5, 0x9A, 0x92));
         var list = Theme.Column();
         list.Controls.Add(Theme.Label(L.T("יימחקו לצמיתות, מטלגרם ומהמחשב הזה:", "Deleted for good, from Telegram and from this PC:"), Theme.Body, Theme.Text, 560));
-        list.Controls.Add(Theme.Label(L.T($"•  {p.Files:N0} קבצים ו־{p.Folders:N0} תיקיות ({Ui.Size(p.Bytes)})", $"•  {p.Files:N0} files and {p.Folders:N0} folders ({Ui.Size(p.Bytes)})"), maxWidth: 560));
+        var folders = L.N(p.Folders, "תיקייה אחת", "{0:N0} תיקיות", "1 folder", "{0:N0} folders");
+        list.Controls.Add(Theme.Label("•  " + L.N(p.Files, "קובץ אחד", "{0:N0} קבצים", "1 file", "{0:N0} files")
+            + L.T(p.Folders == 1 ? " ו" : " ו־", " and ") + folders + $" ({Ui.Size(p.Bytes)})", maxWidth: 560));
         if (p.Trashed > 0)
-            list.Controls.Add(Theme.Label(L.T($"•  {p.Trashed:N0} פריטים בסל המחזור של הכונן", $"•  {p.Trashed:N0} items in the drive's recycle bin"), maxWidth: 560));
+            list.Controls.Add(Theme.Label(L.N(p.Trashed, "•  פריט אחד בסל המחזור של הכונן", "•  {0:N0} פריטים בסל המחזור של הכונן",
+                "•  1 item in the drive's recycle bin", "•  {0:N0} items in the drive's recycle bin"), maxWidth: 560));
         if (p.PendingUploads > 0)
-            list.Controls.Add(Theme.Label(L.T($"•  {p.PendingUploads:N0} קבצים שעוד לא סיימו לעלות", $"•  {p.PendingUploads:N0} files that have not finished uploading"), maxWidth: 560));
+            list.Controls.Add(Theme.Label(L.N(p.PendingUploads, "•  קובץ אחד שעוד לא סיים לעלות", "•  {0:N0} קבצים שעוד לא סיימו לעלות",
+                "•  1 file that has not finished uploading", "•  {0:N0} files that have not finished uploading"), maxWidth: 560));
         list.Controls.Add(Theme.Label(L.T("•  שני הערוצים של הכונן בטלגרם, כולל היסטוריית השינויים והגיבויים שלו", "•  the drive's two Telegram channels, with its change history and backups"), maxWidth: 560));
         what.Controls.Add(list);
         col.Controls.Add(what);
@@ -62,7 +66,11 @@ sealed class DeleteDriveForm : Form
 
         _understand.Text = L.T("אני מבין שהקבצים יימחקו לצמיתות ואי אפשר יהיה לשחזר אותם", "I understand the files will be deleted forever and cannot be recovered");
         col.Controls.Add(_understand);
-        col.Controls.Add(Theme.Label(L.T($"כדי לאשר, הקלד את שם הכונן:  {name}", $"To confirm, type the drive's name:  {name}"), Theme.Body, Theme.Text, 600));
+        // the name on a line of its own, in bold: a Hebrew name would otherwise read as part of the sentence
+        col.Controls.Add(Theme.Label(L.T("כדי לאשר, הקלד את שם הכונן:", "To confirm, type the drive's name:"), Theme.Body, Theme.Text, 600));
+        var typeThis = Theme.Label(name, new Font(Theme.Body, FontStyle.Bold), Theme.Text, 600);
+        typeThis.Margin = new Padding(16, 0, 16, 8);
+        col.Controls.Add(typeThis);
         _typed.RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No;
         _typed.Font = Theme.Body;
         col.Controls.Add(_typed);

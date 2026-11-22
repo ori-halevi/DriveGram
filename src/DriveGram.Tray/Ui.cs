@@ -14,6 +14,11 @@ static class Ui
         _ => $"{bytes / 1073741824.0:0.##} GB",
     });
 
+    /// <summary>"X: name · @account" for window titles, with the letter and a Latin account kept in order.</summary>
+    public static string DriveTitle(AppState s) => string.IsNullOrEmpty(s.Config.AccountName)
+        ? $"{L.Ltr(s.Config.MountPoint)} {s.Config.VolumeLabel}"
+        : $"{L.Ltr(s.Config.MountPoint)} {s.Config.VolumeLabel} · {L.Name(s.Config.AccountName)}";
+
     /// <summary>Direction, font and icon for a window, by the UI language.</summary>
     public static void Prepare(Form f)
     {
@@ -66,8 +71,75 @@ static class Ui
         timer.Start();
     }
 
+    /// <summary>A question whose buttons say what they do (Windows' own Yes/No follow the Windows
+    /// language, not the app's). Returns the chosen button's index; closing the window = cancelIndex
+    /// (without a cancel button the window cannot be closed without choosing).</summary>
+    public static int Choose(string text, string[] buttons, int defaultIndex = 0, int cancelIndex = -1,
+        MessageBoxIcon icon = MessageBoxIcon.Question) =>
+        OnTop(owner =>
+        {
+            using var f = new ChoiceForm(text, buttons, defaultIndex, cancelIndex, icon);
+            f.ShowDialog(owner);
+            return f.Choice;
+        });
+
     public static void Error(string text) =>
         OnTop(owner => MessageBox.Show(owner, text, "DriveGram", MessageBoxButtons.OK, MessageBoxIcon.Error, MessageBoxDefaultButton.Button1, Options));
+}
+
+/// <summary>The window behind Ui.Choose: an icon, the text, and one button per answer.</summary>
+sealed class ChoiceForm : Form
+{
+    public int Choice { get; private set; }
+
+    public ChoiceForm(string text, string[] buttons, int defaultIndex, int cancelIndex, MessageBoxIcon icon)
+    {
+        Choice = cancelIndex;
+        Ui.Prepare(this);
+        Text = "DriveGram";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        StartPosition = FormStartPosition.CenterScreen;
+        MaximizeBox = MinimizeBox = false;
+        ControlBox = cancelIndex >= 0;
+        ShowInTaskbar = false;
+        TopMost = true;
+        AutoSize = true;
+        AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        BackColor = Color.White;
+        Padding = new Padding(20, 18, 20, 14);
+
+        var sys = icon switch
+        {
+            MessageBoxIcon.Warning => SystemIcons.Warning,
+            MessageBoxIcon.Error => SystemIcons.Error,
+            MessageBoxIcon.Information => SystemIcons.Information,
+            _ => SystemIcons.Question,
+        };
+        var top = Setup.Theme.Row();
+        top.Controls.Add(new PictureBox { Image = sys.ToBitmap(), Size = new Size(32, 32), SizeMode = PictureBoxSizeMode.Zoom, Margin = new Padding(0, 2, 0, 0) });
+        var label = Setup.Theme.Label(text, Ui.Font, Setup.Theme.Text, 460);
+        label.Margin = new Padding(12, 0, 12, 0);
+        top.Controls.Add(label);
+
+        // a plain left-to-right flow: the mirrored (Hebrew) window puts the first button on the right
+        var row = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 16, 0, 0) };
+        for (int i = 0; i < buttons.Length; i++)
+        {
+            int index = i;
+            var b = i == defaultIndex ? Setup.Theme.Primary(buttons[i]) : Setup.Theme.Secondary(buttons[i]);
+            b.Font = Ui.Font;
+            b.MinimumSize = new Size(90, 32);
+            b.Click += (_, _) => { Choice = index; DialogResult = DialogResult.OK; Close(); };
+            row.Controls.Add(b);
+            if (i == defaultIndex) AcceptButton = b;
+            if (i == cancelIndex) CancelButton = b;
+        }
+        var col = Setup.Theme.Column();
+        col.Controls.AddRange([top, row]);
+        Controls.Add(col);
+        FormClosing += (_, e) => { if (e.CloseReason == CloseReason.UserClosing && cancelIndex < 0 && DialogResult != DialogResult.OK) e.Cancel = true; };
+        Shown += (_, _) => { Activate(); (AcceptButton as Control)?.Focus(); };
+    }
 }
 
 /// <summary>Asks for a drive's password (when it is not remembered on this PC).</summary>
@@ -146,7 +218,7 @@ sealed class TrashForm : Form
         bar.Controls.AddRange([restore, purge, refresh,
             new Label
             {
-                Text = L.T("פריטים נמחקים לצמיתות אוטומטית אחרי 30 יום. קובץ שנוסף לפני פחות מחצי שעה ועוד לא עלה נמחק מיד, בלי לעבור בסל.", "Items are deleted forever automatically after 30 days. A file added less than half an hour ago that has not uploaded yet is deleted at once, without the bin."),
+                Text = L.T("פריטים נמחקים לצמיתות אוטומטית אחרי 30 יום. נמחקים מיד, בלי לעבור בסל: קובץ שעוד לא עלה ונמחק תוך 2 דקות מהרגע שנוצר, העתקה שבוטלה, וקבצים זמניים.", "Items are deleted forever automatically after 30 days. Deleted at once, without the bin: a file not uploaded yet that is deleted within 2 minutes of being created, a cancelled copy, and temporary files."),
                 AutoSize = true, MaximumSize = new Size(520, 0), Padding = new Padding(12, 8, 0, 0), ForeColor = Color.DimGray,
             }]);
         Controls.Add(_list);
@@ -160,11 +232,11 @@ sealed class TrashForm : Form
         _list.Items.Clear();
         foreach (var t in _session.Trash())
         {
-            _list.Items.Add(new ListViewItem([t.Dir ? $"📁 {t.Name}" : t.Name, t.OriginalFolder,
+            _list.Items.Add(new ListViewItem([t.Dir ? $"📁 {t.Name}" : t.Name, L.LtrPath(t.OriginalFolder),
                 t.DeletedAt.ToString(L.Hebrew ? "dd/MM/yyyy HH:mm" : "g"), t.Dir ? "" : Ui.Size(t.Size)]) { Tag = t });
         }
         _list.EndUpdate();
-        Text = L.T($"DriveGram – סל המחזור של {_session.MountPoint} ({_list.Items.Count})",
+        Text = L.T($"DriveGram – סל המחזור של {L.Ltr(_session.MountPoint)} ({_list.Items.Count})",
                    $"DriveGram – {_session.MountPoint} recycle bin ({_list.Items.Count})");
     }
 
@@ -172,25 +244,47 @@ sealed class TrashForm : Form
     {
         var items = _list.SelectedItems.Cast<ListViewItem>().Select(i => (TrashItem)i.Tag!).ToList();
         if (items.Count == 0) return;
-        if (!restore && Ui.Ask(L.T($"למחוק לצמיתות {items.Count} פריטים? אי אפשר לבטל את זה.",
-                    $"Delete {items.Count} items forever? This cannot be undone."),
+        if (!restore && Ui.Ask(L.N(items.Count, "למחוק לצמיתות פריט אחד? אי אפשר לבטל את זה.", "למחוק לצמיתות {0} פריטים? אי אפשר לבטל את זה.",
+                    "Delete 1 item forever? This cannot be undone.", "Delete {0} items forever? This cannot be undone."),
                 icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes)
             return;
+        var elsewhere = new List<string>(); // restored, but not to the original folder (it is gone)
+        string? error = null;
+        _acting = true;
+        UseWaitCursor = true;
+        Enabled = false;
         try
         {
-            UseWaitCursor = true;
-            Enabled = false;
             await Task.Run(() =>
             {
                 foreach (var t in items)
                 {
-                    if (restore) _session.Restore(t.Id);
+                    if (restore)
+                    {
+                        var to = _session.Restore(t.Id);
+                        var folder = Path.GetDirectoryName(to) ?? to;
+                        if (!string.Equals(folder.TrimEnd('\\'), t.OriginalFolder.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+                            elsewhere.Add(to);
+                    }
                     else _session.DeleteForever(t.Id);
                 }
             });
         }
-        catch (Exception ex) { Ui.Error(ex.Message); }
-        finally { UseWaitCursor = false; Enabled = true; }
-        Reload();
+        catch (Exception ex) { error = Setup.TelegramErrors.Text(ex); }
+        finally { _acting = false; }
+        if (IsDisposed) return; // closed meanwhile (the drive was disconnected)
+        UseWaitCursor = false;
+        Enabled = true;
+        if (error is not null) Ui.Error(error);
+        else if (elsewhere.Count > 0)
+            Ui.Ask(L.T("התיקייה המקורית כבר לא קיימת, ולכן שוחזר אל:\n\n", "The original folder no longer exists, so it was restored to:\n\n")
+                    + string.Join("\n", elsewhere.Take(10).Select(L.LtrPath)) + (elsewhere.Count > 10 ? "\n…" : ""),
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        try { Reload(); } catch (Exception ex) { Log.Warn($"trash: reload failed: {ex.Message}"); }
     }
+
+    bool _acting;
+
+    /// <summary>A restore or delete is still running (the tray waits for it before stopping the drive).</summary>
+    public bool Acting => _acting;
 }

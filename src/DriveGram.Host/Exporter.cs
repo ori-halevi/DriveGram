@@ -3,6 +3,10 @@ namespace DriveGram.Host;
 /// <summary>Progress of an export: files and bytes copied so far, and the file being copied.</summary>
 public sealed record ExportProgress(int Files, int Skipped, long Bytes, string Current);
 
+/// <summary>What an export could not copy (Errors: worth a retry) and the target files it left alone
+/// because they were newer than the drive's copy (KeptNewer: a retry never changes them).</summary>
+public sealed record ExportResult(List<string> Errors, List<string> KeptNewer);
+
 /// <summary>
 /// "Take everything out": copies a mounted drive's whole tree to a normal folder (another disk, a USB
 /// drive). Reads through the drive itself, so it is exactly what Explorer shows. Re-running it resumes:
@@ -14,10 +18,11 @@ public static class Exporter
     /// <summary>The target holds other files: the caller asks the user, then calls again with allowNonEmpty.</summary>
     public sealed class TargetNotEmptyException() : IOException("the folder is not empty");
 
-    public static async Task<List<string>> CopyAsync(string sourceRoot, string target, IProgress<ExportProgress>? progress, CancellationToken ct,
+    public static async Task<ExportResult> CopyAsync(string sourceRoot, string target, IProgress<ExportProgress>? progress, CancellationToken ct,
         bool allowNonEmpty = false)
     {
         var errors = new List<string>();
+        var keptNewer = new List<string>();
         int files = 0, skipped = 0;
         long bytes = 0;
         Directory.CreateDirectory(target);
@@ -75,7 +80,7 @@ public static class Exporter
                         if (existing.LastWriteTimeUtc > mtime.AddSeconds(2))
                         {
                             // changed in the target after it was exported: never replaced by the older drive copy
-                            errors.Add($"{to}: newer than the drive's copy; kept");
+                            keptNewer.Add(to);
                             skipped++;
                             continue;
                         }
@@ -118,6 +123,6 @@ public static class Exporter
             }
         }
         progress?.Report(new ExportProgress(files, skipped, bytes, ""));
-        return errors;
+        return new ExportResult(errors, keptNewer);
     }
 }

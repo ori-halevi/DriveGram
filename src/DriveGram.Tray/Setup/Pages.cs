@@ -266,6 +266,10 @@ sealed class LoginPage : WizardPage
         _twoFa.Controls.AddRange([_twoFaHint, twoFaRow]);
         _twoFa.Visible = false;
         _twoFaOk.Click += async (_, _) => await SubmitTwoFaAsync();
+        // Enter in these boxes does their step (the wizard's "Next" stays off until the sign-in is done)
+        EnterClicks(_phoneBox, _sendCode);
+        EnterClicks(_codeBox, _verify);
+        EnterClicks(_twoFaBox, _twoFaOk);
 
         _signIn.Controls.AddRange([methods, _qr, _phone]);
         _known.Visible = false;
@@ -278,10 +282,22 @@ sealed class LoginPage : WizardPage
         {
             var left = (int)Math.Ceiling((_qrExpires - DateTime.UtcNow).TotalSeconds);
             if (_qrTask is { IsCompleted: false } && _qrImage.Image is not null && left > 0)
-                _qrState.Text = L.T($"ממתין לסריקה… הקוד מתחדש בעוד {left} שניות.", $"Waiting for the scan… a new code in {left} seconds.");
+                _qrState.Text = L.N(left, "ממתין לסריקה… הקוד מתחדש בעוד שנייה.", "ממתין לסריקה… הקוד מתחדש בעוד {0} שניות.",
+                    "Waiting for the scan… a new code in 1 second.", "Waiting for the scan… a new code in {0} seconds.");
         };
         Ctx.AskPassword = AskPasswordFromQr;
         Changed(false);
+    }
+
+    static void EnterClicks(TextBox box, Button button)
+    {
+        box.PreviewKeyDown += (_, e) => { if (e.KeyCode == System.Windows.Forms.Keys.Enter) e.IsInputKey = true; };
+        box.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode != System.Windows.Forms.Keys.Enter) return;
+            e.Handled = e.SuppressKeyPress = true;
+            if (button.Visible && button.Enabled) button.PerformClick();
+        };
     }
 
     // ── flow ─────────────────────────────────────────────────────────────────
@@ -333,7 +349,7 @@ sealed class LoginPage : WizardPage
         var row = Theme.Row();
         foreach (var a in accounts)
         {
-            var b = Theme.Secondary(a.Name);
+            var b = Theme.Secondary(L.Name(a.Name));
             b.Click += async (_, _) =>
             {
                 LeavePage();
@@ -352,6 +368,7 @@ sealed class LoginPage : WizardPage
         _qrCts?.Cancel();
         _tick.Stop();
         _pwWait?.TrySetResult(null);
+        _pwWait = null; // answered: a later phone sign-in's 2FA must not be taken for the QR flow's
     }
 
     public override Task<bool> NextAsync() => Task.FromResult(Ctx.User is not null && CanGoNext);
@@ -365,7 +382,7 @@ sealed class LoginPage : WizardPage
         _twoFa.Visible = false;
         _error.Text = "";
         var name = $"{user.first_name} {user.last_name}".Trim();
-        var handle = string.IsNullOrEmpty(user.username) ? "" : $"  ·  @{user.username}";
+        var handle = string.IsNullOrEmpty(user.username) ? "" : $"  ·  {L.Ltr("@" + user.username)}";
         var phone = string.IsNullOrEmpty(user.phone) ? "" : $"  ·  ‎+{user.phone}‎";
         _accountText.Text = L.T($"✓  מחובר כ־{name}{handle}{phone}", $"✓  Signed in as {name}{handle}{phone}");
         _account.Visible = true;
@@ -418,6 +435,7 @@ sealed class LoginPage : WizardPage
             _qrCts?.Cancel();
             _tick.Stop();
             _pwWait?.TrySetResult(null); // a QR sign-in waiting for its 2FA password must not block the switch
+            _pwWait = null;
             if (_qrTask is not null) { try { await _qrTask; } catch { } }
             _qr.Visible = false;
             _phone.Visible = true;
@@ -649,7 +667,7 @@ sealed class DrivePage : WizardPage
     public override string Title => L.T("הכונן", "The drive");
     public override string Subtitle => _mode switch
     {
-        Mode.Create when _wasVanished => L.T("הכונן הקודם נמחק מטלגרם.", "The previous drive was deleted from Telegram."),
+        Mode.Create or Mode.Connect when _wasVanished => L.T("הכונן הקודם לא נמצא בחשבון הזה.", "The previous drive was not found on this account."),
         Mode.Create => L.T("כונן חדש, וסיסמה שמצפינה אותו.", "A new drive, and the password that encrypts it."),
         Mode.Connect => L.T("חבר את המחשב הזה לכונן קיים.", "Connect this PC to an existing drive."),
         Mode.Connected => L.T("הכל מוכן כאן.", "All set here."),
@@ -666,8 +684,8 @@ sealed class DrivePage : WizardPage
 
         var vcol = Theme.Column();
         vcol.Controls.Add(Theme.Label(L.T(
-            "⚠  הערוצים של הכונן שהיה מחובר כאן נמחקו מטלגרם (או שהחשבון יצא מהם), ואיתם הקבצים. אפשר לבחור כונן אחר או ליצור כונן חדש וריק.",
-            "⚠  The channels of the drive connected here were deleted from Telegram (or the account left them), with its files. You can choose another drive or create a new, empty one."),
+            "⚠  הכונן שהיה מחובר כאן לא נמצא בחשבון הטלגרם הזה. אם התחברת בטעות לחשבון אחר, חזור אחורה והתחבר לחשבון של הכונן: הקבצים שלו לא נפגעו. אחרת, ייתכן שהערוצים שלו נמחקו או שהחשבון הוסר מהם. אפשר לבחור כונן אחר או ליצור כונן חדש וריק.",
+            "⚠  The drive connected here was not found on this Telegram account. If you signed in to another account by mistake, go back and sign in to the drive's account: its files are not affected. Otherwise its channels may have been deleted, or the account removed from them. You can choose another drive or create a new, empty one."),
             Theme.Small, Theme.Text, 620));
         vcol.Controls.Add(_vanishedOk);
         _vanished.Controls.Add(vcol);
@@ -780,7 +798,7 @@ sealed class DrivePage : WizardPage
         {
             string? why = c.Channels is null ? L.T("ערוץ הקבצים שלו חסר", "its data channel is missing")
                 : !c.HasVault ? L.T("היצירה שלו לא הושלמה", "it was never finished")
-                : onThisPc.TryGetValue(c.Channels.JournalId, out var letter) ? L.T($"כבר מחובר במחשב הזה כ־{letter}", $"already on this PC as {letter}")
+                : onThisPc.TryGetValue(c.Channels.JournalId, out var letter) ? L.T($"כבר מחובר במחשב הזה כ־{L.Ltr(letter)}", $"already on this PC as {letter}")
                 : null;
             var owner = c.Owned ? L.T("שלך", "yours") : L.T("אתה מנהל בו (גיבוי)", "you are an admin (backup)");
             var rb = Choice($"{c.Name}  ·  {owner}{(why is null ? "" : $"  —  {why}")}", c, enabled: why is null);
@@ -909,11 +927,20 @@ sealed class DrivePage : WizardPage
         if (rebinding && !_wasVanished)
         {
             var (pending, unsent) = DriveDeletion.LocalOnly(Ctx.State);
-            if (pending > 0 || unsent > 0)
+            if (pending < 0)
             {
-                _error.Text = L.T(
-                    $"בכונן הקודם יש {pending} קבצים שעוד לא עלו ו־{unsent} שינויים שעוד לא נשלחו, והם קיימים רק במחשב הזה. חבר אותו קודם (אם צריך, התחבר מחדש) וחכה שיעלו, או הסר אותו מהמחשב.",
-                    $"The previous drive has {pending} files not yet uploaded and {unsent} changes not yet sent, existing only on this PC. Connect it first (sign in again if needed) and let them upload, or remove it from this PC.");
+                // the index could not be read: say so, and let the user decide (default: stay)
+                if (Ui.Ask(L.T(
+                        "⚠  לא הצלחתי לבדוק אם בכונן הקודם יש קבצים או שינויים שקיימים רק במחשב הזה. אם יש, הם יימחקו מהמחשב לצמיתות כשהמחשב יעבור לכונן האחר.\n\nלהמשיך בכל זאת?",
+                        "⚠  I could not check whether the previous drive has files or changes that exist only on this PC. If it does, they are deleted from this PC for good when it switches to the other drive.\n\nContinue anyway?"),
+                        icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+                    return false;
+            }
+            else if (pending > 0 || unsent > 0)
+            {
+                _error.Text = L.T("בכונן הקודם יש ", "The previous drive has ") + TrayApp.LocalOnlyText(pending, unsent) + L.T(
+                    ", והם קיימים רק במחשב הזה. חבר אותו קודם (אם צריך, התחבר מחדש) וחכה שיעלו, או הסר אותו מהמחשב.",
+                    ", existing only on this PC. Connect it first (sign in again if needed) and let them upload, or remove it from this PC.");
                 return false;
             }
         }
@@ -927,13 +954,14 @@ sealed class DrivePage : WizardPage
             {
                 var what = pending < 0
                     ? L.T("לא הצלחתי לבדוק אם יש בו קבצים שקיימים רק במחשב הזה.", "I could not check whether it has files that exist only on this PC.")
-                    : L.T($"יש בו {pending} קבצים שעוד לא עלו ו־{unsent} שינויים שעוד לא נשלחו. הם קיימים רק במחשב הזה.",
-                          $"It has {pending} files not yet uploaded and {unsent} changes not yet sent. They exist only on this PC.");
+                    : L.T("יש בו ", "It has ") + TrayApp.LocalOnlyText(pending, unsent) + L.T(". הם קיימים רק במחשב הזה.", ". They exist only on this PC.");
+                var account = string.IsNullOrEmpty(Ctx.State.Config.AccountName) ? ""
+                    : L.T($"\n\nהחשבון המחובר עכשיו: {L.Name(Ctx.State.Config.AccountName)}", $"\n\nSigned in now as: {Ctx.State.Config.AccountName}");
                 if (Ui.Ask(L.T(
-                        $"⚠  הכונן הקודם לא נמצא בחשבון הטלגרם הזה. {what}\n\n" +
+                        $"⚠  הכונן הקודם לא נמצא בחשבון הטלגרם הזה. {what}{account}\n\n" +
                         "אם התחברת בטעות לחשבון אחר, חזור אחורה והתחבר לחשבון של הכונן: הכל יישמר.\n\n" +
                         "אם תמשיך, הקבצים והשינויים האלה יימחקו מהמחשב לצמיתות. להמשיך בכל זאת?",
-                        $"⚠  The previous drive was not found in this Telegram account. {what}\n\n" +
+                        $"⚠  The previous drive was not found in this Telegram account. {what}{account}\n\n" +
                         "If you signed in to another account by mistake, go back and sign in to the drive's account: everything is kept.\n\n" +
                         "If you continue, these files and changes are deleted from this PC for good. Continue anyway?"),
                         icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes)
@@ -1040,7 +1068,8 @@ sealed class FinishPage : WizardPage
         // the first drive: on; otherwise keep the choice the user already made
         _autostart.Checked = (Ctx.IsNew && !AppState.All().Any(a => a.Dir != Ctx.State.Dir)) || ShellIntegration.AutostartEnabled;
 
-        var account = Ctx.State.Folder ?? (string.IsNullOrEmpty(cfg.AccountName) ? null : cfg.AccountName);
+        var account = Ctx.State.Folder is { } folder ? L.LtrPath(folder)
+            : string.IsNullOrEmpty(cfg.AccountName) ? null : L.Name(cfg.AccountName);
         _summary.Text = (account is null ? "" : L.T($"חשבון: {account}\n", $"Account: {account}\n")) +
                         L.T("הכונן מוכן. הקבצים יעלו מוצפנים ברקע, ואייקון ליד השעון יראה מה המצב.",
                             "The drive is ready. Files upload encrypted in the background; an icon next to the clock shows what is happening.");

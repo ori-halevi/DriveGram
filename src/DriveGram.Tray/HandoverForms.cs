@@ -52,12 +52,14 @@ sealed class HandoverAskForm : Form
             Theme.Body, Theme.Text, 560));
         int pending = session.Status.PendingFiles, open = session.Engine.FilesOpenForWriting;
         if (pending > 0)
-            col.Controls.Add(Theme.Label(L.T($"• {pending} קבצים עוד עולים לטלגרם: הכונן יעבור אחרי שיסיימו.",
-                $"• {pending} files are still uploading to Telegram: the drive moves once they finish."), Theme.Body, Theme.Text, 560));
+            col.Controls.Add(Theme.Label(L.N(pending, "• קובץ אחד עוד עולה לטלגרם: הכונן יעבור אחרי שיסיים.", "• {0} קבצים עוד עולים לטלגרם: הכונן יעבור אחרי שיסיימו.",
+                "• 1 file is still uploading to Telegram: the drive moves once it finishes.", "• {0} files are still uploading to Telegram: the drive moves once they finish."), Theme.Body, Theme.Text, 560));
         if (open > 0)
-            col.Controls.Add(Theme.Label(L.T(
-                $"⚠  {open} קבצים פתוחים כרגע לעריכה. אחרי ההעברה לא תוכל לשמור אותם כאן. שמור וסגור אותם קודם. שינויים שכבר נשמרו לא ילכו לאיבוד: הם יישלחו כשהכונן יחזור למחשב הזה.",
-                $"⚠  {open} files are open for editing right now. After the handover they cannot be saved here; save and close them first. Changes already saved are not lost: they are sent when the drive comes back to this PC."),
+            col.Controls.Add(Theme.Label(L.N(open,
+                "⚠  קובץ אחד פתוח כרגע לעריכה. אחרי ההעברה לא תוכל לשמור אותו כאן. שמור וסגור אותו קודם. שינויים שכבר נשמרו לא ילכו לאיבוד: הם יישלחו כשהכונן יחזור למחשב הזה.",
+                "⚠  {0} קבצים פתוחים כרגע לעריכה. אחרי ההעברה לא תוכל לשמור אותם כאן. שמור וסגור אותם קודם. שינויים שכבר נשמרו לא ילכו לאיבוד: הם יישלחו כשהכונן יחזור למחשב הזה.",
+                "⚠  1 file is open for editing right now. After the handover it cannot be saved here; save and close it first. Changes already saved are not lost: they are sent when the drive comes back to this PC.",
+                "⚠  {0} files are open for editing right now. After the handover they cannot be saved here; save and close them first. Changes already saved are not lost: they are sent when the drive comes back to this PC."),
                 Theme.Body, Theme.Error, 560));
         col.Controls.Add(_countdown);
         var give = Theme.Secondary(L.T("העבר את הכונן", "Hand it over"));
@@ -82,8 +84,13 @@ sealed class HandoverAskForm : Form
         int left = (int)Math.Ceiling((_deadline - DateTime.UtcNow).TotalSeconds);
         if (left <= 0) { Approved = true; Close(); return; }
         if (++_polls % 3 == 0 && !_polling) _ = CheckStillOpenAsync();
-        _countdown.Text = L.T($"אם לא תענה, הכונן יעבור בעוד {left} שניות. סגירת החלון משאירה את הכונן כאן.", $"Without an answer, the drive moves in {left} seconds. Closing this window keeps the drive here.");
+        _countdown.Text = L.T("אם לא תענה, הכונן יעבור ", "Without an answer, the drive moves ") + Seconds(left)
+            + L.T(". סגירת החלון משאירה את הכונן כאן.", ". Closing this window keeps the drive here.");
     }
+
+    /// <summary>"בעוד 5 שניות" / "בעוד שנייה" ("in 5 seconds" / "in 1 second").</summary>
+    internal static string Seconds(int left) =>
+        L.N(left, "בעוד שנייה", "בעוד {0} שניות", "in 1 second", "in {0} seconds");
 
     async Task CheckStillOpenAsync()
     {
@@ -113,16 +120,19 @@ sealed class HandoverWaitForm : Form
     readonly Button _takeNow = Theme.Primary(L.T("קח עכשיו", "Take it now"));
     readonly Button _cancel = Theme.Secondary(L.T("ביטול", "Cancel"));
     readonly CancellationTokenSource _cts = new();
-    readonly string _holder;
+    readonly string _holder, _fromHolder, _atHolder; // "X" / "מ־X" / "ב־X" (Hebrew joins the preposition to the word)
     HandoverRequest? _mine;
     bool _finished, _taking, _refusedShown;
 
     public HandoverWaitForm(DriveSession session)
     {
         _session = session;
-        _holder = session.Sync.LeaseHolder ?? L.T("המחשב השני", "the other PC");
+        var holder = session.Sync.LeaseHolder;
+        _holder = holder ?? L.T("המחשב השני", "the other PC");
+        _fromHolder = holder is null ? "מהמחשב השני" : $"מ־{holder}";
+        _atHolder = holder is null ? "במחשב השני" : $"ב־{holder}";
         Ui.Prepare(this);
-        Text = L.T($"DriveGram – בקשת הכונן {session.MountPoint}", $"DriveGram – asking for {session.MountPoint}");
+        Text = L.T($"DriveGram – בקשת הכונן {L.Ltr(session.MountPoint)}", $"DriveGram – asking for {session.MountPoint}");
         StartPosition = FormStartPosition.CenterScreen;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
@@ -130,11 +140,11 @@ sealed class HandoverWaitForm : Form
 
         var col = Theme.Column();
         col.Padding = new Padding(24, 18, 24, 18);
-        col.Controls.Add(Theme.Label(L.T($"מבקש את הכונן מ־{_holder}", $"Asking {_holder} for the drive"), Theme.Heading, Theme.Text, 560));
+        col.Controls.Add(Theme.Label(L.T($"מבקש את הכונן {_fromHolder}", $"Asking {_holder} for the drive"), Theme.Heading, Theme.Text, 560));
         col.Controls.Add(_state);
         col.Controls.Add(Theme.Label(L.T(
-            "\"קח עכשיו\" לא מחכה: אם במחשב השני יש קבצים שעוד לא עלו, הם יגיעו כשהכונן יחזור אליו (ואם שניכם שיניתם אותו קובץ, יישמרו שתי הגרסאות).",
-            "\"Take it now\" does not wait: files the other PC has not uploaded yet arrive when the drive goes back to it (if you both changed the same file, both versions are kept)."),
+            "לקיחת הכונן בלי לחכות: אם במחשב השני יש קבצים שעוד לא עלו, הם יגיעו כשהכונן יחזור אליו (ואם שניכם שיניתם אותו קובץ, יישמרו שתי הגרסאות).",
+            "Taking the drive without waiting: files the other PC has not uploaded yet arrive when the drive goes back to it (if you both changed the same file, both versions are kept)."),
             Theme.Small, Theme.Muted, 560));
         var row = Theme.Row();
         row.Margin = new Padding(0, 12, 0, 0);
@@ -228,23 +238,24 @@ sealed class HandoverWaitForm : Form
                             return;
                         }
                         _state.Text = req!.Pending > 0
-                            ? L.T($"{_holder} מסכים, ומסיים להעלות {req.Pending} קבצים. הכונן יעבור מיד אחר כך.",
-                                  $"{_holder} agreed and is finishing {req.Pending} uploads. The drive moves right after.")
+                            ? L.T($"{_holder} מסכים, ומסיים להעלות ", $"{_holder} agreed and is finishing ")
+                              + L.N(req.Pending, "קובץ אחד", "{0} קבצים", "1 upload", "{0} uploads")
+                              + L.T(". הכונן יעבור מיד אחר כך.", ". The drive moves right after.")
                             : L.T($"{_holder} מסכים ומעביר את הכונן…", $"{_holder} agreed and is handing the drive over…");
                         break;
                     default: // asked / seen
                         int left = (int)Math.Ceiling((SyncService.HandoverAnswerTime - (DateTime.UtcNow - countFrom)).TotalSeconds);
                         if (left <= 0)
                         {
-                            _state.Text = L.T($"אין תשובה מ־{_holder}. לוקח את הכונן…", $"No answer from {_holder}. Taking the drive…");
+                            _state.Text = L.T($"אין תשובה {_fromHolder}. לוקח את הכונן…", $"No answer from {_holder}. Taking the drive…");
                             await TakeAsync(force: true);
                             return;
                         }
                         _state.Text = state == "seen"
-                            ? L.T($"השאלה מוצגת עכשיו ב־{_holder}… בלי תשובה, הכונן יעבור לכאן בעוד {left} שניות.",
-                                  $"The question is on the screen of {_holder}… without an answer, the drive moves here in {left} seconds.")
-                            : L.T($"ממתין לתשובה מ־{_holder}… אם לא תגיע תשובה, הכונן יעבור לכאן בעוד {left} שניות.",
-                                  $"Waiting for {_holder} to answer… without an answer, the drive moves here in {left} seconds.");
+                            ? L.T($"השאלה מוצגת עכשיו {_atHolder}… בלי תשובה, הכונן יעבור לכאן ",
+                                  $"The question is on the screen of {_holder}… without an answer, the drive moves here ") + HandoverAskForm.Seconds(left) + "."
+                            : L.T($"ממתין לתשובה {_fromHolder}… אם לא תגיע תשובה, הכונן יעבור לכאן ",
+                                  $"Waiting for {_holder} to answer… without an answer, the drive moves here ") + HandoverAskForm.Seconds(left) + ".";
                         break;
                 }
             }

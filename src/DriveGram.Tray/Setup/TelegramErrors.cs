@@ -52,8 +52,8 @@ static class TelegramErrors
         },
         DriveGram.Remote.NotSignedInException => L.T("החשבון לא מחובר לטלגרם במחשב הזה. פתח את \"הגדרות והתחברות\" של הכונן.",
             "The account is not signed in to Telegram on this PC. Open the drive's \"Settings and sign-in\"."),
-        DriveGram.Remote.DriveVanishedException => L.T("הערוצים של הכונן כבר לא קיימים בטלגרם (נמחקו, או שהחשבון יצא מהם).",
-            "The drive's channels no longer exist in Telegram (deleted, or the account left them)."),
+        DriveGram.Remote.DriveVanishedException => L.T("הכונן לא נמצא בחשבון הטלגרם הזה (אולי הערוצים שלו נמחקו, או שהחשבון הוסר מהם).",
+            "The drive was not found on this Telegram account (its channels may have been deleted, or the account removed from them)."),
         DriveGram.ControlNotTrustedException => L.T("רשומת הכונן שונתה מחוץ ל־DriveGram. אשר אותה קודם: בתפריט, \"אשר את רשומת הכונן…\".",
             "The drive's record was changed outside DriveGram. Confirm it first: \"Confirm the drive's record…\" in the menu."),
         DriveGram.LeaseLostException => L.T("מחשב אחר לקח את הכונן לכתיבה. אפשר לבקש אותו בחזרה מהתפריט.",
@@ -78,8 +78,8 @@ static class TelegramErrors
 
     static string Wait(int seconds) => seconds switch
     {
-        < 90 => L.T($"{seconds} שניות", $"{seconds} seconds"),
-        < 5400 => L.T($"{(seconds + 59) / 60} דקות", $"{(seconds + 59) / 60} minutes"),
+        < 90 => L.N(seconds, "שנייה", "{0} שניות", "1 second", "{0} seconds"),
+        < 5400 => L.N((seconds + 59) / 60, "דקה", "{0} דקות", "1 minute", "{0} minutes"),
         _ => L.T($"{seconds / 3600.0:0.#} שעות", $"{seconds / 3600.0:0.#} hours"),
     };
 }

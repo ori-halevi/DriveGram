@@ -25,11 +25,13 @@ sealed class SetupContext : IDisposable
     /// Binding the profile to any OTHER drive means its local index/cache belong to the old one.</summary>
     public Remote.TelegramChannels? OriginalChannels { get; }
 
-    public SetupContext(AppState state, bool isNew)
+    /// <param name="originalChannels">The drive the profile on disk is bound to, when the caller has already
+    /// cleared it from <paramref name="state"/> (to show the list of drives); otherwise state's own.</param>
+    public SetupContext(AppState state, bool isNew, Remote.TelegramChannels? originalChannels = null)
     {
         State = state;
         IsNew = isNew;
-        OriginalChannels = state.Config.Channels;
+        OriginalChannels = originalChannels ?? state.Config.Channels;
     }
 
     AccountLease? _lease;
@@ -165,10 +167,10 @@ sealed class SetupWizard : Form
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public string? SnapshotDir { get; init; }
 
-    public SetupWizard(AppState state, bool isNew)
+    public SetupWizard(AppState state, bool isNew, TelegramChannels? originalChannels = null)
     {
-        _ctx = new SetupContext(state, isNew);
-        Text = isNew ? L.T("DriveGram – כונן חדש", "DriveGram – new drive") : L.T($"DriveGram – הגדרות הכונן {state.DisplayName}", $"DriveGram – drive settings: {state.DisplayName}");
+        _ctx = new SetupContext(state, isNew, originalChannels);
+        Text = isNew ? L.T("DriveGram – כונן חדש", "DriveGram – new drive") : L.T($"DriveGram – הגדרות הכונן {Ui.DriveTitle(state)}", $"DriveGram – drive settings: {state.DisplayName}");
         RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No;
         RightToLeftLayout = L.Rtl;
         Font = Theme.Body;
@@ -263,8 +265,7 @@ sealed class SetupWizard : Form
         _index = index;
         _host.Controls.Clear();
         _host.Controls.Add(page);
-        _step.Text = L.T($"שלב {index + 1} מתוך {_pages.Count}", $"Step {index + 1} of {_pages.Count}");
-        _progressFill.Width = (int)(ClientSize.Width * (index + 1.0) / _pages.Count);
+        UpdateStep();
         UpdateButtons();
         // snapshots never touch Telegram (the real session may be in use by a running drive)
         bool offline = SnapshotDir is not null && page is (LoginPage or DrivePage);
@@ -272,7 +273,22 @@ sealed class SetupWizard : Form
         catch (Exception ex) { Ui.Error(TelegramErrors.Text(ex)); }
         UpdateButtons();
         if (direction != 0 && page.Skip && index + direction >= 0 && index + direction < _pages.Count)
+        {
+            _skipped.Add(page); // not counted in "step N of M"
             await GoAsync(index + direction, direction);
+        }
+        else if (_skipped.Remove(page)) UpdateStep();
+    }
+
+    readonly HashSet<WizardPage> _skipped = [];
+
+    /// <summary>"Step N of M", without pages that were skipped (e.g. API details already known).</summary>
+    void UpdateStep()
+    {
+        int total = _pages.Count - _skipped.Count;
+        int step = _pages.Take(_index + 1).Count(p => !_skipped.Contains(p));
+        _step.Text = L.T($"שלב {step} מתוך {total}", $"Step {step} of {total}");
+        _progressFill.Width = (int)(ClientSize.Width * (double)step / Math.Max(1, total));
     }
 
     /// <summary>Developer aid: render every page (and its demo states) to PNG files.</summary>

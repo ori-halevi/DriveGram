@@ -95,10 +95,12 @@ static class Theme
         Margin = new Padding(0),
     };
 
-    /// <summary>Items in reading order: right-to-left in Hebrew, left-to-right in English.</summary>
+    /// <summary>Items in reading order: right-to-left in Hebrew, left-to-right in English. Every Hebrew
+    /// window is mirrored (RightToLeftLayout), which already turns a left-to-right flow around; a
+    /// right-to-left flow here would turn it back (measured: the first item ended up on the left).</summary>
     public static FlowLayoutPanel Row() => new()
     {
-        FlowDirection = L.Rtl ? FlowDirection.RightToLeft : FlowDirection.LeftToRight,
+        FlowDirection = FlowDirection.LeftToRight,
         WrapContents = false,
         AutoSize = true,
         AutoSizeMode = AutoSizeMode.GrowAndShrink,

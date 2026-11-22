@@ -29,7 +29,7 @@ sealed class BackupForm : Form
     {
         _state = state;
         Ui.Prepare(this);
-        Text = L.T($"DriveGram – גיבוי בחשבון נוסף ({state.DisplayName})", $"DriveGram – backup on another account ({state.DisplayName})");
+        Text = L.T($"DriveGram – גיבוי בחשבון נוסף ({Ui.DriveTitle(state)})", $"DriveGram – backup on another account ({state.DisplayName})");
         StartPosition = FormStartPosition.CenterScreen;
         Size = new Size(780, 720);
         MinimumSize = new Size(640, 480);
@@ -154,7 +154,7 @@ sealed class BackupForm : Form
                 list = await Task.Run(() => TelegramRemote.ListAdminsAsync(lease.Client, ch));
             foreach (var c in list)
             {
-                var who = string.Join(",  ", c.Admins.Select(a => a.IsOwner ? $"{a.Name} ({L.T("בעלים", "owner")})" : a.Name));
+                var who = string.Join(",  ", c.Admins.Select(a => a.IsOwner ? $"{L.Name(a.Name)} ({L.T("בעלים", "owner")})" : L.Name(a.Name)));
                 var kind = c.IsJournal ? L.T("ערוץ היומן", "Journal") : L.T("ערוץ הקבצים", "Data");
                 _admins.Controls.Add(Theme.Label($"{kind}:  {who}", Theme.Body, Theme.Text, 680));
                 (c.IsJournal ? _journalName : _dataName).Text = $"•  {kind}:  “{c.Title}”";
@@ -238,7 +238,7 @@ sealed class BackupForm : Form
                 var row = Theme.Row();
                 var make = Theme.Primary(L.T("הפוך למנהל", "Make admin"));
                 make.Click += async (_, _) => await PromoteAsync(ch, u, make);
-                row.Controls.AddRange([Theme.Label(u.Name, Theme.Body), make]);
+                row.Controls.AddRange([Theme.Label(L.Name(u.Name), Theme.Body), make]);
                 _joined.Controls.Add(row);
             }
         }
@@ -253,7 +253,7 @@ sealed class BackupForm : Form
     async Task PromoteAsync(TelegramChannels ch, ChannelAdmin user, Button button)
     {
         // whoever opened a link first joined: make sure it is really the backup account before full rights
-        if (Ui.Ask(L.T($"להפוך את החשבון הזה למנהל מלא של שני הערוצים?\n\n{user.Name}   (מזהה {user.UserId})\n\nמנהל יכול לשנות ואף למחוק את הכונן. ודא שזה באמת החשבון שלך.",
+        if (Ui.Ask(L.T($"להפוך את החשבון הזה למנהל מלא של שני הערוצים?\n\n{L.Name(user.Name)}   (מזהה {user.UserId})\n\nמנהל יכול לשנות ואף למחוק את הכונן. ודא שזה באמת החשבון שלך.",
                        $"Make this account a full admin of both channels?\n\n{user.Name}   (id {user.UserId})\n\nAn admin can change and even delete the drive. Make sure it really is your account."),
                 icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
         button.Enabled = false;
@@ -264,7 +264,7 @@ sealed class BackupForm : Form
                 name = await Task.Run(() => TelegramRemote.PromoteJoinedAsync(lease.Client, ch, user.UserId));
             _joined.Controls.Clear();
             _linksResult.ForeColor = Theme.Success;
-            _linksResult.Text = L.T($"✓  {name} מנהל עכשיו את שני הערוצים, עם כל ההרשאות.", $"✓  {name} now administers both channels, with every permission.");
+            _linksResult.Text = L.T($"✓  {L.Name(name)} מנהל עכשיו את שני הערוצים, עם כל ההרשאות.", $"✓  {name} now administers both channels, with every permission.");
             await LoadAdminsAsync();
         }
         catch (Exception ex)
@@ -291,7 +291,7 @@ sealed class BackupForm : Form
                 var who = $"{user.first_name} {user.last_name}".Trim();
                 // a typo or a look-alike name would hand a stranger full control: show exactly who it is
                 if (Ui.Ask(L.T(
-                        $"להפוך את החשבון הזה למנהל מלא של שני הערוצים של הכונן?\n\n{who}\n@{user.username}   (מזהה {user.id})\n\nמנהל יכול לקרוא את רשומת הכונן, לשנות ואף למחוק את כל הערוצים. ודא שזה באמת החשבון שלך.",
+                        $"להפוך את החשבון הזה למנהל מלא של שני הערוצים של הכונן?\n\n{who}\n{L.Ltr("@" + user.username)}   (מזהה {user.id})\n\nמנהל יכול לקרוא את רשומת הכונן, לשנות ואף למחוק את כל הערוצים. ודא שזה באמת החשבון שלך.",
                         $"Make this account a full admin of both of the drive's channels?\n\n{who}\n@{user.username}   (id {user.id})\n\nAn admin can read the drive's record, change, and even delete both channels. Make sure it really is your account."),
                         icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes)
                 {
@@ -301,7 +301,7 @@ sealed class BackupForm : Form
                 name = await Task.Run(() => TelegramRemote.AddBackupAdminAsync(lease.Client, ch, user));
             }
             _addResult.ForeColor = Theme.Success;
-            _addResult.Text = L.T($"✓  {name} מנהל עכשיו את שני הערוצים, עם כל ההרשאות.", $"✓  {name} now administers both channels, with every permission.");
+            _addResult.Text = L.T($"✓  {L.Name(name)} מנהל עכשיו את שני הערוצים, עם כל ההרשאות.", $"✓  {name} now administers both channels, with every permission.");
             await LoadAdminsAsync();
         }
         catch (Exception ex)

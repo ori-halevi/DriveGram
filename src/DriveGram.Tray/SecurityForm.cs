@@ -30,7 +30,7 @@ sealed class SecurityForm : Form
     {
         _session = session;
         Ui.Prepare(this);
-        Text = L.T($"DriveGram – סיסמה ומפתח שחזור ({session.MountPoint})", $"DriveGram – password and recovery key ({session.MountPoint})");
+        Text = L.T($"DriveGram – סיסמה ומפתח שחזור ({L.Ltr(session.MountPoint)})", $"DriveGram – password and recovery key ({session.MountPoint})");
         StartPosition = FormStartPosition.CenterScreen;
         Size = new Size(760, 720);
         BackColor = Color.White;
