@@ -279,6 +279,10 @@ public sealed class DriveFileSystem : FileSystemBase
         if (parent.IsRoot && (name.Equals("$RECYCLE.BIN", StringComparison.OrdinalIgnoreCase)
                               || name.Equals("System Volume Information", StringComparison.OrdinalIgnoreCase)))
             return STATUS_ACCESS_DENIED;
+        // Explorer's thumbnail cache files (written into every photo folder on network drives): never
+        // uploaded and synced; Explorer simply does without them
+        if (name.Equals("Thumbs.db", StringComparison.OrdinalIgnoreCase) || name.Equals("ehthumbs_vista.db", StringComparison.OrdinalIgnoreCase))
+            return STATUS_ACCESS_DENIED;
 
         bool dir = (createOptions & FILE_DIRECTORY_FILE) != 0;
         uint attrs = CleanAttrs(dir ? fileAttributes : fileAttributes | AttrArchive, dir);

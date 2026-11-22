@@ -639,6 +639,18 @@ sealed class TrayApp : ApplicationContext
         UpdateIcon();
     }
 
+    async Task ChangeDriveTypeAsync(DriveController d)
+    {
+        using var form = new DriveTypeForm(d.Name, d.State.Config.NetworkDrive);
+        if (form.ShowDialog() != DialogResult.OK || form.Network == d.State.Config.NetworkDrive) return;
+        bool wasMounted = d.Session is not null;
+        if (wasMounted && !await StopAsync(d)) return; // the usual questions (uploads, open files)
+        d.State.Config.NetworkDrive = form.Network;
+        d.State.Save();
+        Log.Info($"tray: {d.Name} is now a {(form.Network ? "network drive" : "regular disk")}");
+        if (wasMounted) await MountAsync(d);
+    }
+
     bool _deleting;
 
     sealed class PasswordNotGivenException() : Exception("no password entered");
@@ -831,6 +843,8 @@ sealed class TrayApp : ApplicationContext
                 item.DropDownItems.Add(Item(L.T($"בקש את הכונן מ־{holder}…", $"Ask {holder} for the drive…"), () => AskForDrive(d), !d.Stopping, bold: true));
             item.DropDownItems.Add(Item(L.T("הגדרות והתחברות…", "Settings and sign-in…"), async () => await SetupAsync(d), !d.Starting && !d.Stopping));
             item.DropDownItems.Add(Item(L.T("סיסמה ומפתח שחזור…", "Password and recovery key…"), () => ShowSecurity(d), on));
+            item.DropDownItems.Add(Item(d.State.Config.NetworkDrive ? L.T("סוג הכונן: כונן רשת…", "Drive type: network drive…") : L.T("סוג הכונן: דיסק רגיל…", "Drive type: regular disk…"),
+                async () => await ChangeDriveTypeAsync(d), !d.Starting && !d.Stopping));
             if (d.State.Folder is null && d.State.Config.Channels is not null)
                 item.DropDownItems.Add(Item(L.T("גיבוי בחשבון נוסף…", "Backup on another account…"), () => ShowBackup(d)));
             item.DropDownItems.Add(new ToolStripSeparator());

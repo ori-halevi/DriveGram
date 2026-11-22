@@ -82,6 +82,8 @@ public sealed class DriveSession : IAsyncDisposable
         _instance = instance;
         _stopEvent = stopEvent;
         _host = new FileSystemHost(new DriveFileSystem(db, engine, sync, state.Config.VolumeLabel));
+        // a network drive: Windows (and the programs that scan "all disks") treat it as remote
+        if (state.Config.NetworkDrive) _host.Prefix = $@"\DriveGram\{state.Id}";
         sync.RemoteOpsApplying += NoteOldPaths;
         sync.RemoteOpsApplied += NotifyExplorer;
         new Thread(() =>

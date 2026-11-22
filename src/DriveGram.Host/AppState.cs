@@ -22,6 +22,9 @@ public sealed class AppConfig
     public string? Folder { get; set; }
     public string MountPoint { get; set; } = "T:";
     public string VolumeLabel { get; set; } = "DriveGram";
+    /// <summary>Shown to Windows as a network drive (backup/antivirus/indexing tools skip it) instead of a
+    /// regular disk. Off by default; chosen in the tray menu ("Drive type…").</summary>
+    public bool NetworkDrive { get; set; }
     public double StagingQuotaGb { get; set; } = 8;
     public double CacheQuotaGb { get; set; } = 10;
     public int UploadConcurrency { get; set; } = 2;
