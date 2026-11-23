@@ -8,6 +8,12 @@
 <br/>
 <sub><em>כונן ב"מחשב זה" שכל הקבצים שלו נשמרים מוצפנים בחשבון הטלגרם שלך.</em></sub>
 
+<br/><br/>
+
+<img src="docs/images/this-pc-hero.png" width="720" alt="DriveGram (V:) in This PC, next to Local Disk (C:)" />
+
+### It's just a drive. Your files live in Telegram.
+
 <br/>
 
 ![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?logo=windows&logoColor=white)
@@ -19,12 +25,6 @@
 ### [⬇️ Download / הורדה](https://github.com/ori-halevi/DriveGram/releases/latest)
 
 📖 [English](#-english) · [עברית](#-עברית)
-
-<br/>
-
-<img src="docs/images/this-pc.png" width="900" alt="DriveGram as a drive in This PC, next to Local Disk (C:)" />
-<br/>
-<sub>A real drive letter in This PC, right next to your disks.</sub>
 
 </div>
 
@@ -42,8 +42,9 @@ No server in the middle, no subscription, no storage plan. Just your account, yo
 
 ### Highlights
 
+- 💽 **A real drive letter in This PC.** Not a website, not a sync folder: open, save and drag files in File Explorer and in every program, exactly like on `C:`.
 - 🔐 **Encrypted before it leaves your PC.** Your password turns into the key (AES-256-GCM). Telegram stores encrypted pieces it cannot read, and file names are encrypted too. A **recovery key** is one click away.
-- 📁 **A real drive, not a sync folder.** Files that are not on this PC are fetched when you open them, so the drive can be far bigger than your disk. Recently used files are kept locally and open instantly.
+- 📁 **Bigger than your disk.** Files that are not on this PC are fetched when you open them, so the drive can be far bigger than your disk. Recently used files are kept locally and open instantly.
 - 🐘 **Built for big files.** Files are stored in 32 MB pieces, uploaded in parallel and in the background while the copy is still running. Edit one corner of a 50 GB file, and only that piece is uploaded again.
 - 💪 **Survives the real world.** Lost connection, sleep, a crash, a reboot in the middle of an upload: it picks up where it stopped. Telegram's rate limits are respected instead of fought.
 - 💻 **Several PCs, one drive.** One PC writes at a time and the others see the same files read-only. Ask for the drive and the other PC hands it over in a click. If it doesn't answer, the drive moves anyway.
@@ -117,14 +118,15 @@ DriveGram is honest about its trade-offs. Every new drive also gets a short note
 
 **DriveGram** מוסיף כונן חדש ל"מחשב זה", למשל `T:`. עובדים איתו בסייר הקבצים כמו עם כל דיסק. מאחורי הקלעים, כל קובץ **מוצפן במחשב שלך** ונשמר בשני ערוצים פרטיים **בחשבון הטלגרם שלך**. אין שרת באמצע ואין מנוי.
 
+- 💽 **אות כונן אמיתית ב"מחשב זה".** לא אתר ולא תיקיית סנכרון: פותחים, שומרים וגוררים קבצים בסייר ובכל תוכנה, בדיוק כמו ב־`C:`.
 - 🔐 **מוצפן לפני שהוא יוצא מהמחשב.** טלגרם לא יכול לקרוא את הקבצים או את השמות שלהם. יש גם מפתח שחזור.
-- 📁 **כונן אמיתי.** קבצים שלא שמורים במחשב יורדים כשפותחים אותם, אז הכונן יכול להיות גדול בהרבה מהדיסק שלך.
+- 📁 **גדול מהדיסק שלך.** קבצים שלא שמורים במחשב יורדים כשפותחים אותם, אז הכונן יכול להיות גדול בהרבה מהדיסק שלך.
 - 🐘 **מתאים לקבצים גדולים.** העלאה ברקע, וכשעורכים קובץ ענק עולה מחדש רק החלק ששונה.
 - 💪 **עמיד.** ניתוק, שינה, קריסה או הפעלה מחדש באמצע העלאה, וההעלאה ממשיכה מאיפה שעצרה.
 - 💻 **כמה מחשבים לכונן אחד.** מחשב אחד כותב, והכונן עובר ביניהם בלחיצה.
 - 🗑️ **סל מחזור** ששומר קבצים 30 יום, **כמה כוננים וכמה חשבונות**, **כונן רשת או דיסק רגיל**, ו**ייצוא** של הכל לתיקייה רגילה.
 
-<div align="center"><img src="docs/images/this-pc.png" width="760" alt="הכונן ב&quot;מחשב זה&quot;" /><br/><sub>אות כונן אמיתית ב"מחשב זה", ליד הדיסקים שלך</sub></div>
+<div align="center"><img src="docs/images/this-pc-hero.png" width="620" alt="הכונן ב&quot;מחשב זה&quot;" /><br/><sub>אות כונן אמיתית ב"מחשב זה", ליד הדיסקים שלך</sub></div>
 
 <table>
 <tr>
