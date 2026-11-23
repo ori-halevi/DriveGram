@@ -57,11 +57,11 @@ sealed class DeleteDriveForm : Form
         col.Controls.Add(what);
 
         if (p.OpenElsewhere is { } pc)
-            col.Controls.Add(Theme.Label(L.T($"הכונן פתוח כרגע לכתיבה במחשב \"{pc}\". שינויים שנעשים שם ועוד לא עלו — יאבדו.",
+            col.Controls.Add(Theme.Label(L.T($"הכונן פתוח כרגע לכתיבה במחשב \"{L.Ltr(pc)}\". שינויים שנעשו שם ועוד לא עלו יאבדו.",
                 $"The drive is open for writing on \"{pc}\" right now. Changes made there that have not uploaded yet will be lost."), Theme.Body, Danger, 600));
         col.Controls.Add(Theme.Label(L.T(
-            "מחשבים אחרים שמחוברים לכונן הזה (וחשבונות גיבוי שמנהלים בו) יאבדו אליו גישה. אם יש משהו שתרצה לשמור — העתק אותו מהכונן לפני המחיקה.",
-            "Other PCs connected to this drive (and backup accounts that administer it) lose access too. If there is anything to keep, copy it out of the drive first."),
+            "מחשבים אחרים שמחוברים לכונן הזה (וחשבונות גיבוי שמנהלים אותו) יאבדו אליו גישה. אם יש משהו שתרצה לשמור, העתק אותו מהכונן לפני המחיקה. רוצה רק שהכונן לא יופיע במחשב הזה? בחר במקום זה \"הסר מהמחשב הזה…\": הקבצים יישארו בטלגרם.",
+            "Other PCs connected to this drive (and backup accounts that administer it) lose access too. If there is anything to keep, copy it out of the drive first. Only want the drive gone from this PC? Choose \"Remove from this PC…\" instead: the files stay in Telegram."),
             Theme.Body, Theme.Muted, 600));
 
         _understand.Text = L.T("אני מבין שהקבצים יימחקו לצמיתות ואי אפשר יהיה לשחזר אותם", "I understand the files will be deleted forever and cannot be recovered");

@@ -58,23 +58,50 @@ static class TelegramErrors
             "The drive's record was changed outside DriveGram. Confirm it first: \"Confirm the drive's record…\" in the menu."),
         DriveGram.LeaseLostException => L.T("מחשב אחר לקח את הכונן לכתיבה. אפשר לבקש אותו בחזרה מהתפריט.",
             "Another PC took the drive for writing. You can ask for it back from the menu."),
-        InvalidOperationException { Message: "The drive is read-only on this PC." } =>
+        DriveGram.Crypto.WrongPasswordException => L.T("הסיסמה (או מפתח השחזור) שגויה.", "Wrong password (or recovery key)."),
+        DriveGram.NewerVaultException { WrongSecret: true } => L.T("הסיסמה לא פותחת את רשומת הכונן שבטלגרם.", "The password does not open the drive's record in Telegram."),
+        DriveGram.NewerVaultException => L.T("ייתכן שהסיסמה של הכונן שונתה במחשב אחר.", "The drive's password may have been changed on another PC."),
+        DriveGram.Sync.HandoverBusyException b => L.T($"המחשב {L.Ltr(b.Other)} כבר ביקש את הכונן. נסה שוב בעוד דקה.", $"{b.Other} already asked for the drive. Try again in a minute."),
+        InvalidOperationException { Message: var m } when m.StartsWith("The drive is read-only on this PC") =>
             L.T("הכונן במצב קריאה בלבד במחשב הזה: את השינוי הזה עושים במחשב שבו הוא פתוח לכתיבה (או בקש את הכונן מהתפריט).",
                 "The drive is read-only on this PC: make this change on the PC where it is open for writing (or ask for the drive from the menu)."),
         IOException io when io.Message.StartsWith("The change could not be saved") =>
             L.T("השינוי לא נשמר בכונן (אולי החיבור נקטע). לא שונה דבר; נסה שוב.", "The change could not be saved to the drive (perhaps the connection dropped). Nothing was changed; try again."),
+        UnauthorizedAccessException { Message: var m } when m.StartsWith("Only the drive's owner account") =>
+            L.T("רק החשבון שבבעלותו הכונן יכול למחוק את הערוצים שלו.", "Only the account that owns the drive can delete its channels."),
         UnauthorizedAccessException => L.T("אין הרשאה לגשת לקובץ או לתיקייה הזו במחשב.", "No permission to access this file or folder on this PC."),
         NeedsUpdateException => L.T("הכונן הזה נכתב בגרסה חדשה יותר של DriveGram. התקן את הגרסה החדשה כדי לפתוח אותו.",
             "This drive was written by a newer version of DriveGram. Install it to open the drive."),
         DriveGram.Remote.NoDriveException => L.T("ההגדרה של הכונן הזה לא הושלמה.", "This drive's setup is not finished."),
+        InvalidOperationException { Message: var m } when m.StartsWith("This PC never saw a verified copy") =>
+            L.T("המחשב הזה אף פעם לא ראה עותק בדוק של רשומת הכונן, ולכן הוא לא יכול לאשר אותה. אשר אותה במחשב שכבר עבד עם הכונן.",
+                "This PC never saw a verified copy of the drive's record, so it cannot confirm it. Confirm it on a PC that used the drive before."),
+        InvalidOperationException { Message: "The drive's record is missing in Telegram." } =>
+            L.T("רשומת הכונן חסרה בטלגרם.", "The drive's record is missing in Telegram."),
+        InvalidOperationException { Message: var m } when m.StartsWith("The drive's journal names a different data channel") =>
+            L.T("ערוץ היומן של הכונן מצביע על ערוץ קבצים אחר, ולכן לא נמחק דבר.", "The drive's journal points to a different data channel, so nothing was deleted."),
+        InvalidOperationException { Message: var m } when m.StartsWith("This journal already holds") || m.StartsWith("This remote already holds") =>
+            L.T("בערוצים האלה כבר יש כונן, ולכן לא נוצר דבר.", "These channels already hold a drive, so nothing was created."),
+        IOException { Message: "Telegram did not return an invite link." } =>
+            L.T("טלגרם לא החזיר קישור הצטרפות. נסה שוב.", "Telegram did not return an invite link. Try again."),
         TimeoutException or System.Net.Sockets.SocketException or System.Net.Http.HttpRequestException
             or IOException { InnerException: System.Net.Sockets.SocketException } =>
             L.T("אין חיבור לשרתי טלגרם. בדוק את החיבור לאינטרנט ונסה שוב.", "Cannot reach Telegram. Check the internet connection and try again."),
         _ when ex.Message.Any(ch => ch is >= '\u0590' and <= '\u05FF') || ex.GetType().Namespace?.StartsWith("DriveGram") == true
             => ex.Message, // ours: already written for people
-        _ => L.T($"משהו השתבש ({ex.Message}). נסה שוב בעוד רגע; אם זה חוזר, הפרטים ביומן (בתפריט ← \"פתח את תיקיית היומן\").",
+        _ when !L.Hebrew && OursInEnglish.Any(p => ex.Message.StartsWith(p, StringComparison.Ordinal)) => ex.Message, // ours (L.T), in English
+        _ => L.T($"משהו השתבש ({ex.Message}). נסה שוב בעוד רגע; אם זה חוזר, הפרטים ביומן הפעילות (בתפריט ← \"פתח את תיקיית יומן הפעילות\").",
                  $"Something went wrong ({ex.Message}). Try again in a moment; if it keeps happening, details are in the log (menu → \"Open the log folder\")."),
     };
+
+    /// <summary>Messages DriveGram.Host builds with L.T on standard exception types: in English they have
+    /// no Hebrew letters to recognize them by, but they are already written for people.</summary>
+    static readonly string[] OursInEnglish =
+    [
+        "The item was already deleted for good",
+        "This account is already in use by another DriveGram program",
+        "The drive's record in Telegram shows a different layout",
+    ];
 
     static string Wait(int seconds) => seconds switch
     {

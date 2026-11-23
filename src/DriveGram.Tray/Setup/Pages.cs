@@ -30,7 +30,7 @@ sealed class WelcomePage : WizardPage
         col.Controls.Add(Theme.Label(L.T("ההגדרה לוקחת כ־2 דקות:", "Setup takes about 2 minutes:"), Theme.Heading));
         string[] steps = ctx.UsesTelegram
             ? [L.T("פרטי API של טלגרם (מזהה חינמי שכל תוכנה צריכה)", "Telegram API details (a free ID every app needs)"),
-               L.T("התחברות לחשבון: סריקת קוד QR מהטלפון, או קוד בהודעה", "Sign in: scan a QR code with your phone, or use a code"),
+               L.T("התחברות לחשבון: סריקת קוד QR מהטלפון, או קוד שטלגרם שולח", "Sign in: scan a QR code with your phone, or type a code Telegram sends you"),
                L.T("סיסמה לכונן: מצפינה הכל, ורק אתה יודע אותה", "A drive password: it encrypts everything, only you know it"),
                L.T("אות לכונן והפעלה אוטומטית עם וינדוס", "A drive letter, and starting with Windows")]
             : [L.T("סיסמה לכונן (מצב ניסיון: הקבצים נשמרים בתיקייה מקומית)", "A drive password (trial mode: files are kept in a local folder)"),
@@ -74,15 +74,15 @@ sealed class ApiPage : WizardPage
         col.Controls.Add(row);
         col.Controls.Add(Theme.Label(L.T("2. בחר API development tools, ומלא טופס קצר. השם לא משנה, למשל DriveGram.",
             "2. Choose API development tools and fill in the short form (any name, e.g. DriveGram).")));
-        col.Controls.Add(Theme.Label(L.T("3. העתק לכאן את api_id ואת api_hash:", "3. Copy api_id and api_hash here:")));
+        col.Controls.Add(Theme.Label(L.T("3. העתק לכאן את api_id ואת api_hash (הם נשמרים רק במחשב הזה):", "3. Copy api_id and api_hash here (they are kept only on this PC):")));
 
         col.Controls.Add(Theme.Label("api_id", Theme.Small, Theme.Muted));
         col.Controls.Add(_id);
         col.Controls.Add(Theme.Label("api_hash", Theme.Small, Theme.Muted));
         col.Controls.Add(_hash);
 
-        var import = Theme.Secondary(L.T("ייבוא מקובץ env…", "Import from an .env file…"));
-        import.Click += (_, _) => { try { ImportEnv(); } catch (Exception ex) { Ui.Error(ex.Message); } };
+        var import = Theme.Secondary(L.T($"ייבוא מקובץ {L.Ltr(".env")}…", "Import from an .env file…"));
+        import.Click += (_, _) => { try { ImportEnv(); } catch (Exception ex) { Ui.Error(TelegramErrors.Text(ex)); } };
         col.Controls.Add(import);
         col.Controls.Add(_status);
         SetContent(col);
@@ -101,13 +101,13 @@ sealed class ApiPage : WizardPage
         _status.ForeColor = ok ? Theme.Success : Theme.Muted;
         _status.Text = ok ? L.T("✓ הפרטים נראים תקינים", "✓ These look valid") :
             (_id.Text.Length + _hash.Text.Length == 0 ? "" :
-                L.T("api_id הוא מספר, ו־api_hash הוא 32 תווים (0-9, a-f).", "api_id is a number; api_hash is 32 characters (0-9, a-f)."));
+                L.T($"api_id הוא מספר, ו־api_hash הוא 32 תווים ({L.Ltr("0-9, a-f")}).", "api_id is a number; api_hash is 32 characters (0-9, a-f)."));
         Changed(ok);
     }
 
     void ImportEnv()
     {
-        using var dlg = new OpenFileDialog { Title = L.T("בחר קובץ .env", "Choose an .env file"), Filter = "env|*.env;.env|*.*|*.*" };
+        using var dlg = new OpenFileDialog { Title = L.T($"בחר קובץ {L.Ltr(".env")}", "Choose an .env file"), Filter = "env|*.env;.env|*.*|*.*" };
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
         foreach (var line in File.ReadAllLines(dlg.FileName))
         {
@@ -262,7 +262,7 @@ sealed class LoginPage : WizardPage
 
         var twoFaRow = Theme.Row();
         twoFaRow.Controls.AddRange([_twoFaBox, _twoFaOk]);
-        _twoFa.Controls.Add(Theme.Label(L.T("לחשבון יש אימות דו־שלבי. הקלד את הסיסמה שלו:", "This account has two-step verification. Enter its password:"), Theme.Heading));
+        _twoFa.Controls.Add(Theme.Label(L.T("לחשבון יש אימות דו־שלבי. הקלד את הסיסמה של האימות בטלגרם (לא את סיסמת הכונן):", "This account has two-step verification. Enter its Telegram password (not the drive password):"), Theme.Heading, Theme.Text, 640));
         _twoFa.Controls.AddRange([_twoFaHint, twoFaRow]);
         _twoFa.Visible = false;
         _twoFaOk.Click += async (_, _) => await SubmitTwoFaAsync();
@@ -384,7 +384,7 @@ sealed class LoginPage : WizardPage
         var name = $"{user.first_name} {user.last_name}".Trim();
         var handle = string.IsNullOrEmpty(user.username) ? "" : $"  ·  {L.Ltr("@" + user.username)}";
         var phone = string.IsNullOrEmpty(user.phone) ? "" : $"  ·  ‎+{user.phone}‎";
-        _accountText.Text = L.T($"✓  מחובר כ־{name}{handle}{phone}", $"✓  Signed in as {name}{handle}{phone}");
+        _accountText.Text = L.T($"✓  מחובר כ־{L.Name(name)}{handle}{phone}", $"✓  Signed in as {name}{handle}{phone}");
         _account.Visible = true;
         _known.Visible = false;
 
@@ -660,9 +660,13 @@ sealed class DrivePage : WizardPage
     readonly CheckBox _saved = new() { Text = L.T("שמרתי את הסיסמה במקום בטוח", "I saved the password somewhere safe"), AutoSize = true };
     readonly CheckBox _remember = new()
     {
-        Text = L.T("לזכור את הסיסמה במחשב הזה (נדרש כדי שהכונן ייפתח לבד כשהמחשב נדלק)", "Remember the password on this PC (needed for the drive to start with Windows)"),
+        Text = L.T("לזכור את הסיסמה במחשב הזה (כדי שהכונן ייפתח לבד, בלי לשאול)", "Remember the password on this PC (so the drive opens by itself, without asking)"),
         AutoSize = true, Checked = true,
     };
+    readonly Label _rememberNote = Theme.Label(L.T(
+        "היא נשמרת מוצפנת, רק למשתמש שלך בווינדוס: מי שנכנס למשתמש הזה יוכל לפתוח את הכונן בלי סיסמה. אם אנשים אחרים משתמשים באותו משתמש, עדיף לא לסמן (ואז הסיסמה תתבקש בכל חיבור של הכונן).",
+        "It is kept encrypted, for your Windows user only: anyone who can use that Windows user can open the drive without the password. If others share that Windows user, better leave it off (the password is then asked each time the drive connects)."),
+        Theme.Small, Theme.Muted, 640);
     readonly Label _error = Theme.Label("", Theme.Small, Theme.Error);
     Mode _mode = Mode.Checking;
     bool _wasVanished;
@@ -710,12 +714,12 @@ sealed class DrivePage : WizardPage
         _meterText.Margin = new Padding(10, 0, 10, 0);
         _strength.Controls.AddRange([_meter, _meterText]);
         _warning.Controls.Add(Theme.Label(L.T(
-            "⚠  אי אפשר לשחזר את הסיסמה. בלעדיה (ובלי מפתח שחזור) אף אחד, גם לא אתה, יוכל לקרוא את הקבצים, גם עם גישה מלאה לחשבון הטלגרם. שמור אותה במנהל סיסמאות או רשום אותה. אחרי ההגדרה מומלץ ליצור מפתח שחזור: בתפריט ← \"סיסמה ומפתח שחזור…\".",
-            "⚠  The password cannot be recovered. Without it (or a recovery key) nobody, including you, can read the files, even with full access to the Telegram account. Keep it in a password manager or write it down. After setup, create a recovery key: menu → \"Password and recovery key…\"."),
+            "⚠  אי אפשר לשחזר את הסיסמה, גם לא DriveGram. בלעדיה (ובלי מפתח שחזור) אף אחד, גם לא אתה, לא יוכל לקרוא את הקבצים, אפילו עם גישה מלאה לחשבון הטלגרם. שמור אותה במנהל סיסמאות או רשום אותה. אחרי ההגדרה מומלץ ליצור מפתח שחזור: בתפריט ← \"סיסמה ומפתח שחזור…\".",
+            "⚠  The password cannot be recovered, not even by DriveGram. Without it (or a recovery key) nobody, including you, can read the files, even with full access to the Telegram account. Keep it in a password manager or write it down. After setup, creating a recovery key is recommended: menu → \"Password and recovery key…\"."),
             Theme.Small, Theme.Text, 640));
         _name.RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No;
         _name.Font = Theme.Body;
-        _form.Controls.AddRange([_intro, _nameLabel, _name, grid, _strength, _show, _warning, _saved, _remember, _error]);
+        _form.Controls.AddRange([_intro, _nameLabel, _name, grid, _strength, _show, _warning, _saved, _remember, _rememberNote, _error]);
         _form.Visible = false;
 
         col.Controls.AddRange([_checking, _driveRetry, _connected, _vanished, _choices, _form]);
@@ -810,7 +814,7 @@ sealed class DrivePage : WizardPage
             var rb = Choice($"{c.Name}  ·  {owner}{(why is null ? "" : $"  —  {why}")}", c, enabled: why is null);
             if (why is null) first ??= rb;
         }
-        var create = Choice(L.T("כונן חדש בחשבון הזה", "A new drive on this account"), null, enabled: true);
+        var create = Choice(L.T("כונן חדש וריק בחשבון הזה", "A new, empty drive on this account"), null, enabled: true);
         create.Font = new Font(Theme.Body, FontStyle.Bold);
         _choices.Visible = true;
         (first ?? create).Checked = true;
@@ -875,6 +879,9 @@ sealed class DrivePage : WizardPage
         _intro.Text = create
             ? L.T("בחר סיסמה לכונן, לפחות 10 תווים. היא מצפינה כל קובץ לפני שהוא עולה לטלגרם.",
                   "Choose a drive password, at least 10 characters. It encrypts every file before it goes to Telegram.")
+              + (Ctx.UsesTelegram ? L.T(
+                  " בחשבון ייווצרו שני ערוצים פרטיים: \"DriveGram Data\" (הקבצים) ו־\"DriveGram Journal\" (היומן: רשימת הקבצים והשינויים). הם הכונן עצמו: אל תמחק אותם ואל תכתוב בהם.",
+                  " Two private channels are created on the account: \"DriveGram Data\" (the files) and \"DriveGram Journal\" (the journal: the list of files and changes). They are the drive itself: do not delete them or post in them.") : "")
             : L.T("הקלד את הסיסמה של הכונן (או את מפתח השחזור שלו) כדי לחבר אליו את המחשב הזה.", "Enter the drive's password (or its recovery key) to connect this PC to it.");
         if (_form.Visible) (create && _name.Visible ? _name : _pw).Focus();
         UpdateState();
@@ -938,15 +945,15 @@ sealed class DrivePage : WizardPage
                 // the index could not be read: say so, and let the user decide (default: stay)
                 if (Ui.Ask(L.T(
                         "⚠  לא הצלחתי לבדוק אם בכונן הקודם יש קבצים או שינויים שקיימים רק במחשב הזה. אם יש, הם יימחקו מהמחשב לצמיתות כשהמחשב יעבור לכונן האחר.\n\nלהמשיך בכל זאת?",
-                        "⚠  I could not check whether the previous drive has files or changes that exist only on this PC. If it does, they are deleted from this PC for good when it switches to the other drive.\n\nContinue anyway?"),
+                        "⚠  Could not check whether the previous drive has files or changes that exist only on this PC. If it does, they are deleted from this PC for good when it switches to the other drive.\n\nContinue anyway?"),
                         icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes)
                     return false;
             }
             else if (pending > 0 || unsent > 0)
             {
                 _error.Text = L.T("בכונן הקודם יש ", "The previous drive has ") + TrayApp.LocalOnlyText(pending, unsent) + L.T(
-                    ", והם קיימים רק במחשב הזה. חבר אותו קודם (אם צריך, התחבר מחדש) וחכה שיעלו, או הסר אותו מהמחשב.",
-                    ", existing only on this PC. Connect it first (sign in again if needed) and let them upload, or remove it from this PC.");
+                    " (כרגע רק במחשב הזה). חבר אותו קודם (אם צריך, התחבר מחדש) וחכה שההעלאה תסתיים, או הסר אותו מהמחשב.",
+                    " (only on this PC for now). Connect it first (sign in again if needed) and wait for the upload to finish, or remove it from this PC.");
                 return false;
             }
         }
@@ -959,8 +966,8 @@ sealed class DrivePage : WizardPage
             if (pending != 0 || unsent > 0)
             {
                 var what = pending < 0
-                    ? L.T("לא הצלחתי לבדוק אם יש בו קבצים שקיימים רק במחשב הזה.", "I could not check whether it has files that exist only on this PC.")
-                    : L.T("יש בו ", "It has ") + TrayApp.LocalOnlyText(pending, unsent) + L.T(". הם קיימים רק במחשב הזה.", ". They exist only on this PC.");
+                    ? L.T("לא הצלחתי לבדוק אם יש בו קבצים שקיימים רק במחשב הזה.", "Could not check whether it has files that exist only on this PC.")
+                    : L.T("יש בו ", "It has ") + TrayApp.LocalOnlyText(pending, unsent) + L.T(" (כרגע רק במחשב הזה).", " (only on this PC for now).");
                 var account = string.IsNullOrEmpty(Ctx.State.Config.AccountName) ? ""
                     : L.T($"\n\nהחשבון המחובר עכשיו: {L.Name(Ctx.State.Config.AccountName)}", $"\n\nSigned in now as: {Ctx.State.Config.AccountName}");
                 if (Ui.Ask(L.T(
@@ -1002,6 +1009,7 @@ sealed class DrivePage : WizardPage
             var remote = _remote!;
             keys = await Task.Run(() => SyncService.CreateDriveAsync(remote, pw, default, identity: identity));
             ResetIfRebinding();
+            DriveSession.MarkNewDrive(Ctx.State); // its first start adds the note about the risks
             Log.Info($"setup: created drive '{cfg.VolumeLabel}' ({Ctx.State.Id})");
         }
         else

@@ -9,14 +9,14 @@ using Fsp.Interop;
 namespace DriveGram.Host;
 
 public sealed class DrivePairingException() : Exception(L.T(
-    "ערוץ הקבצים לא שייך ליומן של הכונן הזה (אולי ערוץ של כונן אחר עם אותו שם). פתח את 'הגדרות והתחברות' ובחר את הכונן מחדש.",
-    "The data channel does not belong to this drive's journal (perhaps another drive's channel with the same name). Open 'Settings and sign-in' and choose the drive again."));
+    "ערוץ הקבצים לא שייך לערוץ היומן של הכונן הזה (אולי זה ערוץ של כונן אחר עם אותו שם). פתח את \"הגדרות והתחברות…\" ובחר את הכונן מחדש.",
+    "The data channel does not belong to this drive's journal channel (perhaps it is another drive's channel with the same name). Open \"Settings and sign-in…\" and choose the drive again."));
 public sealed class WinFspMissingException() : Exception(L.T(
-    "WinFsp לא מותקן, ובלעדיו הכונן לא יכול לעבוד. הפעל שוב את התקנת DriveGram (או התקן מ-https://winfsp.dev/rel), ואז לחץ 'חבר'.",
-    "WinFsp is not installed, and the drive cannot work without it. Run the DriveGram installer again (or install it from https://winfsp.dev/rel), then click Connect."));
+    $"WinFsp לא מותקן, ובלעדיו הכונן לא יכול לעבוד. הפעל שוב את התקנת DriveGram (או התקן אותו מהכתובת {L.Ltr("https://winfsp.dev/rel")}), ואז לחץ \"חבר\" בתפריט של הכונן.",
+    "WinFsp is not installed, and the drive cannot work without it. Run the DriveGram installer again (or install it from https://winfsp.dev/rel), then click \"Connect\" in the drive's menu."));
 /// <summary>Windows refused the drive letter / mount: retrying the same thing will not help by itself.</summary>
 public sealed class MountFailedException(string message) : Exception(message);
-public sealed class AlreadyMountedException() : Exception("DriveGram is already running for this drive on this PC.");
+public sealed class AlreadyMountedException() : Exception(L.T("DriveGram כבר פתוח עם הכונן הזה במחשב הזה.", "DriveGram is already running for this drive on this PC."));
 
 /// <summary>An item in the drive's own trash.</summary>
 public sealed record TrashItem(string Id, string Name, string OriginalFolder, bool Dir, long Size, DateTime DeletedAt);
@@ -278,14 +278,15 @@ public sealed class DriveSession : IAsyncDisposable
                 await session.StopAsync(waitForUploads: false);
                 await session.DisposeAsync();            // host, stop event, engine, sync, index, remote, instance
                 sync = null; engine = null; db = null; remote = null; instance = null;
-                throw new MountFailedException(L.T($"לא ניתן לחבר את {mountPoint} (NTSTATUS 0x{status:X8}). אולי האות תפוסה? אפשר לבחור אות אחרת ב'הגדרות והתחברות'.",
-                                          $"Could not mount {mountPoint} (NTSTATUS 0x{status:X8}). Is the drive letter already in use? Another letter can be chosen in 'Settings and sign-in'."));
+                throw new MountFailedException(L.T($"לא ניתן לחבר את הכונן באות {L.Ltr(mountPoint)} (קוד {L.Ltr($"NTSTATUS 0x{status:X8}")}). אולי האות תפוסה? אפשר לבחור אות אחרת ב\"הגדרות והתחברות…\".",
+                                          $"Could not mount the drive as {mountPoint} (NTSTATUS 0x{status:X8}). Is the drive letter already in use? Another letter can be chosen in \"Settings and sign-in…\"."));
             }
             session._mounted = true;
             session.LetterChanged = letterNote;
             // where it is right now (a borrowed letter, this run only): the command line finds it here
             try { File.WriteAllText(MountedAtPath(state), mountPoint); }
             catch (Exception ex) { Log.Warn($"mounted-at: {ex.Message}"); }
+            if (File.Exists(WelcomePendingPath(state))) _ = session.WriteWelcomeFileAsync();
             if (remote is TelegramRemote tr) tr.SignedOut += () => session.SignedOut?.Invoke();
             try { ShellIntegration.SetDriveIcon(mountPoint, cfg.VolumeLabel); }
             catch (Exception ex) { Log.Warn($"drive icon: {ex.Message}"); }
@@ -308,6 +309,28 @@ public sealed class DriveSession : IAsyncDisposable
     }
 
     static string MountedAtPath(AppState s) => Path.Combine(s.Dir, "mounted-at");
+
+    static string WelcomePendingPath(AppState s) => Path.Combine(s.Dir, "welcome.pending");
+
+    /// <summary>A drive was just created from this PC: its first start puts the note about the risks into it.</summary>
+    public static void MarkNewDrive(AppState s)
+    {
+        try { Directory.CreateDirectory(s.Dir); File.WriteAllText(WelcomePendingPath(s), "1"); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Log.Warn($"welcome: {ex.Message}"); }
+    }
+
+    /// <summary>Once, in a brand-new drive: written through the drive like any app would (so it is uploaded
+    /// and journaled normally). Not writable right now: tried again at the next start.</summary>
+    async Task WriteWelcomeFileAsync()
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(2));
+            if (!Writable || !_mounted) return;
+            if (await Task.Run(() => WelcomeFile.TryWrite(MountPoint))) File.Delete(WelcomePendingPath(State));
+        }
+        catch (Exception ex) { Log.Warn($"welcome: {ex.Message}"); }
+    }
 
     /// <summary>The letter a mounted drive uses right now: the usual one, or the one it borrowed because
     /// the usual letter was taken. Not mounted: the usual one.</summary>

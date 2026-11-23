@@ -110,7 +110,7 @@ sealed class TrayApp : ApplicationContext
         bool lost;
         try { lost = ShellIntegration.AutostartLost; } catch { return; }
         if (!lost || _quitting || _drives.Count == 0) return;
-        if (Ui.Ask(L.T("DriveGram הופעל קודם אוטומטית עם Windows, אבל ההגדרה הזו נמחקה (כנראה בהסרה והתקנה מחדש).\n\nלהפעיל אותו שוב אוטומטית עם Windows?",
+        if (Ui.Ask(L.T("DriveGram הופעל קודם אוטומטית עם וינדוס, אבל ההגדרה הזו נמחקה (כנראה בהסרה והתקנה מחדש).\n\nלהפעיל אותו שוב אוטומטית עם וינדוס?",
                        "DriveGram used to start with Windows, but that setting was removed (probably by an uninstall and reinstall).\n\nStart it with Windows again?"),
                 icon: MessageBoxIcon.Question) == DialogResult.Yes)
         {
@@ -195,8 +195,8 @@ sealed class TrayApp : ApplicationContext
             session.Sync.FileIncomplete += (orig, kept, folderId) => _ui.Post(async _ => await OnFileIncompleteAsync(d, session, orig, kept, folderId), null);
             if (session.Sync.NeedsUpdate)
                 Balloon(L.T("צריך לעדכן את DriveGram", "Update DriveGram"),
-                    L.T($"{L.Ltr(session.MountPoint)} נכתב בגרסה חדשה יותר. הוא פתוח לקריאה בלבד עד שתתקין את הגרסה החדשה.",
-                        $"{session.MountPoint} was written by a newer version. It is read-only until you install the new version."), ToolTipIcon.Warning);
+                    L.T($"הכונן {L.Ltr(session.MountPoint)} נכתב בגרסה חדשה יותר של DriveGram. עד שתתקין אותה, הוא פתוח לקריאה בלבד.",
+                        $"{session.MountPoint} was written by a newer version of DriveGram. It is read-only until you install that version."), ToolTipIcon.Warning);
             d.ToldWritable = session.Writable;
             session.Sync.WritableChanged += () => _ui.Post(async _ =>
             {
@@ -271,7 +271,7 @@ sealed class TrayApp : ApplicationContext
             Log.Error($"tray: mounting {d.Name} failed (local problem)", ex);
             d.Problem = L.T("לא ניתן לפתוח את הכונן במחשב הזה (בעיה מקומית)", "the drive could not be opened on this PC (a local problem)");
             Balloon(L.T("לא ניתן לפתוח את הכונן", "The drive could not be opened"),
-                L.T($"{d.Name}: בעיה במחשב הזה, לא באינטרנט ({Short(Setup.TelegramErrors.Text(ex))}). פרטים ביומן: בתפריט ← \"פתח את תיקיית היומן\".",
+                L.T($"{d.Name}: בעיה במחשב הזה, לא באינטרנט ({Short(Setup.TelegramErrors.Text(ex))}). פרטים ביומן הפעילות: בתפריט ← \"פתח את תיקיית יומן הפעילות\".",
                     $"{d.Name}: a problem on this PC, not the internet ({Short(Setup.TelegramErrors.Text(ex))}). Details in the log: menu → \"Open the log folder\"."),
                 ToolTipIcon.Error, () => OpenFolder(Path.Combine(AppState.Root, "logs")));
         }
@@ -374,8 +374,8 @@ sealed class TrayApp : ApplicationContext
         d.NeedsSetup = true;
         d.Problem = L.T("החיבור לטלגרם בוטל", "Telegram sign-in was revoked");
         Balloon(L.T("החיבור לטלגרם בוטל", "Telegram sign-in revoked"),
-            L.T($"{d.Name} נותק כי החיבור בוטל (למשל מ'סיום כל ההפעלות' בטלפון). קבצים שעוד לא עלו שמורים במחשב ויעלו אחרי התחברות מחדש.",
-                $"{d.Name} was disconnected because its sign-in was revoked (e.g. 'terminate all sessions' on the phone). Files not yet uploaded are kept on this PC and upload after you sign in again."),
+            L.T($"{d.Name} נותק כי החיבור שלו לטלגרם בוטל (למשל ב\"סיום כל ההפעלות האחרות\" בטלפון). קבצים שעוד לא עלו שמורים במחשב ויעלו אחרי שתתחבר מחדש. לחץ כאן כדי להתחבר.",
+                $"{d.Name} was disconnected because its Telegram sign-in was revoked (e.g. by \"Terminate all other sessions\" on the phone). Files not yet uploaded are kept on this PC and upload after you sign in again. Click here to sign in."),
             ToolTipIcon.Warning, () => _ = SetupAsync(d));
         _pendingSetup = d;
     }
@@ -461,7 +461,7 @@ sealed class TrayApp : ApplicationContext
                 var answer = Ui.Choose(
                     L.N(pending, "קובץ אחד עדיין עולה לטלגרם.", "{0} קבצים עדיין עולים לטלגרם.",
                                  "1 file is still uploading to Telegram.", "{0} files are still uploading to Telegram.")
-                    + L.T("\n\nאם תצא עכשיו, ההעלאה תמשיך בהפעלה הבאה.", "\n\nIf you exit now, uploading continues next time."),
+                    + L.T("\n\nאם תצא עכשיו, ההעלאה תמשיך בפעם הבאה ש־DriveGram יופעל.", "\n\nIf you exit now, uploading continues the next time DriveGram starts."),
                     [L.T("לחכות ואז לצאת (מומלץ)", "Wait, then exit (recommended)"), L.T("לצאת עכשיו", "Exit now"), L.T("ביטול", "Cancel")],
                     cancelIndex: 2);
                 if (answer is 2 or -1) return;
@@ -666,8 +666,8 @@ sealed class TrayApp : ApplicationContext
     {
         bool wasMounted = d.Session is not null;
         if (Ui.Ask(L.T(
-                $"להסיר את {d.Name} מהמחשב הזה?\n\nהקבצים נשארים בטלגרם, ואפשר לחבר את הכונן שוב בכל עת (עם הסיסמה שלו).",
-                $"Remove {d.Name} from this PC?\n\nThe files stay in Telegram, and you can connect the drive again at any time (with its password)."),
+                $"להסיר את {d.Name} מהמחשב הזה?\n\nהקבצים נשארים בטלגרם, ואפשר לחבר את הכונן שוב בכל עת (עם הסיסמה שלו). מה שהמחשב הזה שומר בשביל הכונן (עותקים מקומיים של קבצים, הסיסמה הזכורה) יימחק ממנו.",
+                $"Remove {d.Name} from this PC?\n\nThe files stay in Telegram, and you can connect the drive again at any time (with its password). What this PC keeps for the drive (local copies of files, the remembered password) is deleted from it."),
                 icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
         if (!await StopAsync(d, ask: false, waitForUploads: false)) return;
         if (!ConfirmLosingLocalChanges(d))
@@ -689,10 +689,10 @@ sealed class TrayApp : ApplicationContext
                     $"⚠  לא הצלחתי לבדוק אם ב־{d.Name} יש קבצים או שינויים שקיימים רק במחשב הזה. אם יש, הסרת הכונן תמחק אותם לצמיתות.\n\nלהסיר בכל זאת?",
                     $"⚠  Could not check whether {d.Name} has files or changes that exist only on this PC. If it does, removing the drive deletes them for good.\n\nRemove anyway?"),
                 icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) == DialogResult.Yes;
-        return Ui.Ask(L.T($"⚠  ב־{d.Name} יש ", $"⚠  {d.Name} has ") + LocalOnlyText(pending, unsent) + L.T(". הם קיימים רק במחשב הזה.\n\n" +
-                "אם תסיר את הכונן עכשיו, הם יימחקו לצמיתות. כדי לשמור אותם: חבר את הכונן (אם צריך, התחבר מחדש לטלגרם) וחכה שיעלו.\n\nלהסיר בכל זאת?",
-                ". They exist only on this PC.\n\n" +
-                "Removing the drive now deletes them for good. To keep them, connect the drive (sign in again if needed) and let them upload.\n\nRemove anyway?"),
+        return Ui.Ask(L.T($"⚠  ב־{d.Name} יש ", $"⚠  {d.Name} has ") + LocalOnlyText(pending, unsent) + L.T(" (כרגע רק במחשב הזה).\n\n" +
+                "אם תסיר את הכונן עכשיו, כל מה שעוד לא הגיע לטלגרם יימחק לצמיתות. כדי לשמור אותו: חבר את הכונן (אם צריך, התחבר מחדש לטלגרם) וחכה שההעלאה תסתיים.\n\nלהסיר בכל זאת?",
+                " (only on this PC for now).\n\n" +
+                "Removing the drive now deletes everything that has not reached Telegram yet, for good. To keep it, connect the drive (sign in again if needed) and wait for the upload to finish.\n\nRemove anyway?"),
             icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) == DialogResult.Yes;
     }
 
@@ -796,12 +796,12 @@ sealed class TrayApp : ApplicationContext
                         if (d.Session != s) return;
                         if (!s.Writable)
                             Balloon(L.T("הכונן עבר למחשב אחר", "The drive moved to another PC"),
-                                L.T($"הסירוב לא הגיע ל־{r.Name} בזמן, ולכן הכונן עבר אליו. אפשר לבקש אותו בחזרה מהתפריט.",
+                                L.T($"הסירוב לא הגיע ל־{L.Ltr(r.Name)} בזמן, ולכן הכונן עבר אליו. אפשר לבקש אותו בחזרה מהתפריט.",
                                     $"The refusal did not reach {r.Name} in time, so the drive moved there. You can ask for it back from the menu."),
                                 ToolTipIcon.Warning);
                         else
                             Balloon(L.T("הסירוב לא נשלח", "The refusal was not sent"),
-                                L.T($"לא הצלחתי לשלוח את הסירוב (בדוק את החיבור לאינטרנט). אם {r.Name} ייקח את הכונן, המחשב הזה יעבור לקריאה בלבד, ואפשר לבקש אותו בחזרה מהתפריט.",
+                                L.T($"לא הצלחתי לשלוח את הסירוב (בדוק את החיבור לאינטרנט). אם {L.Ltr(r.Name)} ייקח את הכונן, המחשב הזה יעבור לקריאה בלבד, ואפשר לבקש אותו בחזרה מהתפריט.",
                                     $"The refusal could not be sent (check the internet connection). If {r.Name} takes the drive, this PC becomes read-only, and you can ask for it back from the menu."),
                                 ToolTipIcon.Warning);
                         return;
@@ -813,7 +813,7 @@ sealed class TrayApp : ApplicationContext
             if (done) d.ToldWritable = false;
             if (done)
             {
-                Balloon(L.T($"{L.Ltr(d.Letter)} עבר ל־{r.Name}", $"{d.Letter} moved to {r.Name}"),
+                Balloon(L.T($"{L.Ltr(d.Letter)} עבר ל־{L.Ltr(r.Name)}", $"{d.Letter} moved to {r.Name}"),
                     L.T("המחשב הזה עכשיו לקריאה בלבד. אפשר לבקש את הכונן בחזרה מהתפריט.",
                         "This PC is now read-only. You can ask for the drive back from the menu."));
                 _ = WatchHandoverClaimedAsync(d, s, r);
@@ -867,8 +867,8 @@ sealed class TrayApp : ApplicationContext
         }
         if (notTaken < 2) return;
         Log.Warn($"tray: '{r.Name}' was given {d.Name} but has not taken it");
-        Balloon(L.T($"{r.Name} לא לקח את הכונן", $"{r.Name} did not take the drive"),
-            L.T($"הכונן הועבר ל־{r.Name}, אבל נראה שהוא כבר לא מחובר, ולכן כרגע אי אפשר לשמור קבצים באף מחשב. לחץ כאן כדי לקחת את הכונן בחזרה.",
+        Balloon(L.T($"{L.Ltr(r.Name)} לא לקח את הכונן", $"{r.Name} did not take the drive"),
+            L.T($"הכונן הועבר ל־{L.Ltr(r.Name)}, אבל נראה שהוא כבר לא מחובר, ולכן כרגע אי אפשר לשמור קבצים באף מחשב. לחץ כאן כדי לקחת את הכונן בחזרה.",
                 $"The drive was handed to {r.Name}, but it seems to be gone, so right now no PC can save files. Click here to take the drive back."),
             ToolTipIcon.Warning, () => _ = TakeBackAsync(d, s, r));
     }
@@ -881,11 +881,11 @@ sealed class TrayApp : ApplicationContext
             if (!await Task.Run(() => s.Sync.HandoverUnclaimedAsync(r, default)))
             {
                 Balloon(L.T("הכונן כבר נלקח", "The drive was already taken"),
-                    L.T($"{r.Name} התחבר בינתיים ולקח את הכונן. אפשר לבקש אותו בחזרה מהתפריט.",
+                    L.T($"{L.Ltr(r.Name)} התחבר בינתיים ולקח את הכונן. אפשר לבקש אותו בחזרה מהתפריט.",
                         $"{r.Name} came back meanwhile and took the drive. You can ask for it back from the menu."));
                 return;
             }
-            if (Ui.Ask(L.T($"לקחת את הכונן בחזרה מ־{r.Name}?\n\nאם {r.Name} בכל זאת עובד, הוא יעבור לקריאה בלבד, ושינויים שלא הספיק לשלוח יישמרו אצלו עד שיקבל את הכונן שוב.",
+            if (Ui.Ask(L.T($"לקחת את הכונן בחזרה מ־{L.Ltr(r.Name)}?\n\nאם {L.Ltr(r.Name)} בכל זאת עובד, הוא יעבור לקריאה בלבד, ושינויים שלא הספיק לשלוח יישמרו אצלו עד שיקבל את הכונן שוב.",
                            $"Take the drive back from {r.Name}?\n\nIf {r.Name} is working after all, it becomes read-only; changes it has not sent yet are kept there until it gets the drive again."),
                     icon: MessageBoxIcon.Question) != DialogResult.Yes) return;
             if (d.Session != s) return;
@@ -911,10 +911,12 @@ sealed class TrayApp : ApplicationContext
     async Task ConfirmRecordAsync(DriveController d, DriveSession s)
     {
         if (Ui.Ask(L.T(
-                "מישהו שינה את פרטי הכונן בטלגרם מחוץ ל־DriveGram (בלי סיסמת הכונן), ולכן הכונן פתוח לקריאה בלבד.\n\n" +
-                "אם אתה יודע שזה בסדר, אשר: הקבצים לא ייפגעו. אם לא, בדוק מי מנהל את הכונן, בתפריט של הכונן ← \"גיבוי בחשבון נוסף…\".\n\nלאשר?",
-                "The drive's record in Telegram was changed by someone without the drive's password (or edited by hand). So DriveGram does not trust what it says, and the drive is read-only.\n\n" +
-                "If you know this is fine (e.g. you edited it), you can confirm: the password re-validates it, and details that could mislead (who holds the drive, handover requests, the snapshot) are reset. Files are not affected.\n\nIf not, check who administers the channels (\"Backup on another account…\").\n\nConfirm?"),
+                "רשומת הכונן בטלגרם שונתה מחוץ ל־DriveGram, בידי מישהו בלי סיסמת הכונן (או ידנית). לכן DriveGram לא סומך על מה שכתוב בה, והכונן פתוח לקריאה בלבד.\n\n" +
+                "אם אתה יודע שזה בסדר (למשל, אתה שינית אותה), אפשר לאשר: DriveGram יחזיר את הפרטים החשובים מהעותק שהמחשב הזה כבר בדק, ויאפס פרטים שעלולים להטעות (איזה מחשב מחזיק בכונן, בקשות להעברת הכונן, ועותק מקוצר של רשימת הקבצים). הקבצים לא ייפגעו.\n\n" +
+                "אם לא, בדוק מי מנהל את ערוצי הכונן (בתפריט של הכונן ← \"גיבוי בחשבון נוסף…\").\n\nלאשר?",
+                "The drive's record in Telegram was changed outside DriveGram, by someone without the drive's password (or by hand). So DriveGram does not trust what it says, and the drive is read-only.\n\n" +
+                "If you know this is fine (e.g. you changed it), you can confirm: DriveGram brings back the important details from the copy this PC already checked, and resets details that could mislead (which PC holds the drive, requests to hand it over, and a shortcut copy of the file list). Files are not affected.\n\n" +
+                "If not, check who administers the drive's channels (the drive's menu → \"Backup on another account…\").\n\nConfirm?"),
                 icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
         string? secret = null, error = null;
         bool useThisPcsCopy = false;
@@ -931,8 +933,8 @@ sealed class TrayApp : ApplicationContext
                 {
                     // the record may be a fake, or the newer password is not known here
                     useThisPcsCopy = Ui.Ask(L.T(
-                            "הסיסמה לא פותחת את פרטי הכונן שבטלגרם.\n\nאפשר לשחזר את הפרטים שהמחשב הזה מכיר. אבל אם הסיסמה או מפתח השחזור שונו במחשב אחר, השינוי הזה יבוטל: הסיסמה הישנה תחזור לעבוד, ומפתח שחזור חדש יפסיק לעבוד.\n\nעדיף לאשר במחשב שבו הסיסמה שונתה. לשחזר בכל זאת?",
-                            "The password does not open the drive's details in Telegram.\n\nThis PC's copy can be restored. But if the password or recovery key was changed on another PC, that change is undone: the old password works again, and a new recovery key stops working.\n\nBetter confirm on the PC where the password was changed. Restore anyway?"),
+                            "הסיסמה לא פותחת את רשומת הכונן שבטלגרם.\n\nאפשר להחזיר את הרשומה שהמחשב הזה מכיר. אבל אם הסיסמה או מפתח השחזור שונו במחשב אחר, השינוי הזה יבוטל: הסיסמה הישנה תחזור לעבוד, ומפתח שחזור חדש יפסיק לעבוד.\n\nעדיף לאשר במחשב שבו הסיסמה שונתה. להחזיר בכל זאת?",
+                            "The password does not open the drive's record in Telegram.\n\nThe record this PC knows can be brought back. But if the password or recovery key was changed on another PC, that change is undone: the old password works again, and a new recovery key stops working.\n\nBetter confirm on the PC where the password was changed. Bring it back anyway?"),
                         icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) == DialogResult.Yes;
                     if (!useThisPcsCopy) break;
                     continue;
@@ -1125,10 +1127,13 @@ sealed class TrayApp : ApplicationContext
         if (s.Sync.HandingOver)
             return L.T("מעביר את הכונן למחשב אחר", "handing the drive to another PC") + " (" + L.N(st.PendingFiles, "נשאר קובץ אחד להעלות", "נשארו {0} קבצים להעלות", "1 upload left", "{0} uploads left") + ")";
         if (s.Sync.HeldBackChanges is > 0 and var held)
-            return "⚠ " + L.N(held, "שינוי אחד מוחזק", "{0} שינויים מוחזקים", "1 change held back", "{0} changes held back")
-                + L.T($": הכונן פתוח לכתיבה ב־{s.Sync.LeaseHolder}; הם יישלחו כשהכונן יחזור לכאן", $": the drive is open for writing on {s.Sync.LeaseHolder}; they are sent when it comes back here");
+            return "⚠ " + L.N(held,
+                $"שינוי אחד ממתין כאן: הכונן פתוח לכתיבה ב־{L.Ltr(s.Sync.LeaseHolder ?? "")}, והשינוי יישלח כשהכונן יחזור לכאן",
+                $"{{0}} שינויים ממתינים כאן: הכונן פתוח לכתיבה ב־{L.Ltr(s.Sync.LeaseHolder ?? "")}, והם יישלחו כשהכונן יחזור לכאן",
+                $"1 change is waiting here: the drive is open for writing on {s.Sync.LeaseHolder}; it is sent when the drive comes back here",
+                $"{{0}} changes are waiting here: the drive is open for writing on {s.Sync.LeaseHolder}; they are sent when the drive comes back here");
         if (!s.Writable) return s.Sync.LeaseHolder is { } h
-            ? L.T($"קריאה בלבד (פתוח לכתיבה ב־{h})", $"read-only (open for writing on {h})")
+            ? L.T($"קריאה בלבד (פתוח לכתיבה ב־{L.Ltr(h)})", $"read-only (open for writing on {h})")
             : L.T("קריאה בלבד כרגע (בודק…)", "read-only for now (checking…)");
         var wait = s.WaitingUntil is { } until ? L.T($" · טלגרם ביקש להמתין עד {until:HH:mm}", $" · Telegram asked to wait until {until:HH:mm}") : "";
         if (st.PendingFiles > 0 || st.UploadsInFlight > 0)
@@ -1142,7 +1147,7 @@ sealed class TrayApp : ApplicationContext
         ? L.T("רשומת הכונן שונתה מחוץ ל־DriveGram, ולכן הוא לקריאה בלבד. בתפריט: \"אשר את רשומת הכונן…\".",
               "The drive's record was changed outside DriveGram, so it is read-only. In the menu: \"Confirm the drive's record…\".")
         : s.Sync.LeaseHolder is { } h
-        ? L.T($"הכונן פתוח לכתיבה במחשב {h}. כאן אפשר רק לקרוא. כדי לכתוב כאן: בתפריט, \"בקש את הכונן מ־{h}…\".",
+        ? L.T($"הכונן פתוח לכתיבה במחשב {L.Ltr(h)}. כאן אפשר רק לקרוא. כדי לכתוב כאן: בתפריט, \"בקש את הכונן מ־{L.Ltr(h)}…\".",
               $"The drive is open for writing on {h}. Here it can only be read. To write here: \"Ask {h} for the drive…\" in the menu.")
         : L.T("הכונן זמין כרגע לקריאה בלבד; DriveGram בודק אם אפשר לכתוב.", "The drive is read-only for now; DriveGram is checking whether it can write.");
 
@@ -1175,7 +1180,7 @@ sealed class TrayApp : ApplicationContext
             if (d.Session is { Sync.ControlTrusted: false } tampered)
                 item.DropDownItems.Add(Item(L.T("אשר את רשומת הכונן…", "Confirm the drive's record…"), async () => await ConfirmRecordAsync(d, tampered), !d.Stopping, bold: true));
             if (d.Session is { Writable: false, Sync: { LeaseHolder: { } holder, NeedsUpdate: false } })
-                item.DropDownItems.Add(Item(L.T($"בקש את הכונן מ־{holder}…", $"Ask {holder} for the drive…"), () => AskForDrive(d), !d.Stopping, bold: true));
+                item.DropDownItems.Add(Item(L.T($"בקש את הכונן מ־{L.Ltr(holder)}…", $"Ask {holder} for the drive…"), () => AskForDrive(d), !d.Stopping, bold: true));
             item.DropDownItems.Add(Item(L.T("הגדרות והתחברות…", "Settings and sign-in…"), async () => await SetupAsync(d), !d.Starting && !d.Stopping));
             item.DropDownItems.Add(Item(L.T("סיסמה ומפתח שחזור…", "Password and recovery key…"), () => ShowSecurity(d), on));
             item.DropDownItems.Add(Item(d.State.Config.NetworkDrive ? L.T("סוג הכונן: כונן רשת…", "Drive type: network drive…") : L.T("סוג הכונן: דיסק רגיל…", "Drive type: regular disk…"),
@@ -1199,7 +1204,7 @@ sealed class TrayApp : ApplicationContext
         autostart.Click += (_, _) =>
         {
             try { ShellIntegration.SetAutostart(!ShellIntegration.AutostartEnabled); }
-            catch (Exception ex) { Ui.Error(ex.Message); }
+            catch (Exception ex) { Ui.Error(Setup.TelegramErrors.Text(ex)); }
         };
         _menu.Items.Add(autostart);
 
@@ -1211,7 +1216,7 @@ sealed class TrayApp : ApplicationContext
             lang.DropDownItems.Add(li);
         }
         _menu.Items.Add(lang);
-        _menu.Items.Add(Item(L.T("פתח את תיקיית היומן", "Open the log folder"),
+        _menu.Items.Add(Item(L.T("פתח את תיקיית יומן הפעילות", "Open the log folder"),
             () => Process.Start(new ProcessStartInfo(Path.Combine(AppState.Root, "logs")) { UseShellExecute = true })));
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(Item(L.T("יציאה", "Exit"), async () => await QuitAsync(ask: true)));

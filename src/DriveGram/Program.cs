@@ -189,11 +189,14 @@ int Help()
           drivegram unmount                Ask the running drive (console or tray) to unmount.
           drivegram status                 Show what is stored and what is waiting to upload.
           drivegram drives                 List the drives on this PC.
-          drivegram export <folder>        Copy every file of a mounted drive to a folder (resumable).   (add --force to export into a folder that holds other files; its newer files are kept)
+          drivegram export <folder> [--force]
+                                           Copy every file of a mounted drive to a folder (resumable).
+                                           --force: export into a folder that already holds other
+                                           files (its newer files are kept).
+          drivegram forget-password        Stop remembering the drive password on this PC.
           drivegram quit                   Close the tray app (it finishes uploads first).
 
         Several drives: add --drive <letter> (e.g. --drive U:) to choose one; default is the first.
-          drivegram forget-password        Stop remembering the drive password on this PC.
 
         Try it without Telegram: add --folder <path> to init / mount / status / unmount.
         """);
@@ -357,6 +360,7 @@ async Task<int> Init()
         }
         var keys = await SyncService.CreateDriveAsync(remote, pw, default, identity: newIdentity);
         state.Save();
+        DriveSession.MarkNewDrive(state); // its first start adds the note about the risks
         OfferRemember(keys);
         Console.WriteLine("Drive created. Next: drivegram-tray (or: drivegram mount)");
     }

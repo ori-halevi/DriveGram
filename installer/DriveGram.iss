@@ -42,7 +42,7 @@ hebrew.Launch=הפעל את DriveGram עכשיו
 hebrew.InstallingWinFsp=מתקין את WinFsp (רכיב מערכת שנדרש לכונן)... ייתכן שיופיע חלון אישור של וינדוס: אשר אותו.
 hebrew.StillRunning=DriveGram עדיין מסיים להעלות קבצים לטלגרם. הכוננים כבר מנותקים, ו־DriveGram ייסגר לבד כשההעלאה תסתיים (ההתקדמות מוצגת באייקון ליד השעון). אחר כך הפעל את ההתקנה שוב.
 english.StillRunning=DriveGram is still finishing uploads to Telegram. The drives are already disconnected, and DriveGram closes by itself when the uploads finish (the tray icon shows the progress). Then run setup again.
-hebrew.UninstallStillRunning=DriveGram עדיין מעלה קבצים. ההסרה ממשיכה: קבצים שלא הספיקו לעלות נשמרים במחשב ויעלו אם תתקין שוב.
+hebrew.UninstallStillRunning=DriveGram עדיין מעלה קבצים. ההסרה ממשיכה: קבצים שלא הספיקו לעלות נשארים במחשב ויעלו אם תתקין שוב.
 english.UninstallStillRunning=DriveGram is still uploading. Uninstall continues: files not yet uploaded stay on this PC and upload if you install again.
 hebrew.Stopping=סוגר את DriveGram…
 english.Stopping=Closing DriveGram…
@@ -50,15 +50,15 @@ hebrew.StoppingDetail=מחכה שקבצים שעוד לא עלו יסיימו ל
 english.StoppingDetail=Waiting for files not yet uploaded to finish uploading to Telegram. This can take a few minutes. Files open from the drive in apps (Word etc.) cannot be saved until the drive is back.
 hebrew.CmdShortcut=DriveGram – שורת פקודה
 english.CmdShortcut=DriveGram – command line
-hebrew.CleanupAsk=למחוק גם את כל מה ש־DriveGram שמר במחשב הזה (הגדרות, מטמון, יומנים) ולהתנתק מטלגרם?%n%nהקבצים שבטלגרם לא נמחקים: אפשר לחבר את הכונן שוב אחרי התקנה מחדש, עם הסיסמה שלו.%n%nבחר "לא" אם אתה מתכוון להתקין שוב בקרוב.
-english.CleanupAsk=Also delete everything DriveGram keeps on this PC (settings, cache, logs) and sign out of Telegram?%n%nThe files in Telegram are not deleted: the drive can be connected again after reinstalling, with its password.%n%nChoose "No" if you plan to reinstall soon.
+hebrew.CleanupAsk=למחוק גם את כל מה ש־DriveGram שמר במחשב הזה (הגדרות, עותקים מקומיים של קבצים, סיסמאות זכורות, יומני פעילות) ולהתנתק מטלגרם?%n%nהקבצים שבטלגרם לא נמחקים: אפשר לחבר את הכונן שוב אחרי התקנה מחדש, עם הסיסמה שלו.%n%nבחר "לא" אם אתה מתכוון להתקין שוב בקרוב.
+english.CleanupAsk=Also delete everything DriveGram keeps on this PC (settings, local copies of files, remembered passwords, logs) and sign out of Telegram?%n%nThe files in Telegram are not deleted: the drive can be connected again after reinstalling, with its password.%n%nChoose "No" if you plan to reinstall soon.
 hebrew.CleanupLocalOnly=⚠ יש במחשב הזה קבצים שעוד לא עלו לטלגרם, או שינויים שעוד לא נשלחו. אם תמחק עכשיו, הם יאבדו לצמיתות.%n%nלמחוק בכל זאת?
 english.CleanupLocalOnly=⚠ This PC has files not yet uploaded to Telegram, or changes not yet sent. Deleting now loses them for good.%n%nDelete anyway?
 hebrew.WinFspFailed=התקנת WinFsp לא הושלמה. הכונן לא יעבוד בלעדיו. אפשר להתקין אותו ידנית מהכתובת https://winfsp.dev/rel
 english.Desktop=Create a desktop shortcut
 english.Launch=Start DriveGram now
 english.InstallingWinFsp=Installing WinFsp (a system component the drive needs)... Windows may ask for permission: approve it.
-english.WinFspFailed=WinFsp was not installed. The drive cannot work without it. Install it from https://winfsp.dev/rel
+english.WinFspFailed=Installing WinFsp did not finish. The drive cannot work without it. You can install it by hand from https://winfsp.dev/rel
 
 [Tasks]
 ; "Start with Windows" belongs to the app (setup wizard + tray menu); the uninstaller removes it

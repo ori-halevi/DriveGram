@@ -47,9 +47,9 @@ sealed class BackupForm : Form
             "If the account the drive lives on is blocked or deleted, the drive's channels stay in Telegram and their admins keep their rights. Another account that administers both channels can still open the drive then."));
         Para(col, L.T(
             "הקבצים נשארים מוצפנים: חשבון הגיבוי רואה רק חתיכות מוצפנות, וכדי לפתוח את הכונן הוא צריך את סיסמת הכונן. שמור אותה במקום בטוח.",
-            "Files stay encrypted: the backup account sees only encrypted chunks, and needs the drive password to open the drive. Keep it somewhere safe."), Theme.Muted);
+            "Files stay encrypted: the backup account sees only encrypted pieces, and needs the drive password to open the drive. Keep it somewhere safe."), Theme.Muted);
 
-        Section(col, L.T("1. הוספה בלחיצה", "1. Add it in one click"));
+        Section(col, L.T("1. הוספה בלחיצה אחת", "1. Add it in one click"));
         Para(col, L.T("שם המשתמש של חשבון הגיבוי (מופיע בהגדרות של החשבון ההוא, למשל ‎@my_backup‎):",
             "The backup account's username (shown in that account's settings, e.g. @my_backup):"));
         _username.PlaceholderText = "@username";
@@ -84,8 +84,8 @@ sealed class BackupForm : Form
 
         Section(col, L.T("3. מומלץ: להעביר את הבעלות לחשבון הגיבוי", "3. Recommended: transfer ownership to the backup account"));
         Para(col, L.T(
-            "מנהל עלול להישאר עם הרשאות חלקיות אם חשבון הבעלים נמחק. בעלים לא. את זה טלגרם מאפשר רק מהאפליקציה שלהם, ובחשבון הנוכחי צריך אימות דו־שלבי:",
-            "An admin may be left with partial rights if the owner account is deleted; an owner is not. Telegram allows this only from its own app, and the current account needs two-step verification:"));
+            "אם חשבון הבעלים נמחק, מנהל עלול להישאר עם הרשאות חלקיות; לבעלים זה לא קורה. העברת בעלות אפשרית רק מאפליקציית טלגרם, ובחשבון הנוכחי צריך להיות אימות דו־שלבי:",
+            "If the owner account is deleted, an admin may be left with partial rights; an owner is not. Ownership can be transferred only from the Telegram app, and the current account needs two-step verification:"));
         foreach (var step in new[]
         {
             L.T("פתח בטלגרם, עם החשבון של הכונן, את כל אחד משני הערוצים שלמטה.", "In Telegram, signed in as the drive's account, open each of the two channels below."),
@@ -291,8 +291,8 @@ sealed class BackupForm : Form
                 var who = $"{user.first_name} {user.last_name}".Trim();
                 // a typo or a look-alike name would hand a stranger full control: show exactly who it is
                 if (Ui.Ask(L.T(
-                        $"להפוך את החשבון הזה למנהל מלא של שני הערוצים של הכונן?\n\n{who}\n{L.Ltr("@" + user.username)}   (מזהה {user.id})\n\nמנהל יכול לקרוא את רשומת הכונן, לשנות ואף למחוק את כל הערוצים. ודא שזה באמת החשבון שלך.",
-                        $"Make this account a full admin of both of the drive's channels?\n\n{who}\n@{user.username}   (id {user.id})\n\nAn admin can read the drive's record, change, and even delete both channels. Make sure it really is your account."),
+                        $"להפוך את החשבון הזה למנהל מלא של שני הערוצים של הכונן?\n\n{L.Name(who)}\n{L.Ltr("@" + user.username)}   (מזהה {user.id})\n\nמנהל יכול לקרוא את רשומת הכונן, לשנות ואף למחוק את שני הערוצים. ודא שזה באמת החשבון שלך.",
+                        $"Make this account a full admin of both of the drive's channels?\n\n{who}\n@{user.username}   (id {user.id})\n\nAn admin can read the drive's record, change it, and even delete both channels. Make sure it really is your account."),
                         icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes)
                 {
                     _addResult.Text = "";

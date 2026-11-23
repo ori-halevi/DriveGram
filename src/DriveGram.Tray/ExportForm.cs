@@ -26,8 +26,8 @@ sealed class ExportForm : Form
 
         var col = Theme.Column();
         col.Controls.Add(Theme.Label(L.T($"מעתיק את כל הקבצים אל: {L.LtrPath(target)}", $"Copying every file to: {target}"), Theme.Body, Theme.Text, 600));
-        col.Controls.Add(Theme.Label(L.T("קבצים שלא שמורים במחשב יורדים מטלגרם, וזה יכול לקחת זמן. אפשר לעצור ולהמשיך אחר כך: מה שכבר הועתק מדולג.",
-            "Files not cached on this PC download from Telegram, which can take a while. You can stop and continue later: what was already copied is skipped."),
+        col.Controls.Add(Theme.Label(L.T("קבצים שלא שמורים במחשב הזה יורדים מטלגרם, וזה יכול לקחת זמן. אפשר לעצור ולהמשיך אחר כך: מה שכבר הועתק לא יועתק שוב. הקבצים בכונן לא משתנים.",
+            "Files not stored on this PC download from Telegram, which can take a while. You can stop and continue later: what was already copied is not copied again. The files on the drive are not changed."),
             Theme.Small, Theme.Muted, 600));
         col.Controls.AddRange([_bar, _status, _current, _cancel]);
         Controls.Add(col);
@@ -65,8 +65,8 @@ sealed class ExportForm : Form
                 lines.Add(errors.Count == 0
                     ? L.T("✓  הייצוא הושלם.", "✓  Export complete.")
                     : L.N(errors.Count,
-                        "הושלם, אבל קובץ אחד לא הועתק בגלל שגיאה (פרטים ביומן). אפשר להריץ שוב כדי לנסות אותו.",
-                        "הושלם, אבל {0:N0} קבצים לא הועתקו בגלל שגיאה (פרטים ביומן). אפשר להריץ שוב כדי לנסות אותם.",
+                        "הושלם, אבל קובץ אחד לא הועתק בגלל שגיאה (פרטים ביומן הפעילות). אפשר להריץ שוב כדי לנסות אותו.",
+                        "הושלם, אבל {0:N0} קבצים לא הועתקו בגלל שגיאה (פרטים ביומן הפעילות). אפשר להריץ שוב כדי לנסות אותם.",
                         "Done, but 1 file could not be copied (details in the log). Run it again to retry it.",
                         "Done, but {0:N0} files could not be copied (details in the log). Run it again to retry them."));
                 if (result.KeptNewer.Count > 0)

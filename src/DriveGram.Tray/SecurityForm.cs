@@ -55,7 +55,7 @@ sealed class SecurityForm : Form
         copy.Click += (_, _) =>
         {
             Ui.CopySecret(_keyBox.Text);
-            copied.Text = L.T("הועתק. מטעמי אבטחה, הלוח יתרוקן בעוד דקה.", "Copied. For safety, the clipboard is cleared in a minute.");
+            copied.Text = L.T("הועתק. מטעמי אבטחה, הוא יימחק מהלוח בעוד דקה.", "Copied. For safety, it is cleared from the clipboard in a minute.");
         };
         var save = Theme.Secondary(L.T("שמור לקובץ…", "Save to a file…"));
         save.Click += (_, _) => SaveKey();
@@ -71,8 +71,8 @@ sealed class SecurityForm : Form
 
         Heading(col, L.T("החלפת סיסמה", "Change the password"));
         col.Controls.Add(Theme.Label(L.T(
-            "הקבצים לא מועלים מחדש, וזה לוקח שניות. מחשבים שזוכרים את הסיסמה ימשיכו לעבוד; מחשב חדש יצטרך את הסיסמה החדשה. חשוב לדעת: זה לא נועל בחוץ מישהו שכבר ידע את הסיסמה הקודמת וכבר פתח את הכונן. כל המחשבים צריכים DriveGram בגרסה 1.0 ומעלה (לפני השינוי, עדכן את כולם).",
-            "No file is re-uploaded; it takes seconds. PCs that remember the password keep working; a new PC will need the new one. Note: this does not lock out someone who already knew the old password and opened the drive. Every PC needs DriveGram 1.0 or later (update them all first)."),
+            "הקבצים לא מועלים מחדש, וזה לוקח כמה שניות. מחשבים שזוכרים את הסיסמה ימשיכו לעבוד; מחשב חדש יצטרך את הסיסמה החדשה. חשוב לדעת: זה לא חוסם מישהו שכבר ידע את הסיסמה הקודמת ופתח איתה את הכונן. כל המחשבים צריכים DriveGram בגרסה 1.0 ומעלה (לפני השינוי, עדכן את כולם).",
+            "No file is uploaded again; it takes a few seconds. PCs that remember the password keep working; a new PC will need the new one. Note: this does not lock out someone who already knew the old password and opened the drive. Every PC needs DriveGram 1.0 or later (update them all first)."),
             Theme.Small, Theme.Muted, 680));
         col.Controls.Add(Theme.Label(L.T("הסיסמה הנוכחית (או מפתח השחזור):", "Current password (or the recovery key):"), Theme.Small, Theme.Muted));
         col.Controls.Add(_current);
@@ -171,7 +171,7 @@ sealed class SecurityForm : Form
             $"Created: {DateTime.Now:yyyy-MM-dd HH:mm}\r\n\r\n{_keyBox.Text}\r\n\r\n" +
             "Type this key wherever DriveGram asks for the drive password. Keep it away from this PC.\r\n");
         }
-        catch (Exception ex) { Ui.Error(ex.Message); }
+        catch (Exception ex) { Ui.Error(TelegramErrors.Text(ex)); }
     }
 
     async Task ChangeAsync()

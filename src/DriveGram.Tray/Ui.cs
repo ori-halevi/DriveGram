@@ -61,7 +61,13 @@ static class Ui
         data.SetData("ExcludeClipboardContentFromMonitorProcessing", Zero());
         data.SetData("CanIncludeInClipboardHistory", Zero());
         data.SetData("CanUploadToCloudClipboard", Zero());
-        try { Clipboard.SetDataObject(data, copy: true); } catch (Exception ex) { Error(ex.Message); return; }
+        try { Clipboard.SetDataObject(data, copy: true); }
+        catch (Exception ex)
+        {
+            Log.Warn($"clipboard: {ex.Message}");
+            Error(L.T("ההעתקה ללוח נכשלה (אולי תוכנה אחרת משתמשת בו כרגע). נסה שוב.", "Copying to the clipboard failed (another program may be using it right now). Try again."));
+            return;
+        }
         var timer = new System.Windows.Forms.Timer { Interval = 60_000 };
         timer.Tick += (_, _) =>
         {
@@ -148,7 +154,7 @@ sealed class PasswordForm : Form
     readonly TextBox _pw = new() { UseSystemPasswordChar = true, Width = 300, RightToLeft = RightToLeft.No };
     readonly CheckBox _remember = new()
     {
-        Text = L.T("לזכור את הסיסמה במחשב הזה (נדרש כדי שהכונן ייפתח לבד)", "Remember the password on this PC (needed to start with Windows)"),
+        Text = L.T("לזכור את הסיסמה במחשב הזה (כדי שהכונן ייפתח לבד, בלי לשאול)", "Remember the password on this PC (so the drive opens by itself, without asking)"),
         AutoSize = true, Checked = true,
     };
     readonly Label _error = new() { ForeColor = Color.Firebrick, AutoSize = true };
@@ -177,8 +183,14 @@ sealed class PasswordForm : Form
         var buttons = new FlowLayoutPanel { AutoSize = true };
         buttons.Controls.AddRange([ok, cancel]);
         var layout = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false };
+        var rememberNote = new Label
+        {
+            Text = L.T("היא נשמרת מוצפנת, רק למשתמש שלך בווינדוס: מי שנכנס למשתמש הזה יוכל לפתוח את הכונן בלי סיסמה. אם אנשים אחרים משתמשים באותו משתמש, עדיף לא לסמן.",
+                "It is kept encrypted, for your Windows user only: anyone who can use that Windows user can open the drive without the password. If others share that Windows user, better leave it off."),
+            AutoSize = true, MaximumSize = new Size(420, 0), ForeColor = Color.DimGray,
+        };
         layout.Controls.AddRange([new Label { Text = L.T("הקלד את סיסמת הכונן, או את מפתח השחזור שלו:", "Enter the drive password, or its recovery key:"), AutoSize = true },
-            _pw, _remember, _error, buttons]);
+            _pw, _remember, rememberNote, _error, buttons]);
         Controls.Add(layout);
         Shown += (_, _) => { Activate(); _pw.Focus(); };
     }
@@ -203,7 +215,7 @@ sealed class TrashForm : Form
 
         _list.Columns.Add(L.T("שם", "Name"), 260);
         _list.Columns.Add(L.T("מיקום מקורי", "Original location"), 300);
-        _list.Columns.Add(L.T("נמחק ב־", "Deleted"), 150);
+        _list.Columns.Add(L.T("תאריך מחיקה", "Deleted on"), 150);
         _list.Columns.Add(L.T("גודל", "Size"), 100);
 
         var restore = new Button { Text = L.T("שחזר", "Restore"), AutoSize = true };
@@ -218,7 +230,7 @@ sealed class TrashForm : Form
         bar.Controls.AddRange([restore, purge, refresh,
             new Label
             {
-                Text = L.T("פריטים נמחקים לצמיתות אוטומטית אחרי 30 יום. נמחקים מיד, בלי לעבור בסל: קובץ שעוד לא עלה ונמחק תוך 2 דקות מהרגע שנוצר, העתקה שבוטלה, וקבצים זמניים.", "Items are deleted forever automatically after 30 days. Deleted at once, without the bin: a file not uploaded yet that is deleted within 2 minutes of being created, a cancelled copy, and temporary files."),
+                Text = L.T("פריטים בסל המחזור נמחקים לצמיתות אחרי 30 יום. אלה לא מגיעים לסל ונמחקים מיד: קובץ שנמחק תוך 2 דקות מהרגע שנוצר, לפני שעלה לטלגרם; העתקה שבוטלה; קבצים זמניים.", "Items in the recycle bin are deleted forever after 30 days. These skip the bin and are deleted at once: a file deleted within 2 minutes of being created, before it was uploaded to Telegram; a cancelled copy; temporary files."),
                 AutoSize = true, MaximumSize = new Size(520, 0), Padding = new Padding(12, 8, 0, 0), ForeColor = Color.DimGray,
             }]);
         Controls.Add(_list);
@@ -277,7 +289,8 @@ sealed class TrashForm : Form
         Enabled = true;
         if (error is not null) Ui.Error(error);
         else if (elsewhere.Count > 0)
-            Ui.Ask(L.T("התיקייה המקורית כבר לא קיימת, ולכן שוחזר אל:\n\n", "The original folder no longer exists, so it was restored to:\n\n")
+            Ui.Ask(L.N(elsewhere.Count, "התיקייה המקורית כבר לא קיימת, ולכן הפריט שוחזר אל:\n\n", "התיקיות המקוריות של {0} פריטים כבר לא קיימות, ולכן הם שוחזרו אל:\n\n",
+                        "The original folder no longer exists, so the item was restored to:\n\n", "The original folders of {0} items no longer exist, so they were restored to:\n\n")
                     + string.Join("\n", elsewhere.Take(10).Select(L.LtrPath)) + (elsewhere.Count > 10 ? "\n…" : ""),
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
         try { Reload(); } catch (Exception ex) { Log.Warn($"trash: reload failed: {ex.Message}"); }

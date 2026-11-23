@@ -44,11 +44,11 @@ sealed class HandoverAskForm : Form
         var col = Theme.Column();
         col.Padding = new Padding(24, 18, 24, 18);
         var asker = r.Name.Length > 40 ? r.Name[..40] + "…" : r.Name;
-        col.Controls.Add(Theme.Label(L.T($"המחשב {asker} מבקש לקבל את הכונן {L.Ltr(session.MountPoint)}.", $"{asker} asks for the drive {session.MountPoint}."),
+        col.Controls.Add(Theme.Label(L.T($"המחשב {L.Ltr(asker)} מבקש לקבל את הכונן {L.Ltr(session.MountPoint)}.", $"{asker} asks for the drive {session.MountPoint}."),
             Theme.Heading, Theme.Text, 560));
         col.Controls.Add(Theme.Label(L.T(
-            "אם תעביר, המחשב הזה יעבור לקריאה בלבד והמחשב השני יוכל לשנות קבצים. תמיד אפשר לבקש את הכונן בחזרה.",
-            "If you hand it over, this PC becomes read-only and the other PC can change files. You can always ask for it back."),
+            "רק מחשב אחד יכול לשנות קבצים בכונן בכל רגע. אם תעביר, המחשב הזה יעבור לקריאה בלבד והמחשב השני יוכל לשנות קבצים. תמיד אפשר לבקש את הכונן בחזרה.",
+            "Only one PC at a time can change files on the drive. If you hand it over, this PC becomes read-only and the other PC can change files. You can always ask for it back."),
             Theme.Body, Theme.Text, 560));
         int pending = session.Status.PendingFiles, open = session.Engine.FilesOpenForWriting;
         if (pending > 0)
@@ -128,9 +128,9 @@ sealed class HandoverWaitForm : Form
     {
         _session = session;
         var holder = session.Sync.LeaseHolder;
-        _holder = holder ?? L.T("המחשב השני", "the other PC");
-        _fromHolder = holder is null ? "מהמחשב השני" : $"מ־{holder}";
-        _atHolder = holder is null ? "במחשב השני" : $"ב־{holder}";
+        _holder = holder is null ? L.T("המחשב השני", "the other PC") : L.T(L.Ltr(holder), holder);
+        _fromHolder = holder is null ? "מהמחשב השני" : $"מ־{L.Ltr(holder)}";
+        _atHolder = holder is null ? "במחשב השני" : $"ב־{L.Ltr(holder)}";
         Ui.Prepare(this);
         Text = L.T($"DriveGram – בקשת הכונן {L.Ltr(session.MountPoint)}", $"DriveGram – asking for {session.MountPoint}");
         StartPosition = FormStartPosition.CenterScreen;
@@ -183,7 +183,7 @@ sealed class HandoverWaitForm : Form
         catch (HandoverBusyException ex)
         {
             _state.ForeColor = Theme.Error;
-            _state.Text = L.T($"המחשב {ex.Other} כבר ביקש את הכונן. נסה שוב בעוד דקה.", $"{ex.Other} already asked for the drive. Try again in a minute.");
+            _state.Text = L.T($"המחשב {L.Ltr(ex.Other)} כבר ביקש את הכונן. נסה שוב בעוד דקה.", $"{ex.Other} already asked for the drive. Try again in a minute.");
             return;
         }
         catch (Exception ex)
@@ -253,7 +253,7 @@ sealed class HandoverWaitForm : Form
                         }
                         _state.Text = state == "seen"
                             ? L.T($"השאלה מוצגת עכשיו {_atHolder}… בלי תשובה, הכונן יעבור לכאן ",
-                                  $"The question is on the screen of {_holder}… without an answer, the drive moves here ") + HandoverAskForm.Seconds(left) + "."
+                                  $"The question is now on the screen of {_holder}… without an answer, the drive moves here ") + HandoverAskForm.Seconds(left) + "."
                             : L.T($"ממתין לתשובה {_fromHolder}… אם לא תגיע תשובה, הכונן יעבור לכאן ",
                                   $"Waiting for {_holder} to answer… without an answer, the drive moves here ") + HandoverAskForm.Seconds(left) + ".";
                         break;
