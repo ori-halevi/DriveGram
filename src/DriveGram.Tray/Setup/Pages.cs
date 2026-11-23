@@ -109,12 +109,10 @@ sealed class ApiPage : WizardPage
     {
         using var dlg = new OpenFileDialog { Title = L.T($"בחר קובץ {L.Ltr(".env")}", "Choose an .env file"), Filter = "env|*.env;.env|*.*|*.*" };
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
-        foreach (var line in File.ReadAllLines(dlg.FileName))
+        foreach (var (key, value) in DriveGram.Host.EnvFile.Read(dlg.FileName))
         {
-            var kv = line.Split('=', 2, StringSplitOptions.TrimEntries);
-            if (kv.Length != 2) continue;
-            if (kv[0] == "API_ID") _id.Text = kv[1].Trim('"');
-            if (kv[0] == "API_HASH") _hash.Text = kv[1].Trim('"');
+            if (key is "API_ID" or "TELEGRAM_API_ID") _id.Text = value;
+            if (key is "API_HASH" or "TELEGRAM_API_HASH") _hash.Text = value;
         }
         if (!Valid)
         {

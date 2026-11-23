@@ -251,12 +251,10 @@ async Task<int> Login()
     if (state.Folder is not null) { Console.WriteLine("--folder needs no login."); return 0; }
     if (envFile is not null)
     {
-        foreach (var line in File.ReadAllLines(envFile))
+        foreach (var (key, value) in EnvFile.Read(envFile))
         {
-            var kv = line.Split('=', 2, StringSplitOptions.TrimEntries);
-            if (kv.Length != 2) continue;
-            if (kv[0] == "API_ID" && int.TryParse(kv[1], out var id)) state.Config.ApiId = id;
-            if (kv[0] == "API_HASH") state.Config.ApiHash = kv[1].Trim('"');
+            if (key is "API_ID" or "TELEGRAM_API_ID" && int.TryParse(value, out var id)) state.Config.ApiId = id;
+            if (key is "API_HASH" or "TELEGRAM_API_HASH") state.Config.ApiHash = value;
         }
     }
     if (state.Config.ApiId == 0)
