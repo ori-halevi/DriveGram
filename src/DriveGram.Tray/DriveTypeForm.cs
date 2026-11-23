@@ -24,7 +24,6 @@ sealed class DriveTypeForm : Form
         BackColor = Color.White;
 
         var col = Theme.Column();
-        col.Padding = new Padding(24, 18, 24, 18);
         col.AutoSize = false;
         col.AutoScroll = true;
         col.Dock = DockStyle.Fill;
@@ -32,7 +31,7 @@ sealed class DriveTypeForm : Form
         col.Controls.Add(Theme.Label(L.T(
             "הקבצים, ההצפנה, המהירות והעדכון בין המחשבים זהים בשני המצבים. ההבדל הוא רק איך וינדוס ותוכנות אחרות מתייחסים לכונן. לא בטוח? השאר \"דיסק רגיל\".",
             "Files, encryption, speed and updates between PCs are the same either way. The only difference is how Windows and other programs treat the drive. Not sure? Keep \"Regular disk\"."),
-            Theme.Body, Theme.Text, 680));
+            Theme.Body, Theme.Text, 660));
 
         _disk.Text = L.T("דיסק רגיל (ברירת המחדל)", "Regular disk (the default)");
         col.Controls.Add(Spaced(_disk));
@@ -61,9 +60,9 @@ sealed class DriveTypeForm : Form
         col.Controls.Add(Theme.Label(L.T(
             "המלצה: לקבצים אישיים (מסמכים, תמונות, סרטונים) שני המצבים מתאימים. כונן רשת עדיף אם מותקנת תוכנת גיבוי כמו Backblaze, או אנטי־וירוס שאינו Defender. דיסק רגיל עדיף לקטלוג Lightroom, ‏Outlook, תוכנות, או חיפוש בתוך מסמכים.",
             "Advice: for personal files (documents, photos, videos) both work. A network drive is better with a backup program like Backblaze, or an antivirus other than Defender. A regular disk is better for a Lightroom catalog, Outlook, programs, or searching inside documents."),
-            Theme.Small, Theme.Muted, 680));
+            Theme.Small, Theme.Muted, 660));
         col.Controls.Add(Theme.Label(L.T("השינוי מנתק את הכונן ומחבר אותו מחדש (לוקח כמה שניות).", "The change disconnects the drive and connects it again (takes a few seconds)."),
-            Theme.Small, Theme.Muted, 680));
+            Theme.Small, Theme.Muted, 660));
 
         (network ? _network : _disk).Checked = true;
         var ok = Theme.Primary(L.T("שמור", "Save"));
@@ -74,7 +73,7 @@ sealed class DriveTypeForm : Form
         row.Margin = new Padding(0, 16, 0, 0);
         row.Controls.AddRange([ok, cancel]);
         col.Controls.Add(row);
-        Controls.Add(col);
+        Theme.Fill(this, col, new Padding(24, 18, 24, 18));
         AcceptButton = ok;
         CancelButton = cancel;
     }

@@ -21,7 +21,6 @@ sealed class ExportForm : Form
         MaximizeBox = MinimizeBox = false;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        Padding = new Padding(20);
         BackColor = Color.White;
 
         var col = Theme.Column();
@@ -30,7 +29,7 @@ sealed class ExportForm : Form
             "Files not stored on this PC download from Telegram, which can take a while. You can stop and continue later: what was already copied is not copied again. The files on the drive are not changed."),
             Theme.Small, Theme.Muted, 600));
         col.Controls.AddRange([_bar, _status, _current, _cancel]);
-        Controls.Add(col);
+        Theme.Fill(this, col, new Padding(20));
         _cancel.Click += (_, _) => { if (_cts.IsCancellationRequested) Close(); else _cts.Cancel(); };
         FormClosing += (_, _) => _cts.Cancel();
 
@@ -39,7 +38,7 @@ sealed class ExportForm : Form
             var progress = new Progress<ExportProgress>(p =>
             {
                 _status.Text = L.N(p.Files, "הועתק קובץ אחד", "הועתקו {0:N0} קבצים", "1 file copied", "{0:N0} files copied")
-                               + $" ({Ui.Size(p.Bytes)}), "
+                               + $" ({Ui.Size(p.Bytes)})" + L.T(",\u200F ", ", ") // RLM: the count after the size stays after it in Hebrew
                                + L.N(p.Skipped, "אחד כבר היה שם", "{0:N0} כבר היו שם", "1 already there", "{0:N0} already there");
                 _current.Text = L.LtrPath(p.Current);
             });

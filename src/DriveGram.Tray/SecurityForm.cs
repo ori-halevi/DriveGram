@@ -36,7 +36,6 @@ sealed class SecurityForm : Form
         BackColor = Color.White;
 
         var col = Theme.Column();
-        col.Padding = new Padding(24, 18, 24, 18);
         col.AutoSize = false;
         col.AutoScroll = true;
         col.Dock = DockStyle.Fill;
@@ -45,7 +44,7 @@ sealed class SecurityForm : Form
         col.Controls.Add(Theme.Label(L.T(
             "אם תשכח את הסיסמה, מפתח השחזור פותח את הכונן במקומה: מקלידים אותו בכל מקום שמבקשים סיסמה. בלי סיסמה ובלי מפתח שחזור, אף אחד לא יוכל לפתוח את הכונן לעולם.",
             "If you forget the password, the recovery key opens the drive instead: type it wherever the password is asked. Without the password or a recovery key, nobody can ever open the drive."),
-            Theme.Body, Theme.Text, 680));
+            Theme.Body, Theme.Text, 660));
         col.Controls.Add(_recoveryState);
         col.Controls.Add(_makeKey);
         _keyPanel.Visible = false;
@@ -63,7 +62,7 @@ sealed class SecurityForm : Form
         _keyPanel.Controls.AddRange([
             Theme.Label(L.T("⚠  זו הפעם היחידה שהמפתח מוצג. שמור אותו עכשיו: הדפס, רשום, או שמור במנהל סיסמאות.",
                 "⚠  This is the only time the key is shown. Save it now: print it, write it down, or keep it in a password manager."),
-                Theme.Body, Theme.Error, 680),
+                Theme.Body, Theme.Error, 660),
             _keyBox, keyButtons, _keySaved]);
         col.Controls.Add(_keyPanel);
         _makeKey.Click += async (_, _) => await MakeKeyAsync();
@@ -73,7 +72,7 @@ sealed class SecurityForm : Form
         col.Controls.Add(Theme.Label(L.T(
             "הקבצים לא מועלים מחדש, וזה לוקח כמה שניות. מחשבים שזוכרים את הסיסמה ימשיכו לעבוד; מחשב חדש יצטרך את הסיסמה החדשה. חשוב לדעת: זה לא חוסם מישהו שכבר ידע את הסיסמה הקודמת ופתח איתה את הכונן. כל המחשבים צריכים DriveGram בגרסה 1.0 ומעלה (לפני השינוי, עדכן את כולם).",
             "No file is uploaded again; it takes a few seconds. PCs that remember the password keep working; a new PC will need the new one. Note: this does not lock out someone who already knew the old password and opened the drive. Every PC needs DriveGram 1.0 or later (update them all first)."),
-            Theme.Small, Theme.Muted, 680));
+            Theme.Small, Theme.Muted, 660));
         col.Controls.Add(Theme.Label(L.T("הסיסמה הנוכחית (או מפתח השחזור):", "Current password (or the recovery key):"), Theme.Small, Theme.Muted));
         col.Controls.Add(_current);
         col.Controls.Add(Theme.Label(L.T("סיסמה חדשה (לפחות 10 תווים):", "New password (at least 10 characters):"), Theme.Small, Theme.Muted));
@@ -87,7 +86,7 @@ sealed class SecurityForm : Form
         _close.Click += (_, _) => Close();
         _close.Margin = new Padding(0, 18, 0, 0);
         col.Controls.Add(_close);
-        Controls.Add(col);
+        Theme.Fill(this, col, new Padding(24, 18, 24, 18));
         FormClosing += (_, e) =>
         {
             if (_keyPanel.Visible && !_keySaved.Checked && e.CloseReason != CloseReason.WindowsShutDown &&
@@ -101,7 +100,7 @@ sealed class SecurityForm : Form
 
     static void Heading(FlowLayoutPanel col, string text)
     {
-        var l = Theme.Label(text, Theme.Heading, Theme.Text, 680);
+        var l = Theme.Label(text, Theme.Heading, Theme.Text, 660);
         l.Margin = new Padding(0, 14, 0, 6);
         col.Controls.Add(l);
     }

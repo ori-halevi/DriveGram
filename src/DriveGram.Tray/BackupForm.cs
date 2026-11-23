@@ -36,7 +36,6 @@ sealed class BackupForm : Form
         BackColor = Color.White;
 
         var col = Theme.Column();
-        col.Padding = new Padding(24, 18, 24, 18);
         col.AutoScroll = true;
         col.AutoSize = false;
         col.Dock = DockStyle.Fill;
@@ -118,7 +117,7 @@ sealed class BackupForm : Form
         close.Click += (_, _) => Close();
         CancelButton = close;
         col.Controls.Add(close);
-        Controls.Add(col);
+        Theme.Fill(this, col, new Padding(24, 18, 24, 18));
 
         var ch = state.Config.Channels;
         _journalName.Text = L.T("•  ערוץ היומן: ", "•  Journal channel: ") + "…";

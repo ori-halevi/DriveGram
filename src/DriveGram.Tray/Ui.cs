@@ -112,7 +112,6 @@ sealed class ChoiceForm : Form
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
         BackColor = Color.White;
-        Padding = new Padding(20, 18, 20, 14);
 
         var sys = icon switch
         {
@@ -142,7 +141,7 @@ sealed class ChoiceForm : Form
         }
         var col = Setup.Theme.Column();
         col.Controls.AddRange([top, row]);
-        Controls.Add(col);
+        Setup.Theme.Fill(this, col, new Padding(20, 18, 20, 14));
         FormClosing += (_, e) => { if (e.CloseReason == CloseReason.UserClosing && cancelIndex < 0 && DialogResult != DialogResult.OK) e.Cancel = true; };
         Shown += (_, _) => { Activate(); (AcceptButton as Control)?.Focus(); };
     }
@@ -152,12 +151,11 @@ sealed class ChoiceForm : Form
 sealed class PasswordForm : Form
 {
     readonly TextBox _pw = new() { UseSystemPasswordChar = true, Width = 300, RightToLeft = RightToLeft.No };
-    readonly CheckBox _remember = new()
-    {
-        Text = L.T("לזכור את הסיסמה במחשב הזה (כדי שהכונן ייפתח לבד, בלי לשאול)", "Remember the password on this PC (so the drive opens by itself, without asking)"),
-        AutoSize = true, Checked = true,
-    };
-    readonly Label _error = new() { ForeColor = Color.Firebrick, AutoSize = true };
+    // wraps at the note's width (one long line made the window much wider than its text)
+    readonly CheckBox _remember = Setup.Theme.WrapCheck(
+        L.T("לזכור את הסיסמה במחשב הזה (כדי שהכונן ייפתח לבד, בלי לשאול)", "Remember the password on this PC (so the drive opens by itself, without asking)"),
+        Ui.Font, 420, on: true);
+    readonly Label _error = new() { ForeColor = Color.Firebrick, AutoSize = true, MaximumSize = new Size(420, 0) };
 
     public string Password => _pw.Text;
     public bool Remember => _remember.Checked;
@@ -172,26 +170,30 @@ sealed class PasswordForm : Form
         TopMost = true;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        Padding = new Padding(16);
+        BackColor = Color.White; // like the other DriveGram windows
 
-        var ok = new Button { Text = L.T("פתח את הכונן", "Open the drive"), DialogResult = DialogResult.OK, AutoSize = true };
-        var cancel = new Button { Text = L.T("ביטול", "Cancel"), DialogResult = DialogResult.Cancel, AutoSize = true };
+        // the same buttons as the other DriveGram dialogs (ChoiceForm)
+        var ok = Setup.Theme.Primary(L.T("פתח את הכונן", "Open the drive"));
+        var cancel = Setup.Theme.Secondary(L.T("ביטול", "Cancel"));
+        foreach (var b in new[] { ok, cancel }) { b.Font = Ui.Font; b.MinimumSize = new Size(90, 32); }
+        ok.DialogResult = DialogResult.OK;
+        cancel.DialogResult = DialogResult.Cancel;
         AcceptButton = ok;
         CancelButton = cancel;
         _error.Text = error ?? "";
 
-        var buttons = new FlowLayoutPanel { AutoSize = true };
+        var buttons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 10, 0, 0) };
         buttons.Controls.AddRange([ok, cancel]);
         var layout = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false };
         var rememberNote = new Label
         {
             Text = L.T("היא נשמרת מוצפנת, רק למשתמש שלך בווינדוס: מי שנכנס למשתמש הזה יוכל לפתוח את הכונן בלי סיסמה. אם אנשים אחרים משתמשים באותו משתמש, עדיף לא לסמן.",
                 "It is kept encrypted, for your Windows user only: anyone who can use that Windows user can open the drive without the password. If others share that Windows user, better leave it off."),
-            AutoSize = true, MaximumSize = new Size(420, 0), ForeColor = Color.DimGray,
+            AutoSize = true, MaximumSize = new Size(420, 0), ForeColor = Setup.Theme.Muted,
         };
         layout.Controls.AddRange([new Label { Text = L.T("הקלד את סיסמת הכונן, או את מפתח השחזור שלו:", "Enter the drive password, or its recovery key:"), AutoSize = true },
             _pw, _remember, rememberNote, _error, buttons]);
-        Controls.Add(layout);
+        Setup.Theme.Fill(this, layout, new Padding(18, 16, 18, 14));
         Shown += (_, _) => { Activate(); _pw.Focus(); };
     }
 }
@@ -226,12 +228,13 @@ sealed class TrashForm : Form
         refresh.Click += (_, _) => Reload();
         _list.DoubleClick += (_, _) => Act(restore: true);
 
-        var bar = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, Padding = new Padding(8) };
+        var bar = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, Padding = new Padding(8), WrapContents = false };
         bar.Controls.AddRange([restore, purge, refresh,
             new Label
             {
                 Text = L.T("פריטים בסל המחזור נמחקים לצמיתות אחרי 30 יום. אלה לא מגיעים לסל ונמחקים מיד: קובץ שנמחק תוך 2 דקות מהרגע שנוצר, לפני שעלה לטלגרם; העתקה שבוטלה; קבצים זמניים.", "Items in the recycle bin are deleted forever after 30 days. These skip the bin and are deleted at once: a file deleted within 2 minutes of being created, before it was uploaded to Telegram; a cancelled copy; temporary files."),
-                AutoSize = true, MaximumSize = new Size(520, 0), Padding = new Padding(12, 8, 0, 0), ForeColor = Color.DimGray,
+                // a margin, not a padding: with a padding the Hebrew text wrapped to one line more than was measured (cut off)
+                AutoSize = true, MaximumSize = new Size(520, 0), Margin = new Padding(12, 8, 0, 0), ForeColor = Color.DimGray,
             }]);
         Controls.Add(_list);
         Controls.Add(bar);

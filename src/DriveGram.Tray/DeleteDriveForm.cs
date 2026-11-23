@@ -30,45 +30,45 @@ sealed class DeleteDriveForm : Form
         TopMost = true;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        Padding = new Padding(24);
         BackColor = Color.White;
 
         var col = Theme.Column();
-        col.Controls.Add(Theme.Label(L.T("⚠  מחיקת כונן לצמיתות", "⚠  Delete a drive permanently"), Theme.Title, Danger, 600));
-        var nameLabel = Theme.Label($"{name}  ({letter})", Theme.Heading, Theme.Text, 600);
+        col.Controls.Add(Theme.Label(L.T("⚠  מחיקת כונן לצמיתות", "⚠  Delete a drive permanently"), Theme.Title, Danger, 700));
+        var nameLabel = Theme.Label($"{name}  ({letter})", Theme.Heading, Theme.Text, 700);
         nameLabel.RightToLeft = RightToLeft.No; // the drive's own name, left-to-right, on its own line
         col.Controls.Add(nameLabel);
         col.Controls.Add(Theme.Label(L.T("את הפעולה הזו אי אפשר לבטל.", "This cannot be undone."), Theme.Heading, Danger));
 
         var what = Theme.Card(Color.FromArgb(0xFD, 0xEC, 0xEA), Color.FromArgb(0xE5, 0x9A, 0x92));
         var list = Theme.Column();
-        list.Controls.Add(Theme.Label(L.T("יימחקו לצמיתות, מטלגרם ומהמחשב הזה:", "Deleted for good, from Telegram and from this PC:"), Theme.Body, Theme.Text, 560));
+        list.MinimumSize = new Size(700 - 28, 0); // the card as wide as the texts around it (700, with its padding)
+        list.Controls.Add(Theme.Label(L.T("יימחקו לצמיתות, מטלגרם ומהמחשב הזה:", "Deleted for good, from Telegram and from this PC:"), Theme.Body, Theme.Text, 660));
         var folders = L.N(p.Folders, "תיקייה אחת", "{0:N0} תיקיות", "1 folder", "{0:N0} folders");
         list.Controls.Add(Theme.Label("•  " + L.N(p.Files, "קובץ אחד", "{0:N0} קבצים", "1 file", "{0:N0} files")
-            + L.T(p.Folders == 1 ? " ו" : " ו־", " and ") + folders + $" ({Ui.Size(p.Bytes)})", maxWidth: 560));
+            + L.T(p.Folders == 1 ? " ו" : " ו־", " and ") + folders + $" ({Ui.Size(p.Bytes)})", maxWidth: 660));
         if (p.Trashed > 0)
             list.Controls.Add(Theme.Label(L.N(p.Trashed, "•  פריט אחד בסל המחזור של הכונן", "•  {0:N0} פריטים בסל המחזור של הכונן",
-                "•  1 item in the drive's recycle bin", "•  {0:N0} items in the drive's recycle bin"), maxWidth: 560));
+                "•  1 item in the drive's recycle bin", "•  {0:N0} items in the drive's recycle bin"), maxWidth: 660));
         if (p.PendingUploads > 0)
             list.Controls.Add(Theme.Label(L.N(p.PendingUploads, "•  קובץ אחד שעוד לא סיים לעלות", "•  {0:N0} קבצים שעוד לא סיימו לעלות",
-                "•  1 file that has not finished uploading", "•  {0:N0} files that have not finished uploading"), maxWidth: 560));
-        list.Controls.Add(Theme.Label(L.T("•  שני הערוצים של הכונן בטלגרם, כולל היסטוריית השינויים והגיבויים שלו", "•  the drive's two Telegram channels, with its change history and backups"), maxWidth: 560));
+                "•  1 file that has not finished uploading", "•  {0:N0} files that have not finished uploading"), maxWidth: 660));
+        list.Controls.Add(Theme.Label(L.T("•  שני הערוצים של הכונן בטלגרם, כולל היסטוריית השינויים והגיבויים שלו", "•  the drive's two Telegram channels, with its change history and backups"), maxWidth: 660));
         what.Controls.Add(list);
         col.Controls.Add(what);
 
         if (p.OpenElsewhere is { } pc)
             col.Controls.Add(Theme.Label(L.T($"הכונן פתוח כרגע לכתיבה במחשב \"{L.Ltr(pc)}\". שינויים שנעשו שם ועוד לא עלו יאבדו.",
-                $"The drive is open for writing on \"{pc}\" right now. Changes made there that have not uploaded yet will be lost."), Theme.Body, Danger, 600));
+                $"The drive is open for writing on \"{pc}\" right now. Changes made there that have not uploaded yet will be lost."), Theme.Body, Danger, 700));
         col.Controls.Add(Theme.Label(L.T(
             "מחשבים אחרים שמחוברים לכונן הזה (וחשבונות גיבוי שמנהלים אותו) יאבדו אליו גישה. אם יש משהו שתרצה לשמור, העתק אותו מהכונן לפני המחיקה. רוצה רק שהכונן לא יופיע במחשב הזה? בחר במקום זה \"הסר מהמחשב הזה…\": הקבצים יישארו בטלגרם.",
             "Other PCs connected to this drive (and backup accounts that administer it) lose access too. If there is anything to keep, copy it out of the drive first. Only want the drive gone from this PC? Choose \"Remove from this PC…\" instead: the files stay in Telegram."),
-            Theme.Body, Theme.Muted, 600));
+            Theme.Body, Theme.Muted, 700));
 
         _understand.Text = L.T("אני מבין שהקבצים יימחקו לצמיתות ואי אפשר יהיה לשחזר אותם", "I understand the files will be deleted forever and cannot be recovered");
         col.Controls.Add(_understand);
         // the name on a line of its own, in bold: a Hebrew name would otherwise read as part of the sentence
-        col.Controls.Add(Theme.Label(L.T("כדי לאשר, הקלד את שם הכונן:", "To confirm, type the drive's name:"), Theme.Body, Theme.Text, 600));
-        var typeThis = Theme.Label(name, new Font(Theme.Body, FontStyle.Bold), Theme.Text, 600);
+        col.Controls.Add(Theme.Label(L.T("כדי לאשר, הקלד את שם הכונן:", "To confirm, type the drive's name:"), Theme.Body, Theme.Text, 700));
+        var typeThis = Theme.Label(name, new Font(Theme.Body, FontStyle.Bold), Theme.Text, 700);
         typeThis.Margin = new Padding(16, 0, 16, 8);
         col.Controls.Add(typeThis);
         _typed.RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No;
@@ -82,7 +82,7 @@ sealed class DeleteDriveForm : Form
         var buttons = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 12, 0, 0), WrapContents = false };
         buttons.Controls.AddRange([cancel, _delete]);
         col.Controls.Add(buttons);
-        Controls.Add(col);
+        Theme.Fill(this, col, new Padding(24));
 
         CancelButton = cancel;
         AcceptButton = null; // Enter never deletes

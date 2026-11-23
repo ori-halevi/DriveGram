@@ -36,7 +36,7 @@ sealed class WelcomePage : WizardPage
             : [L.T("סיסמה לכונן (מצב ניסיון: הקבצים נשמרים בתיקייה מקומית)", "A drive password (trial mode: files are kept in a local folder)"),
                L.T("אות לכונן והפעלה אוטומטית עם וינדוס", "A drive letter, and starting with Windows")];
         for (int i = 0; i < steps.Length; i++)
-            col.Controls.Add(Theme.Label($"  {i + 1}.  {steps[i]}"));
+            col.Controls.Add(Theme.Label($"  {i + 1}.  {steps[i]}", maxWidth: 640)); // one line each (a wrapped line lost its indent)
 
         if (ctx.UsesTelegram)
         {
@@ -658,11 +658,10 @@ sealed class DrivePage : WizardPage
     readonly Label _meterText = Theme.Label("", Theme.Small, Theme.Muted);
     readonly Panel _warning = Theme.Card(Theme.WarnBack, Theme.WarnBorder);
     readonly CheckBox _saved = new() { Text = L.T("שמרתי את הסיסמה במקום בטוח", "I saved the password somewhere safe"), AutoSize = true };
-    readonly CheckBox _remember = new()
-    {
-        Text = L.T("לזכור את הסיסמה במחשב הזה (כדי שהכונן ייפתח לבד, בלי לשאול)", "Remember the password on this PC (so the drive opens by itself, without asking)"),
-        AutoSize = true, Checked = true,
-    };
+    // wraps at the page's text width (on one line it was wider than the page: a horizontal scroll bar)
+    readonly CheckBox _remember = Theme.WrapCheck(
+        L.T("לזכור את הסיסמה במחשב הזה (כדי שהכונן ייפתח לבד, בלי לשאול)", "Remember the password on this PC (so the drive opens by itself, without asking)"),
+        Theme.Body, 640, on: true);
     readonly Label _rememberNote = Theme.Label(L.T(
         "היא נשמרת מוצפנת, רק למשתמש שלך בווינדוס: מי שנכנס למשתמש הזה יוכל לפתוח את הכונן בלי סיסמה. אם אנשים אחרים משתמשים באותו משתמש, עדיף לא לסמן (ואז הסיסמה תתבקש בכל חיבור של הכונן).",
         "It is kept encrypted, for your Windows user only: anyone who can use that Windows user can open the drive without the password. If others share that Windows user, better leave it off (the password is then asked each time the drive connects)."),

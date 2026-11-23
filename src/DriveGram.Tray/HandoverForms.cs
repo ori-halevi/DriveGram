@@ -42,7 +42,6 @@ sealed class HandoverAskForm : Form
         _deadline = DateTime.UtcNow + SyncService.HandoverAnswerTime - TimeSpan.FromSeconds(10);
 
         var col = Theme.Column();
-        col.Padding = new Padding(24, 18, 24, 18);
         var asker = r.Name.Length > 40 ? r.Name[..40] + "…" : r.Name;
         col.Controls.Add(Theme.Label(L.T($"המחשב {L.Ltr(asker)} מבקש לקבל את הכונן {L.Ltr(session.MountPoint)}.", $"{asker} asks for the drive {session.MountPoint}."),
             Theme.Heading, Theme.Text, 560));
@@ -71,7 +70,7 @@ sealed class HandoverAskForm : Form
         row.Controls.AddRange([refuse, give]);
         CancelButton = refuse; // Esc keeps it; Enter never gives it away (focus is not taken from the user's app)
         col.Controls.Add(row);
-        Controls.Add(col);
+        Theme.Fill(this, col, new Padding(24, 18, 24, 18));
 
         Approved = false; // closing the window = refusing (only silence until the countdown ends = yes)
         _tick.Tick += (_, _) => UpdateCountdown();
@@ -139,7 +138,6 @@ sealed class HandoverWaitForm : Form
         BackColor = Color.White;
 
         var col = Theme.Column();
-        col.Padding = new Padding(24, 18, 24, 18);
         col.Controls.Add(Theme.Label(L.T($"מבקש את הכונן {_fromHolder}", $"Asking {_holder} for the drive"), Theme.Heading, Theme.Text, 560));
         col.Controls.Add(_state);
         col.Controls.Add(Theme.Label(L.T(
@@ -150,7 +148,7 @@ sealed class HandoverWaitForm : Form
         row.Margin = new Padding(0, 12, 0, 0);
         row.Controls.AddRange([_takeNow, _cancel]);
         col.Controls.Add(row);
-        Controls.Add(col);
+        Theme.Fill(this, col, new Padding(24, 18, 24, 18));
 
         _takeNow.Click += async (_, _) =>
         {

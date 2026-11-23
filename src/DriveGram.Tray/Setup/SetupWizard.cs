@@ -161,6 +161,8 @@ sealed class SetupWizard : Form
     readonly Button _next = Theme.Primary(L.T("הבא", "Next"));
     readonly Button _back = Theme.Secondary(L.T("חזרה", "Back"));
     readonly Button _cancel = Theme.Secondary(L.T("ביטול", "Cancel"));
+    readonly Panel _header;
+    readonly FlowLayoutPanel _titles;
     int _index = -1;
     bool _busy;
 
@@ -190,10 +192,10 @@ sealed class SetupWizard : Form
         foreach (var p in _pages) p.StateChanged += UpdateButtons;
 
         // header: logo on the reading-start side, step counter on the other
-        var header = new Panel { Dock = DockStyle.Top, Height = 118, BackColor = Color.White, Padding = new Padding(32, 18, 32, 0) };
+        var header = _header = new Panel { Dock = DockStyle.Top, Height = 118, BackColor = Color.White, Padding = new Padding(32, 18, 32, 0) };
         var logo = new PictureBox { Size = new Size(48, 48), SizeMode = PictureBoxSizeMode.Zoom, Dock = L.Rtl ? DockStyle.Right : DockStyle.Left };
         if (File.Exists(icon)) logo.Image = new Icon(icon, 48, 48).ToBitmap();
-        var titles = Theme.Column();
+        var titles = _titles = Theme.Column();
         titles.Dock = DockStyle.Fill;
         titles.Padding = new Padding(14, 0, 14, 0);
         titles.Controls.AddRange([_title, _subtitle]);
@@ -202,7 +204,7 @@ sealed class SetupWizard : Form
         header.Controls.AddRange([titles, logo, _step, _progress]);
 
         // footer: Next/Back on the reading-end side, Cancel on the other
-        var footer = new Panel { Dock = DockStyle.Bottom, Height = 68, BackColor = Theme.Surface, Padding = new Padding(28, 14, 28, 14) };
+        var footer = new Panel { Dock = DockStyle.Bottom, Height = 68, BackColor = Theme.Surface, Padding = new Padding(28, 13, 28, 13) };
         // explicit left-to-right layout so the order never depends on automatic mirroring:
         // English  [Cancel] ............ [Back][Next]     Hebrew  [Next][Back] ............ [Cancel]
         var buttons = new FlowLayoutPanel
@@ -210,9 +212,13 @@ sealed class SetupWizard : Form
             AutoSize = true, WrapContents = false, RightToLeft = RightToLeft.No, FlowDirection = FlowDirection.LeftToRight,
             Dock = L.Rtl ? DockStyle.Left : DockStyle.Right,
         };
+        _next.Margin = _back.Margin = new Padding(3, 0, 3, 0);
         buttons.Controls.AddRange(L.Rtl ? [_next, _back] : [_back, _next]);
         _cancel.Dock = L.Rtl ? DockStyle.Right : DockStyle.Left;
         footer.Controls.AddRange([buttons, _cancel]);
+        // tall enough for the buttons (a bordered one is 41 px at 125%, more with larger text): a fixed
+        // inner height cut off their bottom edge
+        footer.Height = Math.Max(68, footer.Padding.Vertical + new[] { _next, _back, _cancel }.Max(b => b.GetPreferredSize(Size.Empty).Height));
         footer.Paint += (_, e) => e.Graphics.DrawLine(new Pen(Theme.Border), 0, 0, footer.Width, 0);
 
         Controls.AddRange([_host, header, footer]);
@@ -288,7 +294,7 @@ sealed class SetupWizard : Form
         int total = _pages.Count - _skipped.Count;
         int step = _pages.Take(_index + 1).Count(p => !_skipped.Contains(p));
         _step.Text = L.T($"שלב {step} מתוך {total}", $"Step {step} of {total}");
-        _progressFill.Width = (int)(ClientSize.Width * (double)step / Math.Max(1, total));
+        _progressFill.Width = (int)(_progress.Width * (double)step / Math.Max(1, total)); // the line, not the window: it is inset
     }
 
     /// <summary>Developer aid: render every page (and its demo states) to PNG files.</summary>
@@ -319,6 +325,15 @@ sealed class SetupWizard : Form
         bmp.Save(path);
     }
 
+    /// <summary>Header tall enough for the title and a two-line subtitle (more if it wraps further, e.g. with
+    /// large text scaling): a fixed height put the second line on top of the progress line.</summary>
+    void FitHeader()
+    {
+        int twoLines = _title.PreferredHeight + _title.Margin.Vertical + 2 * _subtitle.Font.Height + _subtitle.Margin.Vertical;
+        int actual = _titles.GetPreferredSize(new Size(_titles.Width, 0)).Height;
+        _header.Height = Math.Max(118, _header.Padding.Top + Math.Max(twoLines, actual) + 14 + _progress.Height);
+    }
+
     void SetBusy(bool busy)
     {
         _busy = busy;
@@ -332,6 +347,7 @@ sealed class SetupWizard : Form
         var page = _pages[_index];
         _title.Text = page.Title;
         _subtitle.Text = page.Subtitle;
+        FitHeader();
         _next.Text = page.NextText;
         _next.Enabled = page.CanGoNext && !_busy;
         _back.Enabled = _index > 0 && !_busy;

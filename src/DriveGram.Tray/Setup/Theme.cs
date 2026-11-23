@@ -32,6 +32,40 @@ static class Theme
         Margin = new Padding(0, 0, 0, 8),
     };
 
+    /// <summary>A check box whose text wraps at maxWidth: an AutoSize check box never wraps (MaximumSize
+    /// only cuts its text off), so a long one widened the window or added a horizontal scroll bar.</summary>
+    public static CheckBox WrapCheck(string text, Font font, int maxWidth, bool on = false)
+    {
+        var cb = new CheckBox { Text = text, Font = font, AutoSize = true, Checked = on };
+        void Fit()
+        {
+            cb.AutoSize = true;
+            var one = cb.GetPreferredSize(Size.Empty);
+            if (one.Width <= maxWidth) return;
+            var line = TextRenderer.MeasureText(cb.Text, cb.Font);
+            var wrapped = TextRenderer.MeasureText(cb.Text, cb.Font, new Size(maxWidth - (one.Width - line.Width), 0), TextFormatFlags.WordBreak);
+            cb.AutoSize = false;
+            cb.CheckAlign = ContentAlignment.TopLeft; // mirrored to the right in Hebrew
+            cb.TextAlign = ContentAlignment.TopLeft;
+            cb.Size = new Size(maxWidth, one.Height - line.Height + wrapped.Height);
+        }
+        Fit();
+        cb.FontChanged += (_, _) => Fit(); // also after a DPI change
+        return cb;
+    }
+
+    /// <summary>Puts a window's content in place, with space around it. The space is the window's Padding
+    /// around a docked column, not the column's own Padding: in a mirrored (Hebrew) window a column's
+    /// Padding landed twice on the right and not at all on the left, in an AutoScroll column its vertical
+    /// Padding was counted twice against the scroll range (the last button could not be scrolled into
+    /// view), and an AutoSize window's Padding does not move a child that is not docked (measured).</summary>
+    public static void Fill(Form f, Control content, Padding space)
+    {
+        f.Padding = space;
+        content.Dock = DockStyle.Fill;
+        f.Controls.Add(content);
+    }
+
     public static Button Primary(string text) => Style(new Button { Text = text }, primary: true);
     public static Button Secondary(string text) => Style(new Button { Text = text }, primary: false);
 
@@ -77,13 +111,23 @@ static class Theme
 
     public static Panel Card(Color back, Color border)
     {
-        var p = new Panel { BackColor = back, Padding = new Padding(14, 10, 14, 10), AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = new Padding(0, 4, 0, 10) };
+        var p = new CardPanel { BackColor = back, Padding = new Padding(14, 10, 14, 10), AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = new Padding(0, 4, 0, 10) };
         p.Paint += (_, e) =>
         {
             using var pen = new Pen(border);
             e.Graphics.DrawRectangle(pen, 0, 0, p.Width - 1, p.Height - 1);
         };
+        // a Panel does not place its children by its Padding: without this the content sat on the
+        // border (covering its top and left lines) and the space on the far side was missing
+        p.ControlAdded += (_, e) => e.Control!.Location = new Point(p.Padding.Left, p.Padding.Top);
         return p;
+    }
+
+    /// <summary>Redrawn whole when its size changes: the border is drawn around the full panel, and a
+    /// partial repaint after growing left a gap in it.</summary>
+    sealed class CardPanel : Panel
+    {
+        public CardPanel() { ResizeRedraw = true; DoubleBuffered = true; }
     }
 
     public static FlowLayoutPanel Column() => new()
