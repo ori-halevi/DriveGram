@@ -94,7 +94,13 @@ sealed class TrayApp : ApplicationContext
         else
         {
             foreach (var d in _drives) _ = MountAsync(d);
-            _ui.Post(async _ => { await Task.Delay(TimeSpan.FromSeconds(5)); AskToRestoreAutostart(); }, null);
+            _ui.Post(async _ =>
+            {
+                // after the drives started (a password may be asked meanwhile): one question at a time
+                await Task.Delay(TimeSpan.FromSeconds(5));
+                for (int i = 0; i < 120 && _drives.Any(x => x.Starting); i++) await Task.Delay(1000);
+                AskToRestoreAutostart();
+            }, null);
         }
     }
 
@@ -846,16 +852,20 @@ sealed class TrayApp : ApplicationContext
     /// </summary>
     async Task WatchHandoverClaimedAsync(DriveController d, DriveSession s, HandoverRequest r)
     {
-        for (int check = 0; check < 2; check++)
+        // two answers "not taken" a minute apart; a check that fails (a short network problem) is retried
+        int notTaken = 0;
+        for (int attempt = 0; attempt < 6 && notTaken < 2; attempt++)
         {
             await Task.Delay(TimeSpan.FromSeconds(60));
             if (d.Session != s || d.Stopping || _quitting || s.Writable) return;
             try
             {
                 if (!await Task.Run(() => s.Sync.HandoverUnclaimedAsync(r, default))) return; // it took the drive
+                notTaken++;
             }
-            catch (Exception ex) { Log.Warn($"tray: checking the handover of {d.Name}: {ex.Message}"); return; }
+            catch (Exception ex) { Log.Warn($"tray: checking the handover of {d.Name}: {ex.Message}"); }
         }
+        if (notTaken < 2) return;
         Log.Warn($"tray: '{r.Name}' was given {d.Name} but has not taken it");
         Balloon(L.T($"{r.Name} לא לקח את הכונן", $"{r.Name} did not take the drive"),
             L.T($"הכונן הועבר ל־{r.Name}, אבל נראה שהוא כבר לא מחובר, ולכן כרגע אי אפשר לשמור קבצים באף מחשב. לחץ כאן כדי לקחת את הכונן בחזרה.",

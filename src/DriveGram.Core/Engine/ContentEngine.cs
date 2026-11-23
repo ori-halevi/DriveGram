@@ -596,7 +596,11 @@ public sealed class ContentEngine : IAsyncDisposable
         {
             // only "cannot reach Telegram" makes the next reads give up early, not one bad message
             Interlocked.Exchange(ref _lastReadFailure, Environment.TickCount64);
-            if (!_cts.IsCancellationRequested && !_waits.IsCancellationRequested) // not a drive being stopped
+            // the user is told only when Telegram did not answer at all (not for a bad reply from it), and
+            // never because the drive is being stopped
+            bool unreachable = ex is TimeoutException or OperationCanceledException or System.Net.Sockets.SocketException
+                               || ex.InnerException is System.Net.Sockets.SocketException;
+            if (unreachable && !_cts.IsCancellationRequested && !_waits.IsCancellationRequested)
                 try { RemoteUnreachable?.Invoke(); } catch (Exception e) { Log.Warn($"engine: listener failed: {e.Message}"); }
             throw;
         }
