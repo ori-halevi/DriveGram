@@ -73,12 +73,24 @@ public static class ShellIntegration
             foreach (var letter in drives.GetSubKeyNames())
             {
                 if (keep.Contains(letter.ToUpperInvariant())) continue;
+                if (IsDriveGramVolume(letter)) continue; // a DriveGram drive of another profile set, mounted now
                 using var icon = drives.OpenSubKey($@"{letter}\DefaultIcon");
                 if (icon?.GetValue("") is string path && path.Contains("drivegram", StringComparison.OrdinalIgnoreCase))
                     Registry.CurrentUser.DeleteSubKeyTree($@"{DrivesKey}\{letter}", throwOnMissingSubKey: false);
             }
         }
         catch (Exception ex) { Log.Warn($"drive icons: {ex.Message}"); }
+    }
+
+    /// <summary>Is a DriveGram drive mounted on this letter right now (any profile, any program copy)?</summary>
+    public static bool IsDriveGramVolume(string mountPoint)
+    {
+        try
+        {
+            var d = new DriveInfo(mountPoint.TrimEnd(':', '\\') + ":\\");
+            return d.IsReady && string.Equals(d.DriveFormat, "DriveGram", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { return false; }
     }
 
     public static void ClearDriveIcon(string mountPoint)

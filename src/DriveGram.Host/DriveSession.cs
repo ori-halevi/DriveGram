@@ -207,7 +207,9 @@ public sealed class DriveSession : IAsyncDisposable
                 var free = "TUVWXYZSRQPONMLKJIHGFED".FirstOrDefault(c => !LetterInUse(c) && !taken.Contains(c));
                 if (free == default) throw new MountFailedException(L.T("אין אות כונן פנויה.", "No free drive letter."));
                 letterNote = $"{mountPoint} → {free}:";
-                try { ShellIntegration.ClearDriveIcon(mountPoint); } catch { } // the other device must not wear our icon
+                // the other device must not wear our icon; but when it IS a DriveGram drive (another
+                // profile set, e.g. a test copy), its icon is its own and stays
+                try { if (!ShellIntegration.IsDriveGramVolume(mountPoint)) ShellIntegration.ClearDriveIcon(mountPoint); } catch { }
                 mountPoint = $"{free}:"; // this run only: next start tries the usual letter again
             }
         }
