@@ -19,11 +19,21 @@ sealed class WelcomePage : WizardPage
         "A drive in This PC whose files are stored, encrypted, in your Telegram account.");
     public override string NextText => L.T("בוא נתחיל", "Let's start");
 
+    readonly LinkLabel _language;
+
+    /// <summary>Only while nothing was set up yet (coming back here after a drive was created or chosen,
+    /// a restart would drop it).</summary>
+    public override Task EnterAsync()
+    {
+        _language.Visible = Ctx.State.Config.Channels is null && Ctx.CreatedDriveId is null;
+        return Task.CompletedTask;
+    }
+
     public WelcomePage(SetupContext ctx) : base(ctx)
     {
         var col = Theme.Column();
         // the other language, before anything is typed: the wizard opens again in it (and the app follows)
-        var language = new LinkLabel
+        var language = _language = new LinkLabel
         {
             Text = L.Hebrew ? "English" : "עברית", AutoSize = true, Font = Theme.Small, LinkColor = Theme.Accent,
             RightToLeft = L.Hebrew ? RightToLeft.No : RightToLeft.Yes, Margin = new Padding(0, 0, 0, 10),
@@ -756,6 +766,8 @@ sealed class DrivePage : WizardPage
         _driveRetry.Visible = false;
         _wasVanished = false;
         _selected = null;
+        _noneChosen = false;
+        _choices.Visible = false; // shown again by the list; stale after Back otherwise
         SetMode(Mode.Checking);
         try
         {
@@ -788,7 +800,10 @@ sealed class DrivePage : WizardPage
                     _pw.SelectAll();
                     return;
                 }
-                _error.Text = L.T($"הכונן \"{want.Name}\" כבר לא זמין לחיבור. אפשר לבחור כונן אחר.", $"The drive \"{want.Name}\" can no longer be connected. You can choose another one.");
+                ShowChoices(candidates); // selects a default, which clears the error line: the note comes after
+                _error.Text = L.T($"הכונן \"{want.Name}\" כבר לא זמין לחיבור (אולי הוא כבר מחובר, או שהוסר). אפשר לבחור כונן אחר, או ללחוץ \"ביטול\" כדי לדלג עליו.",
+                    $"The drive \"{want.Name}\" can no longer be connected (perhaps it is connected already, or was removed). You can choose another one, or press \"Cancel\" to skip it.");
+                return;
             }
             ShowChoices(candidates);
         }
@@ -926,6 +941,9 @@ sealed class DrivePage : WizardPage
     /// this one, before anything queued earlier. Going Back and Next again replaces what this page queued.</summary>
     void EnqueueTheRest(string pw)
     {
+        // Back to this page after its drive was created or connected: it reopened that drive (no list was
+        // shown), so what was queued the first time stays as it is
+        if (_mode == Mode.Connect && _selected is null) return;
         foreach (var e in _enqueued) Ctx.Queue.Remove(e);
         _enqueued = [];
         if (!Multi || Ctx.Account is not { } account) return;

@@ -526,7 +526,14 @@ sealed class TrayApp : ApplicationContext
     /// added in the same sitting, on the same account (each run adds one; the queue continues after it).</summary>
     async Task SetupAsync(DriveController? d, Setup.NextDrive? next = null, List<Setup.NextDrive>? queue = null)
     {
-        if (_wizard is { IsDisposed: false }) { _wizard.Activate(); return; }
+        if (_wizard is { IsDisposed: false })
+        {
+            _wizard.Activate();
+            if (next is null) return;
+            // the next drive of a sitting, while another wizard is open: it waits for that one, not lost
+            while (_wizard is { IsDisposed: false } && !_quitting) await Task.Delay(500);
+            if (_quitting) return;
+        }
         bool wasMountedBefore = d?.Session is not null;
         if (d?.Session is not null)
         {
@@ -588,6 +595,9 @@ sealed class TrayApp : ApplicationContext
             if (keep != 1)
             {
                 result = DialogResult.OK;
+                saved.Config.NetworkDrive = true; // as the last page would have set it
+                saved.Config.MountPoint = FreeLetter(saved);
+                saved.Save();
                 if (_drives.Count == 0) try { ShellIntegration.SetAutostart(true); } catch { } // as the last page would have
             }
             else
@@ -615,6 +625,11 @@ sealed class TrayApp : ApplicationContext
             else if (wasMounted && d is { Session: null }) await MountAsync(d);
             else if (wasRetrying && d is { Session: null }) ScheduleRetry(d);
             UpdateIcon();
+            // one drive of a sitting was cancelled: the others are not dropped without asking
+            if (isNew && after.Count > 0 && !_quitting
+                && Ui.Ask(L.N(after.Count, "להמשיך לכונן הבא שסימנת?", "להמשיך ל־{0} הכוננים הנוספים שסימנת?",
+                              "Continue to the next drive you ticked?", "Continue to the {0} other drives you ticked?")) == DialogResult.Yes)
+                await SetupAsync(null, after[0], after.Skip(1).ToList());
             return;
         }
         if (_pendingSetup == d) _pendingSetup = null;
@@ -632,8 +647,9 @@ sealed class TrayApp : ApplicationContext
         }
         d.PendingKeys = wizardKeys;
         await MountAsync(d);
-        if (d.Session is null && !d.Starting && d.LastMountRefused && d.State.Config.NetworkDrive)
+        if (isNew && d.Session is null && !d.Starting && d.LastMountRefused && d.State.Config.NetworkDrive)
         {
+            d.PendingKeys = wizardKeys; // used up by the first attempt: never ask again for a password just typed
             // Windows refused a network drive on this PC (the wizard's default): a regular disk instead, and
             // say so; if that is refused too, the type was not the reason, so it is set back
             Log.Warn($"tray: {d.Name} could not connect as a network drive; trying a regular disk");
@@ -645,9 +661,9 @@ sealed class TrayApp : ApplicationContext
                     L.T("וינדוס לא איפשר לחבר אותו ככונן רשת במחשב הזה, ולכן הוא חובר כדיסק רגיל. אפשר לנסות שוב בתפריט של הכונן ← \"סוג הכונן\".",
                         "Windows did not allow it as a network drive on this PC, so it was connected as a regular disk. You can try again from the drive's menu → \"Drive type\"."),
                     ToolTipIcon.Warning, () => OpenDrive(d));
-            else if (!d.Starting)
+            else if (!d.Starting && d.LastMountRefused)
             {
-                d.State.Config.NetworkDrive = true;
+                d.State.Config.NetworkDrive = true; // refused as a disk too: the type was not the reason
                 d.State.Save();
             }
         }
@@ -663,6 +679,17 @@ sealed class TrayApp : ApplicationContext
         // the next drive of this sitting (ticked together, or "add another drive"), once this one is up
         if (isNew && after.Count > 0 && !_quitting)
             await SetupAsync(null, after[0], after.Skip(1).ToList());
+    }
+
+    /// <summary>A letter no other drive uses and nothing occupies now (as the wizard's last page picks it).</summary>
+    static string FreeLetter(AppState s)
+    {
+        var inUse = DriveInfo.GetDrives().Select(x => char.ToUpperInvariant(x.Name[0])).ToHashSet();
+        var others = AppState.All().Where(a => a.Dir != s.Dir).Select(a => char.ToUpperInvariant(a.Config.MountPoint[0])).ToHashSet();
+        var current = char.ToUpperInvariant(s.Config.MountPoint[0]);
+        if (!others.Contains(current) && !inUse.Contains(current)) return $"{current}:";
+        var free = "TUVWXYZSRQPONMLKJIHGFED".FirstOrDefault(c => !others.Contains(c) && !inUse.Contains(c));
+        return free == default ? s.Config.MountPoint : $"{free}:";
     }
 
     /// <summary>Which drive a profile points at (account + channels + drive id).</summary>
