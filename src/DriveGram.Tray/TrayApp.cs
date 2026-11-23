@@ -649,23 +649,31 @@ sealed class TrayApp : ApplicationContext
         await MountAsync(d);
         if (isNew && d.Session is null && !d.Starting && d.LastMountRefused && d.State.Config.NetworkDrive)
         {
-            d.PendingKeys = wizardKeys; // used up by the first attempt: never ask again for a password just typed
-            // Windows refused a network drive on this PC (the wizard's default): a regular disk instead, and
-            // say so; if that is refused too, the type was not the reason, so it is set back
-            Log.Warn($"tray: {d.Name} could not connect as a network drive; trying a regular disk");
-            d.State.Config.NetworkDrive = false;
-            d.State.Save();
-            await MountAsync(d);
-            if (d.Session is not null)
-                Balloon(L.T("הכונן חובר כדיסק רגיל", "Connected as a regular disk"),
-                    L.T("וינדוס לא איפשר לחבר אותו ככונן רשת במחשב הזה, ולכן הוא חובר כדיסק רגיל. אפשר לנסות שוב בתפריט של הכונן ← \"סוג הכונן\".",
-                        "Windows did not allow it as a network drive on this PC, so it was connected as a regular disk. You can try again from the drive's menu → \"Drive type\"."),
-                    ToolTipIcon.Warning, () => OpenDrive(d));
-            else if (!d.Starting && d.LastMountRefused)
+            // Windows refused a network drive on this PC (the wizard's default). Never changed behind the
+            // user's back: they decide, knowing what a regular disk means (it can be changed later)
+            Log.Warn($"tray: {d.Name} could not connect as a network drive; asking whether to use a regular disk");
+            int choice = Ui.Choose(L.T(
+                    $"וינדוס לא איפשר לחבר את \"{d.Name}\" ככונן רשת במחשב הזה.\n\n" +
+                    "אפשר לחבר אותו כדיסק רגיל: הקבצים, ההצפנה והמהירות זהים. ההבדל: תוכנות גיבוי ואנטי־וירוס שסורקות את כל הדיסקים עלולות לנסות להוריד את כל הכונן מטלגרם. אפשר לנסות שוב כונן רשת בכל רגע, בתפריט של הכונן ← \"סוג הכונן\".\n\n" +
+                    "או להשאיר אותו לא מחובר כרגע (הוא נשאר ברשימה, ואפשר לחבר אותו או לשנות את הסוג מהתפריט).",
+                    $"Windows did not allow \"{d.Name}\" as a network drive on this PC.\n\n" +
+                    "It can be connected as a regular disk instead: files, encryption and speed are the same. The difference: backup and antivirus programs that scan all disks may try to download the whole drive from Telegram. You can try a network drive again at any time, from the drive's menu → \"Drive type\".\n\n" +
+                    "Or leave it disconnected for now (it stays in the list; connect it or change its type from the menu)."),
+                [L.T("חבר כדיסק רגיל", "Connect as a regular disk"), L.T("השאר לא מחובר", "Leave it disconnected")],
+                defaultIndex: 0, cancelIndex: 1, icon: MessageBoxIcon.Warning);
+            if (choice == 0 && _drives.Contains(d) && d.Session is null && !d.Starting)
             {
-                d.State.Config.NetworkDrive = true; // refused as a disk too: the type was not the reason
+                d.PendingKeys = wizardKeys; // used up by the first attempt: never ask again for a password just typed
+                d.State.Config.NetworkDrive = false;
                 d.State.Save();
+                await MountAsync(d);
+                if (d.Session is null && !d.Starting && d.LastMountRefused)
+                {
+                    d.State.Config.NetworkDrive = true; // refused as a disk too: the type was not the reason
+                    d.State.Save();
+                }
             }
+            else StopRetrying(d); // left disconnected, as chosen: no retry as a network drive behind the user's back
         }
         if (!string.IsNullOrEmpty(oldAccount) && oldAccount != d.State.Config.AccountKey)
             await TelegramAccounts.SignOutIfUnusedAsync(oldAccount);
