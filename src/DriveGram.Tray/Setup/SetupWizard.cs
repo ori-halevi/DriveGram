@@ -8,8 +8,11 @@ namespace DriveGram.Tray.Setup;
 /// A drive to add after the current one, in the same sitting and on the same account: an existing drive
 /// the user ticked too (Candidate), a new one (CreateNew), or "let me choose" (neither). PasswordHint is the
 /// password that opened the previous drive, tried first (drives often share one); kept in memory only.
+/// Verified: that password was already checked against this drive on the first page, so its run goes
+/// straight to its letter and name (Remember: the first page's "remember the password" choice).
 /// </summary>
-sealed record NextDrive(AccountInfo Account, DriveCandidate? Candidate, bool CreateNew, string? PasswordHint);
+sealed record NextDrive(AccountInfo Account, DriveCandidate? Candidate, bool CreateNew, string? PasswordHint,
+    bool Verified = false, bool Remember = true);
 
 /// <summary>State shared by the wizard pages: the profile, the Telegram client and what was decided.</summary>
 sealed class SetupContext : IDisposable

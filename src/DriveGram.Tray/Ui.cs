@@ -89,6 +89,9 @@ static class Ui
             return f.Choice;
         });
 
+    public static void Info(string text) =>
+        OnTop(owner => MessageBox.Show(owner, text, "DriveGram", MessageBoxButtons.OK, MessageBoxIcon.Information, MessageBoxDefaultButton.Button1, Options));
+
     public static void Error(string text) =>
         OnTop(owner => MessageBox.Show(owner, text, "DriveGram", MessageBoxButtons.OK, MessageBoxIcon.Error, MessageBoxDefaultButton.Button1, Options));
 }

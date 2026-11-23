@@ -32,6 +32,15 @@ sealed class DriveController
     public bool? ToldWritable;
     /// <summary>When the user was last told that Telegram cannot be reached for a file (Environment.TickCount64).</summary>
     public long ToldUnreachableAt;
+    // ── one "upload session": from the first file waiting to upload until everything is in Telegram ──
+    public bool Uploading;            // a session is running
+    public DateTime UploadSince;      // when it started
+    public long UploadedAtStart;      // the engine's byte counter then
+    public int MostFiles;             // the most files waiting at once (for "N files uploaded")
+    public bool ToldUploadStart;      // the "uploading, wait for the message" balloon was shown
+    public long SampleBytes;          // last sample of the byte counter, for the speed
+    public DateTime SampleAt;
+    public double Speed;              // bytes/s, smoothed
     /// <summary>Keys just unlocked in the setup wizard: the first mount uses them instead of asking again.</summary>
     public Keys? PendingKeys;
     /// <summary>The last mount failed because Windows refused it (not offline, not a password).</summary>
@@ -983,6 +992,28 @@ sealed class TrayApp : ApplicationContext
         UpdateIcon();
     }
 
+    /// <summary>Delete the local copies of files that are safely in Telegram, only when nothing waits here.</summary>
+    void FreeUpSpace(DriveController d)
+    {
+        if (d.Session is not { } s) return;
+        if (s.CacheClearBlocker() is { } why) { Ui.Info(why); return; }
+        long size = s.Status.CacheBytes;
+        if (size < 1 << 20) { Ui.Info(L.T("אין כרגע עותקים מקומיים שאפשר לפנות.", "There are no local copies to free right now.")); return; }
+        if (Ui.Ask(L.T(
+                $"יימחקו מהמחשב הזה עותקים מקומיים של קבצים מ־{d.Name}, בגודל {Ui.Size(size)}.\n\n" +
+                "הקבצים עצמם שמורים בטלגרם ולא נפגעים: כשתפתח אותם הם יורדו שוב. עד אז הם ייפתחו רק כשיש חיבור לאינטרנט.\n\nלפנות?",
+                $"Local copies of files from {d.Name} will be deleted from this PC ({Ui.Size(size)}).\n\n" +
+                "The files themselves are stored in Telegram and are not affected: they are downloaded again when you open them. Until then they open only with an internet connection.\n\nFree up the space?"),
+                icon: MessageBoxIcon.Question) != DialogResult.Yes) return;
+        try
+        {
+            long freed = s.ClearCache();
+            Balloon(L.T("פונה מקום", "Space freed"), L.T($"פונו {Ui.Size(freed)} במחשב הזה.", $"{Ui.Size(freed)} freed on this PC."), onClick: () => OpenDrive(d));
+        }
+        catch (InvalidOperationException ex) { Ui.Info(ex.Message); } // something started meanwhile
+        UpdateIcon();
+    }
+
     async Task ConfirmRecordAsync(DriveController d, DriveSession s)
     {
         if (Ui.Ask(L.T(
@@ -1212,7 +1243,8 @@ sealed class TrayApp : ApplicationContext
             : L.T("קריאה בלבד כרגע (בודק…)", "read-only for now (checking…)");
         var wait = s.WaitingUntil is { } until ? L.T($" · טלגרם ביקש להמתין עד {until:HH:mm}", $" · Telegram asked to wait until {until:HH:mm}") : "";
         if (st.PendingFiles > 0 || st.UploadsInFlight > 0)
-            return L.T("מעלה: ", "uploading: ") + L.N(st.PendingFiles, "קובץ אחד", "{0} קבצים", "1 file", "{0} files") + $", {Ui.Size(st.StagedBytes)}" + wait;
+            return L.T("מעלה: ", "uploading: ") + L.N(st.PendingFiles, "קובץ אחד", "{0} קבצים", "1 file", "{0} files") + $", {Ui.Size(st.StagedBytes)}"
+                   + UploadProgress(d, st) + wait;
         if (s.Sync.UnsentChanges is > 0 and var unsent)
             return L.N(unsent, "שינוי אחד ממתין לשליחה לטלגרם", "{0} שינויים ממתינים לשליחה לטלגרם", "1 change waiting to be sent to Telegram", "{0} changes waiting to be sent to Telegram") + wait;
         return L.T("הכל שמור בטלגרם ✓", "everything is saved in Telegram ✓");
@@ -1247,6 +1279,7 @@ sealed class TrayApp : ApplicationContext
             item.DropDownItems.Add(Item(L.T("פתח את הכונן", "Open the drive"), () => OpenDrive(d), on, bold: true));
             item.DropDownItems.Add(Item(L.T("סל המחזור…", "Recycle bin…"), () => ShowTrash(d), on));
             item.DropDownItems.Add(Item(L.T("ייצוא כל הקבצים לתיקייה…", "Export every file to a folder…"), () => Export(d), on));
+            item.DropDownItems.Add(Item(L.T("פנה מקום במחשב הזה…", "Free up space on this PC…"), () => FreeUpSpace(d), on));
             item.DropDownItems.Add(new ToolStripSeparator());
             if (d.Session is null)
                 item.DropDownItems.Add(Item(L.T("חבר", "Connect"), async () => { if (d.NeedsSetup) await SetupAsync(d); else await MountAsync(d); },
@@ -1313,10 +1346,84 @@ sealed class TrayApp : ApplicationContext
     void UpdateIcon()
     {
         if (_quitting) return;
+        foreach (var d in _drives) TrackUploads(d);
         bool busy = _drives.Any(d => d.Busy || d.Starting || d.Stopping);
         _icon.Icon = busy ? _busy : _idle;
         if (_drives.Any(d => d.Stopping)) return; // the stop progress owns the tooltip
         SetTooltip(_drives.Count == 1 ? $"{_drives[0].Letter} {StatusOf(_drives[0])}" : Summary().Replace("\n", " | "));
+    }
+
+    DateTime _lastStartBalloon;
+
+    /// <summary>
+    /// Tells the user when a real upload starts ("wait for the message before disconnecting") and when
+    /// everything is in Telegram ("you can disconnect / shut down"), and keeps the speed for the time left.
+    /// </summary>
+    void TrackUploads(DriveController d)
+    {
+        if (d.Session is not { } s || d.Stopping) { d.Uploading = false; d.SampleAt = default; return; }
+        var st = s.Status;
+        var now = DateTime.UtcNow;
+        if (d.SampleAt != default && (now - d.SampleAt).TotalSeconds >= 1)
+        {
+            double inst = Math.Max(0, st.BytesUploaded - d.SampleBytes) / (now - d.SampleAt).TotalSeconds;
+            d.Speed = d.Speed <= 0 ? inst : d.Speed * 0.75 + inst * 0.25;
+        }
+        d.SampleBytes = st.BytesUploaded;
+        d.SampleAt = now;
+
+        bool busy = st.PendingFiles > 0 || st.UploadsInFlight > 0;
+        if (busy && !d.Uploading)
+        {
+            d.Uploading = true;
+            d.UploadSince = now;
+            d.UploadedAtStart = st.BytesUploaded;
+            d.MostFiles = 0;
+            d.ToldUploadStart = false;
+            d.Speed = 0;
+        }
+        if (busy)
+        {
+            d.MostFiles = Math.Max(d.MostFiles, st.PendingFiles);
+            // a real upload (not one small file saved in passing), and not a new balloon for every batch
+            bool real = st.StagedBytes >= 20L << 20 || now - d.UploadSince > TimeSpan.FromSeconds(15);
+            if (!d.ToldUploadStart && real && s.Writable && now - _lastStartBalloon > TimeSpan.FromMinutes(3))
+            {
+                d.ToldUploadStart = true;
+                _lastStartBalloon = now;
+                Balloon(L.T($"מעלה לטלגרם ({L.Ltr(d.Letter)})", $"Uploading to Telegram ({d.Letter})"),
+                    L.T("אפשר להמשיך לעבוד כרגיל. לפני שמנתקים את הכונן או מכבים את המחשב, חכה להודעה \"הכל שמור בטלגרם\".",
+                        "You can keep working as usual. Before disconnecting the drive or shutting down, wait for the \"everything is saved in Telegram\" message."));
+            }
+            return;
+        }
+        if (!d.Uploading || s.Sync.UnsentChanges > 0) return; // the last changes are still on their way
+        d.Uploading = false;
+        if (!d.ToldUploadStart && now - d.UploadSince < TimeSpan.FromSeconds(20)) return; // a short one: no news
+        long sent = Math.Max(0, st.BytesUploaded - d.UploadedAtStart);
+        Balloon(L.T("הכל שמור בטלגרם ✓", "Everything is saved in Telegram ✓"),
+            L.N(Math.Max(1, d.MostFiles), $"הקובץ עלה ({Ui.Size(sent)}). ", $"{{0}} קבצים עלו ({Ui.Size(sent)}). ",
+                    $"The file was uploaded ({Ui.Size(sent)}). ", $"{{0}} files were uploaded ({Ui.Size(sent)}). ")
+            + L.T("עכשיו אפשר לנתק את הכונן או לכבות את המחשב.", "You can now disconnect the drive or shut down the PC."),
+            onClick: () => OpenDrive(d));
+    }
+
+    /// <summary>", 45%, about 2 minutes left" for the running upload (empty while there is no estimate yet).</summary>
+    static string UploadProgress(DriveController d, DriveGram.Engine.EngineStatus st)
+    {
+        if (!d.Uploading) return "";
+        long done = Math.Max(0, st.BytesUploaded - d.UploadedAtStart), left = st.StagedBytes;
+        if (done + left <= 0) return "";
+        int pct = (int)Math.Clamp(100 * done / (done + left), 0, 99);
+        var text = $", {pct}%";
+        if (d.Speed > 16 * 1024 && DateTime.UtcNow - d.UploadSince > TimeSpan.FromSeconds(6))
+        {
+            double sec = left / d.Speed;
+            text += sec < 60 ? L.T(", פחות מדקה", ", under a minute")
+                : sec < 3600 ? L.N((int)Math.Ceiling(sec / 60), ", עוד כדקה", ", עוד כ־{0} דקות", ", about a minute left", ", about {0} minutes left")
+                : L.N((int)Math.Round(sec / 3600), ", עוד כשעה", ", עוד כ־{0} שעות", ", about an hour left", ", about {0} hours left");
+        }
+        return text;
     }
 
     void SetTooltip(string text)

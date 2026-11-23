@@ -352,6 +352,32 @@ public sealed class DriveSession : IAsyncDisposable
     }
 
     public EngineStatus Status => Engine.Status;
+
+    /// <summary>
+    /// Null when the local copies may be cleared now; otherwise why not, in the user's words. Cleared only
+    /// when nothing waits here: a change that waited long is completed from these copies if Telegram lost
+    /// a piece of it, so they stay while anything is pending.
+    /// </summary>
+    public string? CacheClearBlocker()
+    {
+        var st = Engine.Status;
+        if (st.PendingFiles > 0 || st.UploadsInFlight > 0)
+            return L.T("יש קבצים שעוד עולים לטלגרם. אפשר לפנות מקום אחרי שהכל יעלה.", "Files are still uploading to Telegram. Space can be freed once everything is uploaded.");
+        if (Sync.UnsentChanges > 0)
+            return L.T("יש שינויים שעוד לא נשלחו לטלגרם. אפשר לפנות מקום אחרי שהם יישלחו.", "Some changes have not been sent to Telegram yet. Space can be freed once they are sent.");
+        if (Sync.HandingOver)
+            return L.T("הכונן עובר עכשיו למחשב אחר. נסה שוב בעוד רגע.", "The drive is being handed to another PC right now. Try again in a moment.");
+        return null;
+    }
+
+    /// <summary>Free the local copies (see CacheClearBlocker). Returns the bytes freed.</summary>
+    public long ClearCache()
+    {
+        if (CacheClearBlocker() is { } why) throw new InvalidOperationException(why);
+        long freed = Engine.ClearCache();
+        Log.Info($"cache cleared: {freed / 1048576.0:N0} MiB");
+        return freed;
+    }
     public bool Writable => Sync.Writable;
 
     /// <summary>Unmount; optionally wait until all uploads are done; give the lease back; close everything.</summary>

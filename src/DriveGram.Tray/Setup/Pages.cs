@@ -695,6 +695,18 @@ sealed class DrivePage : WizardPage
     /// <summary>Several drives can be ticked (a new drive in the usual sitting, or "another drive" without
     /// a drive chosen yet); changing an existing drive's settings, or a drive already chosen, is one drive.</summary>
     bool Multi => Ctx.IsNew && Ctx.UsesTelegram && Ctx.Current is not { Candidate: not null } and not { CreateNew: true };
+
+    // the other ticked drives' passwords, typed on this page (empty = the same as the first one)
+    readonly FlowLayoutPanel _others = Theme.Column();
+    readonly Dictionary<long, TextBox> _otherBoxes = [];
+    readonly Dictionary<long, string> _otherVerified = [];
+    bool _autoTried, _autoDone;
+    public override bool Skip => _autoDone;
+
+    // a new drive's piece size (fixed for the drive's life)
+    readonly RadioButton _chunk32 = new() { Text = L.T("32MB (מומלץ)", "32 MB (recommended)"), AutoSize = true, Checked = true, Margin = new Padding(0, 2, 0, 2) };
+    readonly RadioButton _chunk64 = new() { Text = "64MB", AutoSize = true, Margin = new Padding(0, 2, 0, 2) };
+    readonly FlowLayoutPanel _chunkBox = Theme.Column();
     IRemote? _remote;
 
     public override string Title => L.T("הכונן", "The drive");
@@ -742,7 +754,23 @@ sealed class DrivePage : WizardPage
             Theme.Small, Theme.Text, 640));
         _name.RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No;
         _name.Font = Theme.Body;
-        _form.Controls.AddRange([_intro, _nameLabel, _name, grid, _strength, _show, _warning, _saved, _remember, _rememberNote, _error]);
+        var chunkTitle = Theme.Label(L.T("גודל החתיכות בטלגרם:", "Piece size in Telegram:"), Theme.Small, Theme.Muted);
+        chunkTitle.Margin = new Padding(0, 8, 0, 2);
+        var chunkRow = Theme.Row();
+        var chunkWhy = new LinkLabel { Text = L.T("מה ההבדל?", "What is the difference?"), AutoSize = true, Font = Theme.Body, LinkColor = Theme.Accent, Margin = new Padding(12, 4, 12, 2) };
+        chunkWhy.LinkClicked += (_, _) => Ui.Info(L.T(
+            "כל קובץ נשמר בטלגרם בחתיכות בגודל קבוע. המהירות כמעט זהה בשני הגדלים: כל חתיכה עולה בחלקים קטנים, כמה במקביל.\n\n" +
+            "32MB (מומלץ): מתאים לכל שימוש, ובמיוחד כשעורכים קבצים גדולים בתוך הכונן (וידאו, ‏Outlook, מכונות וירטואליות): שינוי קטן מוריד ומעלה מחדש עד 32MB. פחות זיכרון ופחות מקום זמני במחשב.\n\n" +
+            "64MB: מתאים לכונן שרק מעתיקים אליו קבצים גדולים מאוד ולא עורכים אותם (ארכיון, גיבויים): חצי מכמות הפניות לטלגרם. אבל כל שינוי בקובץ קיים מוריד ומעלה מחדש עד 64MB, ודורש יותר זיכרון ומקום זמני.\n\n" +
+            "אי אפשר לשנות את זה אחרי שהכונן נוצר.",
+            "Every file is stored in Telegram in pieces of a fixed size. Speed is about the same with both: each piece is uploaded in small parts, several at once.\n\n" +
+            "32 MB (recommended): suits every use, especially editing large files inside the drive (video, Outlook, virtual machines): a small change downloads and uploads again at most 32 MB. Less memory and less temporary space on this PC.\n\n" +
+            "64 MB: suits a drive you only copy very large files into and do not edit (an archive, backups): half as many requests to Telegram. But any change to an existing file downloads and uploads again up to 64 MB, and needs more memory and temporary space.\n\n" +
+            "It cannot be changed after the drive is created."));
+        chunkRow.Controls.AddRange([_chunk32, _chunk64, chunkWhy]);
+        _chunkBox.Controls.AddRange([chunkTitle, chunkRow]);
+
+        _form.Controls.AddRange([_intro, _nameLabel, _name, grid, _strength, _show, _others, _chunkBox, _warning, _saved, _remember, _rememberNote, _error]);
         _form.Visible = false;
 
         col.Controls.AddRange([_checking, _driveRetry, _connected, _vanished, _choices, _form]);
@@ -750,7 +778,11 @@ sealed class DrivePage : WizardPage
         _driveRetry.Click += async (_, _) => { Ctx.ResetClient(signOut: false); await EnterAsync(); };
         SetContent(col);
 
-        _show.CheckedChanged += (_, _) => _pw.UseSystemPasswordChar = _pw2.UseSystemPasswordChar = !_show.Checked;
+        _show.CheckedChanged += (_, _) =>
+        {
+            _pw.UseSystemPasswordChar = _pw2.UseSystemPasswordChar = !_show.Checked;
+            foreach (var b in _otherBoxes.Values) b.UseSystemPasswordChar = !_show.Checked;
+        };
         _pw.TextChanged += (_, _) => UpdateState();
         _pw2.TextChanged += (_, _) => UpdateState();
         _name.TextChanged += (_, _) => UpdateState();
@@ -767,6 +799,7 @@ sealed class DrivePage : WizardPage
         _wasVanished = false;
         _selected = null;
         _noneChosen = false;
+        _autoDone = false;
         _choices.Visible = false; // shown again by the list; stale after Back otherwise
         SetMode(Mode.Checking);
         try
@@ -798,6 +831,15 @@ sealed class DrivePage : WizardPage
                     Select(found);
                     _pw.Text = Ctx.Current.PasswordHint ?? "";
                     _pw.SelectAll();
+                    _remember.Checked = Ctx.Current.Remember;
+                    if (Ctx.Current.Verified && !_autoTried)
+                    {
+                        // its password was typed and checked with the first drive: no second password window.
+                        // Only once: coming Back here shows the page as usual.
+                        _autoTried = true;
+                        try { _autoDone = await NextAsync(); }
+                        catch (Exception ex) { _error.Text = TelegramErrors.Text(ex); }
+                    }
                     return;
                 }
                 ShowChoices(candidates); // selects a default, which clears the error line: the note comes after
@@ -937,6 +979,63 @@ sealed class DrivePage : WizardPage
         else SetMode(Mode.Connect);
     }
 
+    /// <summary>One password box per other ticked drive, under the first one's (empty: the same password).</summary>
+    void BuildOthers()
+    {
+        var rest = _mode == Mode.Connect && Multi ? Ticked.Skip(1).Where(c => c.Channels is not null).ToList() : [];
+        _others.Visible = rest.Count > 0;
+        var keep = _otherBoxes.ToDictionary(x => x.Key, x => x.Value.Text);
+        _others.Controls.Clear();
+        _otherBoxes.Clear();
+        if (rest.Count == 0) return;
+        var head = Theme.Label(L.T("הסיסמאות של שאר הכוננים שסימנת (השאר ריק אם הסיסמה זהה לזו שלמעלה):",
+            "The passwords of the other drives you ticked (leave empty if it is the same as above):"), Theme.Small, Theme.Muted, 640);
+        head.Margin = new Padding(0, 10, 0, 4);
+        _others.Controls.Add(head);
+        foreach (var c in rest)
+        {
+            var id = c.Channels!.JournalId;
+            _others.Controls.Add(Theme.Label(L.Name(c.Name), Theme.Small, Theme.Text));
+            var box = Theme.Input(290, password: true);
+            box.PlaceholderText = L.T("כמו הסיסמה למעלה", "same as above");
+            box.Text = keep.GetValueOrDefault(id, "");
+            box.UseSystemPasswordChar = !_show.Checked;
+            _otherBoxes[id] = box;
+            _others.Controls.Add(box);
+        }
+    }
+
+    /// <summary>The other ticked drives' passwords, checked now: a wrong one is said here, not in a later window.</summary>
+    async Task<bool> CheckOtherPasswordsAsync(string first)
+    {
+        _otherVerified.Clear();
+        if (!Multi) return true;
+        foreach (var c in Ticked.Skip(1))
+        {
+            if (c.Channels is not { } ch || !_otherBoxes.TryGetValue(ch.JournalId, out var box)) continue;
+            var pw = box.Text.Length > 0 ? box.Text : first;
+            var remote = await Task.Run(() => TelegramRemote.OpenAsync(Ctx.GetClient(), ch, ownsClient: false));
+            try
+            {
+                var ctrl = await SyncService.ReadControlAsync(remote, default);
+                if (ctrl is null) continue; // its own run will say what is wrong
+                try { await Task.Run(() => Keys.UnlockAny(ctrl.Vault, pw)); }
+                catch (WrongPasswordException)
+                {
+                    _error.Text = box.Text.Length > 0
+                        ? L.T($"הסיסמה של \"{c.Name}\" שגויה.", $"The password of \"{c.Name}\" is wrong.")
+                        : L.T($"הסיסמה שלמעלה לא פותחת את \"{c.Name}\". הקלד את הסיסמה שלו בשדה שלו.", $"The password above does not open \"{c.Name}\". Type its own password in its box.");
+                    box.SelectAll();
+                    box.Focus();
+                    return false;
+                }
+                _otherVerified[ch.JournalId] = pw;
+            }
+            finally { await remote.DisposeAsync(); }
+        }
+        return true;
+    }
+
     /// <summary>The other ticked drives (and a new one, if ticked next to existing ones) come right after
     /// this one, before anything queued earlier. Going Back and Next again replaces what this page queued.</summary>
     void EnqueueTheRest(string pw)
@@ -947,8 +1046,12 @@ sealed class DrivePage : WizardPage
         foreach (var e in _enqueued) Ctx.Queue.Remove(e);
         _enqueued = [];
         if (!Multi || Ctx.Account is not { } account) return;
-        foreach (var c in Ticked.Skip(_mode == Mode.Connect ? 1 : 0)) _enqueued.Add(new NextDrive(account, c, false, pw));
-        if (_newTick?.Checked == true && _mode == Mode.Connect) _enqueued.Add(new NextDrive(account, null, true, pw));
+        foreach (var c in Ticked.Skip(_mode == Mode.Connect ? 1 : 0))
+        {
+            bool known = c.Channels is { } ch && _otherVerified.ContainsKey(ch.JournalId);
+            _enqueued.Add(new NextDrive(account, c, false, known ? _otherVerified[c.Channels!.JournalId] : pw, known, _remember.Checked));
+        }
+        if (_newTick?.Checked == true && _mode == Mode.Connect) _enqueued.Add(new NextDrive(account, null, true, pw, Remember: _remember.Checked));
         Ctx.Queue.InsertRange(0, _enqueued);
     }
 
@@ -963,6 +1066,7 @@ sealed class DrivePage : WizardPage
                 new DriveCandidate("b", "Photos", new TelegramChannels(3, 3, 4, 4), true, true, true),
                 new DriveCandidate("c", "DriveGram", new TelegramChannels(5, 5, 6, 6), false, true, false)]);
             _pw.Text = "secret";
+            if (_ticks.Count > 1) _ticks[1].Checked = true; // two drives: shows the second one's password box
             return;
         }
         _choices.Visible = false;
@@ -984,7 +1088,8 @@ sealed class DrivePage : WizardPage
         _form.Visible = mode is Mode.Connect or Mode.Create;
         bool create = mode == Mode.Create;
         _nameLabel.Visible = _name.Visible = create && Ctx.UsesTelegram;
-        _confirmLabel.Visible = _pw2.Visible = _strength.Visible = _warning.Visible = _saved.Visible = create;
+        _confirmLabel.Visible = _pw2.Visible = _strength.Visible = _warning.Visible = _saved.Visible = _chunkBox.Visible = create;
+        BuildOthers();
         _intro.Text = create
             ? L.T("בחר סיסמה לכונן, לפחות 10 תווים. היא מצפינה כל קובץ לפני שהוא עולה לטלגרם.",
                   "Choose a drive password, at least 10 characters. It encrypts every file before it goes to Telegram.")
@@ -995,7 +1100,7 @@ sealed class DrivePage : WizardPage
             ? L.T($"הקלד את הסיסמה של \"{_selected.Name}\" (או את מפתח השחזור שלו). אם יש לו אותה סיסמה כמו לכונן הקודם, היא כבר כתובה כאן.",
                   $"Enter the password of \"{_selected.Name}\" (or its recovery key). If it is the same as the previous drive's, it is already filled in.")
             : L.T("הקלד את הסיסמה של הכונן (או את מפתח השחזור שלו) כדי לחבר אליו את המחשב הזה.", "Enter the drive's password (or its recovery key) to connect this PC to it.");
-        int later = Multi ? Ticked.Count + (_newTick?.Checked == true ? 1 : 0) - 1 : 0;
+        int later = Multi && mode == Mode.Connect ? Ticked.Count + (_newTick?.Checked == true ? 1 : 0) - 1 : 0;
         if (later > 0)
         {
             var first = _selected?.Name ?? L.T("הכונן החדש", "the new drive");
@@ -1112,6 +1217,8 @@ sealed class DrivePage : WizardPage
             _wasVanished = false;
         }
 
+        if (_mode == Mode.Connect && !await CheckOtherPasswordsAsync(pw)) return false;
+
         Keys keys;
         if (_mode == Mode.Create)
         {
@@ -1130,7 +1237,8 @@ sealed class DrivePage : WizardPage
                 cfg.VolumeLabel = name;
             }
             var remote = _remote!;
-            keys = await Task.Run(() => SyncService.CreateDriveAsync(remote, pw, default, identity: identity));
+            int chunkSize = _chunk64.Checked ? 64 << 20 : Keys.DefaultChunkSize;
+            keys = await Task.Run(() => SyncService.CreateDriveAsync(remote, pw, default, chunkSize: chunkSize, identity: identity));
             ResetIfRebinding();
             DriveSession.MarkNewDrive(Ctx.State); // its first start adds the note about the risks
             Log.Info($"setup: created drive '{cfg.VolumeLabel}' ({Ctx.State.Id})");

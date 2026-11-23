@@ -551,6 +551,13 @@ public sealed class ContentEngine : IAsyncDisposable
 
     readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _verifiedPlain = new();
 
+    /// <summary>Free the disk space of the local copies (cache only: never a file waiting to upload).</summary>
+    public long ClearCache()
+    {
+        _verifiedPlain.Clear();
+        return _cache.Clear();
+    }
+
     /// <summary>A cached plaintext chunk, checked against its hash the first time this session uses it
     /// (a power cut can leave a cache file with zeros where data should be).</summary>
     string? TrustedPlain(string chunkId, string hash)

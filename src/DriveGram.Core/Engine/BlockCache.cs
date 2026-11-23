@@ -99,6 +99,24 @@ public sealed class BlockCache
 
     public string? TryGetPlain(string chunkId) => Touch("p/" + chunkId);
 
+    /// <summary>Drop every cached copy (all of it is stored in Telegram too). A read that was about to use
+    /// one simply fetches it again. Returns the bytes freed.</summary>
+    public long Clear()
+    {
+        List<string> victims;
+        long freed;
+        lock (_gate)
+        {
+            victims = _lru.Select(e => e.Path).ToList();
+            freed = _bytes;
+            _lru.Clear();
+            _map.Clear();
+            _bytes = 0;
+        }
+        foreach (var v in victims) TryDelete(v);
+        return freed;
+    }
+
     /// <summary>Take ownership of a staged plaintext piece as the cached copy of a committed chunk.</summary>
     public void AdoptPlain(string chunkId, string sourcePath)
     {
