@@ -36,6 +36,9 @@ sealed class DriveController
     public Keys? PendingKeys;
     /// <summary>The last mount failed because Windows refused it (not offline, not a password).</summary>
     public bool LastMountRefused;
+    /// <summary>A refused mount is explained by the caller (a new network drive: the user is asked what to
+    /// do), so no "could not connect, is the letter taken?" balloon first.</summary>
+    public bool QuietRefusal;
     /// <summary>Files kept as "(incomplete)" waiting for one shared balloon.</summary>
     public readonly List<(string Orig, string Kept, string Folder)> Incomplete = [];
 
@@ -220,7 +223,7 @@ sealed class TrayApp : ApplicationContext
         {
             d.LastMountRefused = true;
             d.Problem = Short(ex.Message);
-            Balloon(L.T("לא ניתן לחבר את הכונן", "The drive could not be connected"), ex.Message, ToolTipIcon.Error,
+            if (!d.QuietRefusal) Balloon(L.T("לא ניתן לחבר את הכונן", "The drive could not be connected"), ex.Message, ToolTipIcon.Error,
                 () => _ = SetupAsync(d)); // the message suggests another letter in the settings
         }
         catch (NotSignedInException)
@@ -646,7 +649,9 @@ sealed class TrayApp : ApplicationContext
             d = fresh;
         }
         d.PendingKeys = wizardKeys;
-        await MountAsync(d);
+        d.QuietRefusal = isNew && d.State.Config.NetworkDrive; // a refusal is followed by a question, not a balloon
+        try { await MountAsync(d); }
+        finally { d.QuietRefusal = false; }
         if (isNew && d.Session is null && !d.Starting && d.LastMountRefused && d.State.Config.NetworkDrive)
         {
             // Windows refused a network drive on this PC (the wizard's default). Never changed behind the
