@@ -6,7 +6,7 @@
 
 #define AppName "DriveGram"
 #ifndef AppVersion
-  #define AppVersion "1.0.3"
+  #define AppVersion "1.0.4"
 #endif
 #define WinFspMsi "winfsp-2.1.25156.msi"
 
