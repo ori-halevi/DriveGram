@@ -292,7 +292,7 @@ async Task<int> Login()
         }
         user = client.User!;
     }
-    else user = await client.LoginWithQRCode(ShowQr, logoutFirst: false);
+    else user = await client.LoginWithQRCode((url, _) => ShowQr(url), logoutFirst: false);
     using (DriveGram.Host.TelegramAccounts.Adopt(state, lease, user)) { }  // the account's shared sign-in
     state.Save();
     Console.WriteLine($"Signed in as {user.first_name} {user.last_name} (@{user.username}). The session is stored encrypted for this Windows user only.");

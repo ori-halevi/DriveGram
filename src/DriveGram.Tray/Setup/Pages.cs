@@ -460,7 +460,7 @@ sealed class LoginPage : WizardPage
         try
         {
             var client = Ctx.GetClient();
-            var user = await Task.Run(() => client.LoginWithQRCode(url => BeginInvoke(() => ShowQr(url)), logoutFirst: false, ct: ct), ct);
+            var user = await Task.Run(() => client.LoginWithQRCode((url, expires) => BeginInvoke(() => ShowQr(url, expires)), logoutFirst: false, ct: ct), ct);
             await Task.Run(() => Ctx.AdoptSignIn(user));
             ShowSignedIn(user);
         }
@@ -482,7 +482,9 @@ sealed class LoginPage : WizardPage
         }
     }
 
-    void ShowQr(string url)
+    /// <param name="expires">when Telegram replaces this code (the library waits until then by this PC's
+    /// clock, so the countdown matches the real refresh)</param>
+    void ShowQr(string url, DateTime? expires = null)
     {
         using var gen = new QRCodeGenerator();
         using var data = gen.CreateQrCode(url, QRCodeGenerator.ECCLevel.M);
@@ -491,8 +493,12 @@ sealed class LoginPage : WizardPage
         var old = _qrImage.Image;
         _qrImage.Image = new Bitmap(img);
         old?.Dispose();
-        _qrExpires = DateTime.UtcNow.AddSeconds(30);
-        _qrState.Text = L.T("ממתין לסריקה… הקוד מתחדש בעוד 30 שניות.", "Waiting for the scan… a new code in 30 seconds.");
+        var until = expires is { } e ? (e.Kind == DateTimeKind.Local ? e.ToUniversalTime() : e) : DateTime.UtcNow.AddSeconds(30);
+        var left = (int)Math.Ceiling((until - DateTime.UtcNow).TotalSeconds);
+        if (left is < 1 or > 300) { until = DateTime.UtcNow.AddSeconds(30); left = 30; } // never a strange countdown
+        _qrExpires = until;
+        _qrState.Text = L.N(left, "ממתין לסריקה… הקוד מתחדש בעוד שנייה.", "ממתין לסריקה… הקוד מתחדש בעוד {0} שניות.",
+            "Waiting for the scan… a new code in 1 second.", "Waiting for the scan… a new code in {0} seconds.");
     }
 
     /// <summary>The library asks for the 2FA password on a worker thread during QR sign-in.</summary>
