@@ -4,6 +4,13 @@ using DriveGram.Remote;
 
 namespace DriveGram.Tray.Setup;
 
+/// <summary>
+/// A drive to add after the current one, in the same sitting and on the same account: an existing drive
+/// the user ticked too (Candidate), a new one (CreateNew), or "let me choose" (neither). PasswordHint is the
+/// password that opened the previous drive, tried first (drives often share one); kept in memory only.
+/// </summary>
+sealed record NextDrive(AccountInfo Account, DriveCandidate? Candidate, bool CreateNew, string? PasswordHint);
+
 /// <summary>State shared by the wizard pages: the profile, the Telegram client and what was decided.</summary>
 sealed class SetupContext : IDisposable
 {
@@ -18,6 +25,19 @@ sealed class SetupContext : IDisposable
     public DriveGram.Crypto.Keys? UnlockedKeys { get; set; }
     /// <summary>Set when THIS wizard created a new drive in Telegram (only such a drive may be deleted on cancel).</summary>
     public string? CreatedDriveId { get; set; }
+    /// <summary>This run continues a sitting: which drive it is for (null: an ordinary run).</summary>
+    public NextDrive? Current { get; init; }
+    /// <summary>Drives still to add after this one (filled by the drive page and the last page).</summary>
+    public List<NextDrive> Queue { get; init; } = [];
+    /// <summary>The password that opened (or created) this run's drive, for the next drives in the queue.</summary>
+    public string? LastPassword { get; set; }
+    /// <summary>The user chose another language on the first page: open the wizard again in it.</summary>
+    public bool RestartForLanguage { get; set; }
+    /// <summary>The account this run's drive is on, to add more drives on it without a new sign-in.</summary>
+    public AccountInfo? Account => UsesTelegram && !string.IsNullOrEmpty(State.Config.AccountKey)
+        ? new AccountInfo(State.Config.AccountKey, State.Config.AccountId, State.Config.AccountName, State.Config.ApiId, State.Config.ApiHash)
+        : null;
+
     /// <summary>Answers a 2FA prompt during QR sign-in (set by the login page).</summary>
     public Func<string?>? AskPassword { get; set; }
 
@@ -169,10 +189,14 @@ sealed class SetupWizard : Form
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public string? SnapshotDir { get; init; }
 
-    public SetupWizard(AppState state, bool isNew, TelegramChannels? originalChannels = null)
+    public SetupWizard(AppState state, bool isNew, TelegramChannels? originalChannels = null,
+        NextDrive? next = null, List<NextDrive>? queue = null)
     {
-        _ctx = new SetupContext(state, isNew, originalChannels);
-        Text = isNew ? L.T("DriveGram – כונן חדש", "DriveGram – new drive") : L.T($"DriveGram – הגדרות הכונן {Ui.DriveTitle(state)}", $"DriveGram – drive settings: {state.DisplayName}");
+        _ctx = new SetupContext(state, isNew, originalChannels) { Current = next, Queue = queue ?? [] };
+        if (next is not null) _ctx.UseAccount(next.Account); // the same account: no API details, no sign-in
+        int more = next is null ? 0 : _ctx.Queue.Count;
+        Text = next is not null ? L.T("DriveGram – כונן נוסף", "DriveGram – another drive") + (more > 0 ? L.N(more, " (ועוד אחד אחריו)", " (ועוד {0} אחריו)", " (1 more after it)", " ({0} more after it)") : "")
+            : isNew ? L.T("DriveGram – כונן חדש", "DriveGram – new drive") : L.T($"DriveGram – הגדרות הכונן {Ui.DriveTitle(state)}", $"DriveGram – drive settings: {state.DisplayName}");
         RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No;
         RightToLeftLayout = L.Rtl;
         Font = Theme.Body;
@@ -184,10 +208,11 @@ sealed class SetupWizard : Form
         var icon = Path.Combine(AppContext.BaseDirectory, "drivegram.ico");
         if (File.Exists(icon)) Icon = new Icon(icon);
 
-        List<WizardPage> pages = _ctx.UsesTelegram
+        List<WizardPage> pages = next is not null ? [new DrivePage(_ctx), new FinishPage(_ctx)] // the account is known already
+            : _ctx.UsesTelegram
             ? [new WelcomePage(_ctx), new ApiPage(_ctx), new LoginPage(_ctx), new DrivePage(_ctx), new FinishPage(_ctx)]
             : [new WelcomePage(_ctx), new DrivePage(_ctx), new FinishPage(_ctx)];
-        if (!isNew) pages.RemoveAt(0); // changing a drive's settings: no welcome tour
+        if (!isNew && next is null) pages.RemoveAt(0); // changing a drive's settings: no welcome tour
         _pages = pages;
         foreach (var p in _pages) p.StateChanged += UpdateButtons;
 
@@ -339,6 +364,17 @@ sealed class SetupWizard : Form
         _busy = busy;
         UseWaitCursor = busy;
         UpdateButtons();
+    }
+
+    /// <summary>The first page's language link: close and open again in the other language (nothing was
+    /// entered yet on that page, so nothing is lost).</summary>
+    public void SwitchLanguage()
+    {
+        if (_busy) return;
+        L.Set(L.Hebrew ? "en" : "he");
+        _ctx.RestartForLanguage = true;
+        DialogResult = DialogResult.Cancel;
+        Close();
     }
 
     void UpdateButtons()

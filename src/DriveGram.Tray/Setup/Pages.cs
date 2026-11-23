@@ -22,6 +22,14 @@ sealed class WelcomePage : WizardPage
     public WelcomePage(SetupContext ctx) : base(ctx)
     {
         var col = Theme.Column();
+        // the other language, before anything is typed: the wizard opens again in it (and the app follows)
+        var language = new LinkLabel
+        {
+            Text = L.Hebrew ? "English" : "עברית", AutoSize = true, Font = Theme.Small, LinkColor = Theme.Accent,
+            RightToLeft = L.Hebrew ? RightToLeft.No : RightToLeft.Yes, Margin = new Padding(0, 0, 0, 10),
+        };
+        language.LinkClicked += (_, _) => (FindForm() as SetupWizard)?.SwitchLanguage();
+        col.Controls.Add(language);
         bool another = ctx.IsNew && AppState.All().Count > 0;
         if (another)
             col.Controls.Add(Theme.Label(L.T(
@@ -32,9 +40,9 @@ sealed class WelcomePage : WizardPage
             ? [L.T("פרטי API של טלגרם (מזהה חינמי שכל תוכנה צריכה)", "Telegram API details (a free ID every app needs)"),
                L.T("התחברות לחשבון: סריקת קוד QR מהטלפון, או קוד שטלגרם שולח", "Sign in: scan a QR code with your phone, or type a code Telegram sends you"),
                L.T("סיסמה לכונן: מצפינה הכל, ורק אתה יודע אותה", "A drive password: it encrypts everything, only you know it"),
-               L.T("אות לכונן והפעלה אוטומטית עם וינדוס", "A drive letter, and starting with Windows")]
+               L.T("אות לכונן, סוג הכונן, והפעלה אוטומטית עם וינדוס", "A drive letter, the drive type, and starting with Windows")]
             : [L.T("סיסמה לכונן (מצב ניסיון: הקבצים נשמרים בתיקייה מקומית)", "A drive password (trial mode: files are kept in a local folder)"),
-               L.T("אות לכונן והפעלה אוטומטית עם וינדוס", "A drive letter, and starting with Windows")];
+               L.T("אות לכונן, סוג הכונן, והפעלה אוטומטית עם וינדוס", "A drive letter, the drive type, and starting with Windows")];
         for (int i = 0; i < steps.Length; i++)
             col.Controls.Add(Theme.Label($"  {i + 1}.  {steps[i]}", maxWidth: 640)); // one line each (a wrapped line lost its indent)
 
@@ -668,7 +676,15 @@ sealed class DrivePage : WizardPage
     Mode _mode = Mode.Checking;
     bool _wasVanished;
     DriveCandidate? _selected;   // null while "a new drive" is chosen
+    bool _noneChosen;            // several-drives list with nothing ticked
+    readonly List<CheckBox> _ticks = [];
+    CheckBox? _newTick;
+    List<NextDrive> _enqueued = [];
     ControlState? _ctrl;
+
+    /// <summary>Several drives can be ticked (a new drive in the usual sitting, or "another drive" without
+    /// a drive chosen yet); changing an existing drive's settings, or a drive already chosen, is one drive.</summary>
+    bool Multi => Ctx.IsNew && Ctx.UsesTelegram && Ctx.Current is not { Candidate: not null } and not { CreateNew: true };
     IRemote? _remote;
 
     public override string Title => L.T("הכונן", "The drive");
@@ -760,6 +776,20 @@ sealed class DrivePage : WizardPage
             }
 
             var candidates = await Task.Run(() => TelegramRemote.DiscoverAsync(client));
+            if (Ctx.Current is { CreateNew: true }) { Select(null); return; }
+            if (Ctx.Current is { Candidate: { Channels: { } wanted } want })
+            {
+                // a drive ticked earlier in this sitting: straight to its password (the previous one is tried first)
+                var found = candidates.FirstOrDefault(c => c.Channels?.JournalId == wanted.JournalId && c.HasVault);
+                if (found is not null && !OnThisPc().ContainsKey(wanted.JournalId))
+                {
+                    Select(found);
+                    _pw.Text = Ctx.Current.PasswordHint ?? "";
+                    _pw.SelectAll();
+                    return;
+                }
+                _error.Text = L.T($"הכונן \"{want.Name}\" כבר לא זמין לחיבור. אפשר לבחור כונן אחר.", $"The drive \"{want.Name}\" can no longer be connected. You can choose another one.");
+            }
             ShowChoices(candidates);
         }
         catch (Exception ex)
@@ -792,12 +822,17 @@ sealed class DrivePage : WizardPage
         _remote = remote;
     }
 
-    /// <summary>One radio button per drive found, plus "a new drive".</summary>
+    Dictionary<long, string> OnThisPc() => AppState.All().Where(a => a.Dir != Ctx.State.Dir && a.Config.Channels is not null)
+        .GroupBy(a => a.Config.Channels!.JournalId).ToDictionary(g => g.Key, g => g.First().Config.MountPoint);
+
+    /// <summary>One radio button per drive found, plus "a new drive" (check boxes when several may be chosen).</summary>
     void ShowChoices(List<DriveCandidate> candidates)
     {
         _choices.Controls.Clear();
-        var onThisPc = AppState.All().Where(a => a.Dir != Ctx.State.Dir && a.Config.Channels is not null)
-            .ToDictionary(a => a.Config.Channels!.JournalId, a => a.Config.MountPoint);
+        _ticks.Clear();
+        _newTick = null;
+        var onThisPc = OnThisPc();
+        if (Multi) { ShowTicks(candidates, onThisPc); return; }
         RadioButton? first = null;
         if (candidates.Count > 0)
             _choices.Controls.Add(Theme.Label(L.T("כוננים שהחשבון הזה יכול לפתוח:", "Drives this account can open:"), Theme.Heading));
@@ -816,6 +851,53 @@ sealed class DrivePage : WizardPage
         _choices.Visible = true;
         (first ?? create).Checked = true;
         if (_wasVanished) _vanished.Visible = true;
+    }
+
+    /// <summary>The same list with check boxes: any number of existing drives, and/or a new one. This run
+    /// handles the first; the others follow right after, each with its own letter and name.</summary>
+    void ShowTicks(List<DriveCandidate> candidates, Dictionary<long, string> onThisPc)
+    {
+        if (candidates.Count > 0)
+        {
+            _choices.Controls.Add(Theme.Label(L.T("כוננים שהחשבון הזה יכול לפתוח:", "Drives this account can open:"), Theme.Heading));
+            _choices.Controls.Add(Theme.Label(L.T("אפשר לסמן כמה כוננים, וגם כונן חדש: הם יתחברו אחד אחרי השני, כל אחד עם האות והשם שלו.",
+                "You can tick several drives, and a new one too: they are added one after another, each with its own letter and name."),
+                Theme.Small, Theme.Muted, 640));
+        }
+        foreach (var c in candidates)
+        {
+            string? why = c.Channels is null ? L.T("ערוץ הקבצים שלו חסר", "its data channel is missing")
+                : !c.HasVault ? L.T("היצירה שלו לא הושלמה", "it was never finished")
+                : onThisPc.TryGetValue(c.Channels.JournalId, out var letter) ? L.T($"כבר מחובר במחשב הזה כ־{L.Ltr(letter)}", $"already on this PC as {letter}")
+                : null;
+            var owner = c.Owned ? L.T("שלך", "yours") : L.T("אתה מנהל בו (גיבוי)", "you are an admin (backup)");
+            var cb = new CheckBox { Text = $"{c.Name}  ·  {owner}{(why is null ? "" : $"  —  {why}")}", AutoSize = true, Enabled = why is null, Tag = c, Margin = new Padding(0, 2, 0, 4) };
+            cb.CheckedChanged += (_, _) => TicksChanged();
+            _choices.Controls.Add(cb);
+            if (why is null) _ticks.Add(cb);
+        }
+        _newTick = new CheckBox
+        {
+            Text = L.T("כונן חדש וריק בחשבון הזה", "A new, empty drive on this account"), AutoSize = true,
+            Font = new Font(Theme.Body, FontStyle.Bold), Margin = new Padding(0, 2, 0, 4),
+        };
+        _newTick.CheckedChanged += (_, _) => TicksChanged();
+        _choices.Controls.Add(_newTick);
+        _choices.Visible = true;
+        if (_ticks.Count > 0) _ticks[0].Checked = true; else _newTick.Checked = true;
+        if (_wasVanished) _vanished.Visible = true;
+    }
+
+    List<DriveCandidate> Ticked => _ticks.Where(t => t.Checked).Select(t => (DriveCandidate)t.Tag!).ToList();
+
+    void TicksChanged()
+    {
+        var ticked = Ticked;
+        bool wantNew = _newTick?.Checked == true;
+        _noneChosen = ticked.Count == 0 && !wantNew;
+        if (ticked.Count > 0) Select(ticked[0]);
+        else if (wantNew) Select(null);
+        else { _form.Visible = false; UpdateState(); }
     }
 
     RadioButton Choice(string text, DriveCandidate? candidate, bool enabled)
@@ -838,6 +920,18 @@ sealed class DrivePage : WizardPage
             SetMode(Mode.Create);
         }
         else SetMode(Mode.Connect);
+    }
+
+    /// <summary>The other ticked drives (and a new one, if ticked next to existing ones) come right after
+    /// this one, before anything queued earlier. Going Back and Next again replaces what this page queued.</summary>
+    void EnqueueTheRest(string pw)
+    {
+        foreach (var e in _enqueued) Ctx.Queue.Remove(e);
+        _enqueued = [];
+        if (!Multi || Ctx.Account is not { } account) return;
+        foreach (var c in Ticked.Skip(_mode == Mode.Connect ? 1 : 0)) _enqueued.Add(new NextDrive(account, c, false, pw));
+        if (_newTick?.Checked == true && _mode == Mode.Connect) _enqueued.Add(new NextDrive(account, null, true, pw));
+        Ctx.Queue.InsertRange(0, _enqueued);
     }
 
     // ── form ─────────────────────────────────────────────────────────────────
@@ -879,7 +973,20 @@ sealed class DrivePage : WizardPage
               + (Ctx.UsesTelegram ? L.T(
                   " בחשבון ייווצרו שני ערוצים פרטיים: \"DriveGram Data\" (הקבצים) ו־\"DriveGram Journal\" (היומן: רשימת הקבצים והשינויים). הם הכונן עצמו: אל תמחק אותם ואל תכתוב בהם.",
                   " Two private channels are created on the account: \"DriveGram Data\" (the files) and \"DriveGram Journal\" (the journal: the list of files and changes). They are the drive itself: do not delete them or post in them.") : "")
+            : _selected is not null && Ctx.Current is { Candidate: not null }
+            ? L.T($"הקלד את הסיסמה של \"{_selected.Name}\" (או את מפתח השחזור שלו). אם יש לו אותה סיסמה כמו לכונן הקודם, היא כבר כתובה כאן.",
+                  $"Enter the password of \"{_selected.Name}\" (or its recovery key). If it is the same as the previous drive's, it is already filled in.")
             : L.T("הקלד את הסיסמה של הכונן (או את מפתח השחזור שלו) כדי לחבר אליו את המחשב הזה.", "Enter the drive's password (or its recovery key) to connect this PC to it.");
+        int later = Multi ? Ticked.Count + (_newTick?.Checked == true ? 1 : 0) - 1 : 0;
+        if (later > 0)
+        {
+            var first = _selected?.Name ?? L.T("הכונן החדש", "the new drive");
+            _intro.Text += L.N(later,
+                $" מתחילים ב־\"{first}\", ומיד אחריו נמשיך לכונן הנוסף שסימנת.",
+                $" מתחילים ב־\"{first}\", ומיד אחריו נמשיך ל־{{0}} הכוננים הנוספים שסימנת.",
+                $" Starting with \"{first}\"; right after it we continue to the other drive you ticked.",
+                $" Starting with \"{first}\"; right after it we continue to the {{0}} other drives you ticked.");
+        }
         if (_form.Visible) (create && _name.Visible ? _name : _pw).Focus();
         UpdateState();
     }
@@ -903,7 +1010,8 @@ sealed class DrivePage : WizardPage
     {
         bool ok;
         bool vanishedOk = !_wasVanished || _vanishedOk.Checked;
-        if (_mode == Mode.Connected) ok = true;
+        if (_noneChosen && Multi) ok = false;
+        else if (_mode == Mode.Connected) ok = true;
         else if (_mode == Mode.Connect) ok = _pw.Text.Length > 0 && vanishedOk;
         else if (_mode == Mode.Create)
         {
@@ -1032,8 +1140,10 @@ sealed class DrivePage : WizardPage
         }
         Ctx.State.Save();
         Ctx.UnlockedKeys = keys;
+        Ctx.LastPassword = pw;
         if (_remember.Checked) Ctx.State.RememberMaster(keys.ExportMaster());
         else Ctx.State.ForgetMaster();
+        EnqueueTheRest(pw);
         return true;
     }
 }
@@ -1045,6 +1155,13 @@ sealed class FinishPage : WizardPage
     readonly TextBox _label = Theme.Input(240);
     readonly CheckBox _autostart = new() { Text = L.T("הפעל את DriveGram אוטומטית כשנכנסים לווינדוס", "Start DriveGram automatically when I sign in to Windows"), AutoSize = true, Checked = true };
     readonly Label _summary = Theme.Label("", Theme.Body, Theme.Text, 620);
+    readonly RadioButton _network = new() { Text = L.T("כונן רשת (מומלץ)", "Network drive (recommended)"), AutoSize = true, Margin = new Padding(0, 2, 0, 2) };
+    readonly RadioButton _disk = new() { Text = L.T("דיסק רגיל", "Regular disk"), AutoSize = true, Margin = new Padding(0, 2, 0, 2) };
+    readonly CheckBox _another = Theme.WrapCheck(
+        L.T("אחרי שהכונן הזה יתחבר, הוסף עוד כונן מאותו חשבון (קיים או חדש)", "After this drive connects, add another drive on the same account (existing or new)"),
+        Theme.Body, 640);
+    readonly Label _queued = Theme.Label("", Theme.Small, Theme.Muted, 640);
+    bool _typeSet;
 
     public override string Title => L.T("כמעט סיימנו", "Almost done");
     public override string Subtitle => L.T("איך הכונן יופיע במחשב.", "How the drive appears on this PC.");
@@ -1060,7 +1177,30 @@ sealed class FinishPage : WizardPage
         col.Controls.Add(_letter);
         col.Controls.Add(Theme.Label(L.T("שם הכונן ב\"מחשב זה\":", "Name in This PC:"), Theme.Small, Theme.Muted));
         col.Controls.Add(_label);
+
+        // the drive type: a network drive by default, the full comparison one click away
+        var typeTitle = Theme.Label(L.T("סוג הכונן:", "Drive type:"), Theme.Small, Theme.Muted);
+        typeTitle.Margin = new Padding(0, 6, 0, 2);
+        col.Controls.Add(typeTitle);
+        var types = Theme.Row();
+        types.Controls.AddRange([_network, _disk]);
+        var diff = new LinkLabel { Text = L.T("מה ההבדל?", "What is the difference?"), AutoSize = true, Font = Theme.Body, LinkColor = Theme.Accent, Margin = new Padding(12, 4, 12, 2) };
+        diff.LinkClicked += (_, _) =>
+        {
+            using var f = new DriveTypeForm(_label.Text.Trim() is { Length: > 0 } n ? n : "DriveGram", _network.Checked, inWizard: true);
+            if (f.ShowDialog(FindForm()) == DialogResult.OK) (f.Network ? _network : _disk).Checked = true;
+        };
+        types.Controls.Add(diff);
+        col.Controls.Add(types);
+        col.Controls.Add(Theme.Label(L.T(
+            "כונן רשת מגן על הכונן מתוכנות גיבוי ואנטי־וירוס שמנסות להוריד את כולו. דיסק רגיל מתאים יותר ל־Lightroom, ‏Outlook ולהתקנת תוכנות. אפשר לשנות את זה בכל רגע אחר כך, בתפריט של הכונן ← \"סוג הכונן\".",
+            "A network drive protects the drive from backup and antivirus programs that try to download all of it. A regular disk suits Lightroom, Outlook and installing programs better. You can change it at any time later, from the drive's menu → \"Drive type\"."),
+            Theme.Small, Theme.Muted, 640));
+
+        _autostart.Margin = new Padding(0, 8, 0, 4);
         col.Controls.Add(_autostart);
+        col.Controls.Add(_another);
+        col.Controls.Add(_queued);
         SetContent(col);
     }
 
@@ -1076,6 +1216,16 @@ sealed class FinishPage : WizardPage
         char pick = free.Contains(current) ? current : "TUVWXYZSRQPONMLKJIHGFED".FirstOrDefault(free.Contains, 'T');
         _letter.SelectedItem = $"{pick}:";
         _label.Text = cfg.VolumeLabel;
+        // a new drive: a network drive (the user's choice is kept when coming back to this page);
+        // an existing one: as it is now
+        if (!Ctx.IsNew) (cfg.NetworkDrive ? _network : _disk).Checked = true;
+        else if (!_typeSet) { _network.Checked = true; _typeSet = true; }
+        // more drives in this sitting (only while adding drives on a Telegram account)
+        int queued = Ctx.Queue.Count;
+        _another.Visible = Ctx.IsNew && Ctx.UsesTelegram && queued == 0;
+        _queued.Visible = queued > 0;
+        _queued.Text = L.N(queued, "אחרי שהכונן הזה יתחבר, נמשיך לכונן הנוסף שסימנת.", "אחרי שהכונן הזה יתחבר, נמשיך ל־{0} הכוננים הנוספים שסימנת.",
+            "After this drive connects, we continue to the other drive you ticked.", "After this drive connects, we continue to the {0} other drives you ticked.");
         // the first drive: on; otherwise keep the choice the user already made
         _autostart.Checked = (Ctx.IsNew && !AppState.All().Any(a => a.Dir != Ctx.State.Dir)) || ShellIntegration.AutostartEnabled;
 
@@ -1092,7 +1242,12 @@ sealed class FinishPage : WizardPage
         var cfg = Ctx.State.Config;
         cfg.MountPoint = (string)_letter.SelectedItem!;
         cfg.VolumeLabel = string.IsNullOrWhiteSpace(_label.Text) ? "DriveGram" : _label.Text.Trim();
+        cfg.NetworkDrive = _network.Checked;
         Ctx.State.Save();
+        // "add another": a run where the user picks (existing or new), on the same account
+        Ctx.Queue.RemoveAll(q => q.Candidate is null && !q.CreateNew);
+        if (_another.Visible && _another.Checked && Ctx.Account is { } account)
+            Ctx.Queue.Add(new NextDrive(account, null, false, Ctx.LastPassword));
         try { ShellIntegration.SetAutostart(_autostart.Checked); }
         catch (Exception ex) { Log.Warn($"autostart: {ex.Message}"); }
         return Task.FromResult(true);

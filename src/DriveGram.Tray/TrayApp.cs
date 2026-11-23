@@ -522,8 +522,9 @@ sealed class TrayApp : ApplicationContext
     }
 
     // ── setup / add / remove ─────────────────────────────────────────────────
-    /// <summary>Open the wizard for a drive (or a new one); mount when it finishes.</summary>
-    async Task SetupAsync(DriveController? d)
+    /// <summary>Open the wizard for a drive (or a new one); mount when it finishes. next/queue: more drives
+    /// added in the same sitting, on the same account (each run adds one; the queue continues after it).</summary>
+    async Task SetupAsync(DriveController? d, Setup.NextDrive? next = null, List<Setup.NextDrive>? queue = null)
     {
         if (_wizard is { IsDisposed: false }) { _wizard.Activate(); return; }
         bool wasMountedBefore = d?.Session is not null;
@@ -550,12 +551,24 @@ sealed class TrayApp : ApplicationContext
         DialogResult result;
         Keys? wizardKeys = null;
         string? createdDriveId = null;
-        using (_wizard = new Setup.SetupWizard(state, isNew, originalChannels))
+        bool restartForLanguage;
+        List<Setup.NextDrive> after;
+        using (_wizard = new Setup.SetupWizard(state, isNew, originalChannels, next, queue))
         {
             result = _wizard.ShowDialog();
             wizardKeys = _wizard.Context.UnlockedKeys;
             createdDriveId = _wizard.Context.CreatedDriveId;
+            restartForLanguage = _wizard.Context.RestartForLanguage;
+            after = _wizard.Context.Queue;
             _wizard = null;
+        }
+        if (restartForLanguage && isNew && createdDriveId is null)
+        {
+            // the language link on the first page: nothing was entered yet; open the wizard again in it
+            state.Delete();
+            UpdateIcon();
+            await SetupAsync(d);
+            return;
         }
         // The drive page saves a new binding (other channels / account) as soon as it is chosen, so a
         // cancel AFTER that point cannot restore the old one: the profile on disk is the truth.
@@ -628,6 +641,9 @@ sealed class TrayApp : ApplicationContext
                 if (_pendingSetup == other) _pendingSetup = null;
                 _ = MountAsync(other);
             }
+        // the next drive of this sitting (ticked together, or "add another drive"), once this one is up
+        if (isNew && after.Count > 0 && !_quitting)
+            await SetupAsync(null, after[0], after.Skip(1).ToList());
     }
 
     /// <summary>Which drive a profile points at (account + channels + drive id).</summary>

@@ -4,8 +4,9 @@ using DriveGram.Tray.Setup;
 namespace DriveGram.Tray;
 
 /// <summary>
-/// "Drive type": a regular disk (the default) or a network drive, with what each means in plain words.
-/// The change takes effect when the drive is connected again (the tray does that right away).
+/// "Drive type": a network drive (recommended, the default for a new drive) or a regular disk, with what
+/// each means in plain words. From the tray the change takes effect when the drive is connected again (the
+/// tray does that right away); from the setup wizard it only sets the choice.
 /// </summary>
 sealed class DriveTypeForm : Form
 {
@@ -15,7 +16,7 @@ sealed class DriveTypeForm : Form
     /// <summary>The choice when the user pressed OK.</summary>
     public bool Network => _network.Checked;
 
-    public DriveTypeForm(string driveName, bool network)
+    public DriveTypeForm(string driveName, bool network, bool inWizard = false)
     {
         Ui.Prepare(this);
         Text = L.T($"DriveGram – סוג הכונן ({driveName})", $"DriveGram – drive type ({driveName})");
@@ -29,20 +30,11 @@ sealed class DriveTypeForm : Form
         col.Dock = DockStyle.Fill;
 
         col.Controls.Add(Theme.Label(L.T(
-            "הקבצים, ההצפנה, המהירות והעדכון בין המחשבים זהים בשני המצבים. ההבדל הוא רק איך וינדוס ותוכנות אחרות מתייחסים לכונן. לא בטוח? השאר \"דיסק רגיל\".",
-            "Files, encryption, speed and updates between PCs are the same either way. The only difference is how Windows and other programs treat the drive. Not sure? Keep \"Regular disk\"."),
+            "הקבצים, ההצפנה, המהירות והעדכון בין המחשבים זהים בשני המצבים. ההבדל הוא רק איך וינדוס ותוכנות אחרות מתייחסים לכונן. לא בטוח? השאר \"כונן רשת\".",
+            "Files, encryption, speed and updates between PCs are the same either way. The only difference is how Windows and other programs treat the drive. Not sure? Keep \"Network drive\"."),
             Theme.Body, Theme.Text, 660));
 
-        _disk.Text = L.T("דיסק רגיל (ברירת המחדל)", "Regular disk (the default)");
-        col.Controls.Add(Spaced(_disk));
-        Bullets(col,
-            L.T($"✓  מופיע ב\"מחשב זה\" ליד {L.Ltr("C:")} ו־{L.Ltr("D:")}, עם האייקון והשם של DriveGram.", "✓  Shown in This PC next to C: and D:, with DriveGram's icon and name."),
-            L.T("✓  כל התוכנות עובדות איתו כמו עם כל דיסק (גם Lightroom, ‏Outlook, התקנת תוכנות).", "✓  Every program treats it like any disk (Lightroom, Outlook, installing programs too)."),
-            L.T("✓  חיפוש מילה בתוך מסמכים עובד (למסמכים ששמורים במחשב הזה), אם מוסיפים את הכונן לאינדקס החיפוש של וינדוס.", "✓  Searching for words inside documents works (for documents stored on this PC), if the drive is added to Windows' search index."),
-            L.T("✗  תוכנות גיבוי ואנטי־וירוס שסורקות \"את כל הדיסקים\" עלולות לנסות להוריד את כל הכונן מטלגרם. DriveGram כבר מונע את זה מ־Defender ומתוכנות מוכרות, אבל אי אפשר להכיר מראש כל תוכנה.",
-                "✗  Backup and antivirus programs that scan \"all disks\" may try to download the whole drive from Telegram. DriveGram already stops Defender and well-known programs from doing so, but it cannot know every program in advance."));
-
-        _network.Text = L.T("כונן רשת", "Network drive");
+        _network.Text = L.T("כונן רשת (מומלץ)", "Network drive (recommended)");
         col.Controls.Add(Spaced(_network));
         Bullets(col,
             L.T("✓  רוב תוכנות הגיבוי, האנטי־וירוס והאינדוקס מדלגות על כונני רשת מעצמן: אף תוכנה לא \"תוריד את הכל\" ברקע.",
@@ -57,15 +49,25 @@ sealed class DriveTypeForm : Form
             L.T("✗  כל מחיקה שואלת \"למחוק לצמיתות?\" (בפועל הקובץ נשמר בסל המחזור של DriveGram).", "✗  Every delete asks \"delete permanently?\" (in fact the file is still kept in DriveGram's recycle bin)."),
             L.T("✗  גם תוכנת גיבוי שאתה כן רוצה שתגבה את הכונן תדלג עליו, עד שתגדיר אותה לגבות גם כונני רשת.", "✗  Even a backup program you DO want to back up the drive skips it, until you set it to back up network drives too."));
 
+        _disk.Text = L.T("דיסק רגיל", "Regular disk");
+        col.Controls.Add(Spaced(_disk));
+        Bullets(col,
+            L.T($"✓  מופיע ב\"מחשב זה\" ליד {L.Ltr("C:")} ו־{L.Ltr("D:")}, עם האייקון והשם של DriveGram.", "✓  Shown in This PC next to C: and D:, with DriveGram's icon and name."),
+            L.T("✓  כל התוכנות עובדות איתו כמו עם כל דיסק (גם Lightroom, ‏Outlook, התקנת תוכנות).", "✓  Every program treats it like any disk (Lightroom, Outlook, installing programs too)."),
+            L.T("✓  חיפוש מילה בתוך מסמכים עובד (למסמכים ששמורים במחשב הזה), אם מוסיפים את הכונן לאינדקס החיפוש של וינדוס.", "✓  Searching for words inside documents works (for documents stored on this PC), if the drive is added to Windows' search index."),
+            L.T("✗  תוכנות גיבוי ואנטי־וירוס שסורקות \"את כל הדיסקים\" עלולות לנסות להוריד את כל הכונן מטלגרם. DriveGram כבר מונע את זה מ־Defender ומתוכנות מוכרות, אבל אי אפשר להכיר מראש כל תוכנה.",
+                "✗  Backup and antivirus programs that scan \"all disks\" may try to download the whole drive from Telegram. DriveGram already stops Defender and well-known programs from doing so, but it cannot know every program in advance."));
+
         col.Controls.Add(Theme.Label(L.T(
-            "המלצה: לקבצים אישיים (מסמכים, תמונות, סרטונים) שני המצבים מתאימים. כונן רשת עדיף אם מותקנת תוכנת גיבוי כמו Backblaze, או אנטי־וירוס שאינו Defender. דיסק רגיל עדיף לקטלוג Lightroom, ‏Outlook, תוכנות, או חיפוש בתוך מסמכים.",
-            "Advice: for personal files (documents, photos, videos) both work. A network drive is better with a backup program like Backblaze, or an antivirus other than Defender. A regular disk is better for a Lightroom catalog, Outlook, programs, or searching inside documents."),
+            "המלצה: כונן רשת מתאים לרוב השימושים (מסמכים, תמונות, סרטונים, ארכיון), ומגן על הכונן מתוכנות שמנסות להוריד את כולו. דיסק רגיל עדיף לקטלוג Lightroom, ‏Outlook, התקנת תוכנות, או חיפוש בתוך מסמכים. אפשר לשנות את זה אחר כך בכל רגע, בתפריט של הכונן.",
+            "Advice: a network drive suits most uses (documents, photos, videos, an archive) and protects the drive from programs that try to download all of it. A regular disk is better for a Lightroom catalog, Outlook, installing programs, or searching inside documents. You can change it later at any time, from the drive's menu."),
             Theme.Small, Theme.Muted, 660));
-        col.Controls.Add(Theme.Label(L.T("השינוי מנתק את הכונן ומחבר אותו מחדש (לוקח כמה שניות).", "The change disconnects the drive and connects it again (takes a few seconds)."),
-            Theme.Small, Theme.Muted, 660));
+        if (!inWizard)
+            col.Controls.Add(Theme.Label(L.T("השינוי מנתק את הכונן ומחבר אותו מחדש (לוקח כמה שניות).", "The change disconnects the drive and connects it again (takes a few seconds)."),
+                Theme.Small, Theme.Muted, 660));
 
         (network ? _network : _disk).Checked = true;
-        var ok = Theme.Primary(L.T("שמור", "Save"));
+        var ok = Theme.Primary(inWizard ? L.T("בחר", "Choose") : L.T("שמור", "Save"));
         var cancel = Theme.Secondary(L.T("ביטול", "Cancel"));
         ok.Click += (_, _) => { DialogResult = DialogResult.OK; Close(); };
         cancel.Click += (_, _) => { DialogResult = DialogResult.Cancel; Close(); };
