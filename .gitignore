@@ -6,3 +6,7 @@ TestResults/
 publish/
 dist/
 installer/redist/
+
+# local secrets (Telegram API id/hash)
+.env
+.env.*

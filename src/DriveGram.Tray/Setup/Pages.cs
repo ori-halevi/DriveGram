@@ -989,8 +989,8 @@ sealed class DrivePage : WizardPage
             ? L.T("בחר סיסמה לכונן, לפחות 10 תווים. היא מצפינה כל קובץ לפני שהוא עולה לטלגרם.",
                   "Choose a drive password, at least 10 characters. It encrypts every file before it goes to Telegram.")
               + (Ctx.UsesTelegram ? L.T(
-                  " בחשבון ייווצרו שני ערוצים פרטיים: \"DriveGram Data\" (הקבצים) ו־\"DriveGram Journal\" (היומן: רשימת הקבצים והשינויים). הם הכונן עצמו: אל תמחק אותם ואל תכתוב בהם.",
-                  " Two private channels are created on the account: \"DriveGram Data\" (the files) and \"DriveGram Journal\" (the journal: the list of files and changes). They are the drive itself: do not delete them or post in them.") : "")
+                  " בחשבון ייווצרו שני ערוצים פרטיים: \"DriveGram Data · <שם הכונן>\" (הקבצים) ו־\"DriveGram Journal · <שם הכונן>\" (היומן: רשימת הקבצים והשינויים). הם הכונן עצמו: אל תמחק אותם ואל תכתוב בהם.",
+                  " Two private channels are created on the account: \"DriveGram Data · <drive name>\" (the files) and \"DriveGram Journal · <drive name>\" (the journal: the list of files and changes). They are the drive itself: do not delete them or post in them.") : "")
             : _selected is not null && Ctx.Current is { Candidate: not null }
             ? L.T($"הקלד את הסיסמה של \"{_selected.Name}\" (או את מפתח השחזור שלו). אם יש לו אותה סיסמה כמו לכונן הקודם, היא כבר כתובה כאן.",
                   $"Enter the password of \"{_selected.Name}\" (or its recovery key). If it is the same as the previous drive's, it is already filled in.")
