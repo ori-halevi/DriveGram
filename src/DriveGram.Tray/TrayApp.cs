@@ -632,6 +632,25 @@ sealed class TrayApp : ApplicationContext
         }
         d.PendingKeys = wizardKeys;
         await MountAsync(d);
+        if (d.Session is null && !d.Starting && d.LastMountRefused && d.State.Config.NetworkDrive)
+        {
+            // Windows refused a network drive on this PC (the wizard's default): a regular disk instead, and
+            // say so; if that is refused too, the type was not the reason, so it is set back
+            Log.Warn($"tray: {d.Name} could not connect as a network drive; trying a regular disk");
+            d.State.Config.NetworkDrive = false;
+            d.State.Save();
+            await MountAsync(d);
+            if (d.Session is not null)
+                Balloon(L.T("הכונן חובר כדיסק רגיל", "Connected as a regular disk"),
+                    L.T("וינדוס לא איפשר לחבר אותו ככונן רשת במחשב הזה, ולכן הוא חובר כדיסק רגיל. אפשר לנסות שוב בתפריט של הכונן ← \"סוג הכונן\".",
+                        "Windows did not allow it as a network drive on this PC, so it was connected as a regular disk. You can try again from the drive's menu → \"Drive type\"."),
+                    ToolTipIcon.Warning, () => OpenDrive(d));
+            else if (!d.Starting)
+            {
+                d.State.Config.NetworkDrive = true;
+                d.State.Save();
+            }
+        }
         if (!string.IsNullOrEmpty(oldAccount) && oldAccount != d.State.Config.AccountKey)
             await TelegramAccounts.SignOutIfUnusedAsync(oldAccount);
         if (!string.IsNullOrEmpty(account))

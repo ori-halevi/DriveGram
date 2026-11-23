@@ -1162,6 +1162,7 @@ sealed class FinishPage : WizardPage
         Theme.Body, 640);
     readonly Label _queued = Theme.Label("", Theme.Small, Theme.Muted, 640);
     bool _typeSet;
+    NextDrive? _addedAnother; // what this page queued (Back and Finish again replaces only that)
 
     public override string Title => L.T("כמעט סיימנו", "Almost done");
     public override string Subtitle => L.T("איך הכונן יופיע במחשב.", "How the drive appears on this PC.");
@@ -1245,9 +1246,10 @@ sealed class FinishPage : WizardPage
         cfg.NetworkDrive = _network.Checked;
         Ctx.State.Save();
         // "add another": a run where the user picks (existing or new), on the same account
-        Ctx.Queue.RemoveAll(q => q.Candidate is null && !q.CreateNew);
+        if (_addedAnother is not null) Ctx.Queue.Remove(_addedAnother);
+        _addedAnother = null;
         if (_another.Visible && _another.Checked && Ctx.Account is { } account)
-            Ctx.Queue.Add(new NextDrive(account, null, false, Ctx.LastPassword));
+            Ctx.Queue.Add(_addedAnother = new NextDrive(account, null, false, Ctx.LastPassword));
         try { ShellIntegration.SetAutostart(_autostart.Checked); }
         catch (Exception ex) { Log.Warn($"autostart: {ex.Message}"); }
         return Task.FromResult(true);
