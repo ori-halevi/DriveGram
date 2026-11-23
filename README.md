@@ -22,7 +22,9 @@
 
 <br/>
 
-<img src="docs/images/tray-menu-en.png" width="760" alt="DriveGram's menu next to the clock: two drives, one uploading" />
+<img src="docs/images/this-pc.png" width="900" alt="DriveGram as a drive in This PC, next to Local Disk (C:)" />
+<br/>
+<sub>A real drive letter in This PC, right next to your disks.</sub>
 
 </div>
 
@@ -52,6 +54,19 @@ No server in the middle, no subscription, no storage plan. Just your account, yo
 - 🇮🇱 **Hebrew and English,** right-to-left done properly.
 
 ### A look inside
+
+<div align="center">
+<img src="docs/images/drive-explorer.png" width="900" alt="The drive's folders in File Explorer" />
+<br/><sub>Folders and files, in File Explorer, like on any disk</sub>
+<br/><br/>
+<img src="docs/images/drive-photos.png" width="900" alt="Photos with thumbnails on the drive" />
+<br/><sub>Thumbnails, previews and opening files work as usual: what is not on this PC is fetched when needed</sub>
+<br/><br/>
+<img src="docs/images/tray-menu-en.png" width="760" alt="DriveGram's menu next to the clock: two drives, one uploading" />
+<br/><sub>An icon next to the clock always shows what is happening</sub>
+</div>
+
+<br/>
 
 <table>
 <tr>
@@ -108,6 +123,8 @@ DriveGram is honest about its trade-offs. Every new drive also gets a short note
 - 💪 **עמיד.** ניתוק, שינה, קריסה או הפעלה מחדש באמצע העלאה, וההעלאה ממשיכה מאיפה שעצרה.
 - 💻 **כמה מחשבים לכונן אחד.** מחשב אחד כותב, והכונן עובר ביניהם בלחיצה.
 - 🗑️ **סל מחזור** ששומר קבצים 30 יום, **כמה כוננים וכמה חשבונות**, **כונן רשת או דיסק רגיל**, ו**ייצוא** של הכל לתיקייה רגילה.
+
+<div align="center"><img src="docs/images/this-pc.png" width="760" alt="הכונן ב&quot;מחשב זה&quot;" /><br/><sub>אות כונן אמיתית ב"מחשב זה", ליד הדיסקים שלך</sub></div>
 
 <table>
 <tr>
