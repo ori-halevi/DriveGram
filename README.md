@@ -49,7 +49,7 @@ No server in the middle, no subscription, no storage plan. Just your account, yo
 - 💪 **Survives the real world.** Lost connection, sleep, a crash, a reboot in the middle of an upload: it picks up where it stopped. Telegram's rate limits are respected instead of fought.
 - 💻 **Several PCs, one drive.** One PC writes at a time and the others see the same files read-only. Ask for the drive and the other PC hands it over in a click. If it doesn't answer, the drive moves anyway.
 - 🗑️ **Its own recycle bin.** Deleted files wait 30 days before they are gone for good.
-- 🗂️ **As many drives as you like,** on one account or several. Add a second account as a backup admin, so the drive survives if the main one is lost.
+- 🗂️ **As many drives as you like,** on one account or several. Add a second account as a backup admin, so the drive survives if the main one is lost. (Want the drive to belong to that account? See [moving ownership](docs/transfer-ownership.md).)
 - 🌐 **Network drive or regular disk.** A network drive keeps backup and antivirus programs from downloading the whole drive. A regular disk works with every program. Switch at any time.
 - 📤 **Export everything** to a normal folder or an external disk, whenever you want to leave or keep a second copy.
 - 🇮🇱 **Hebrew and English,** right-to-left done properly.
