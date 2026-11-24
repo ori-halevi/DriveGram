@@ -873,7 +873,35 @@ public sealed class ContentEngine : IAsyncDisposable
     }
 
     /// <summary>Upload one S/Z piece and mark it U, unless it was modified meanwhile.</summary>
+    readonly ConcurrentDictionary<(string, int), Task<bool>> _pieceUploads = new();
+
+    /// <summary>
+    /// Upload one piece. The same piece is never sent twice at once: the seal loop and a commit can both ask
+    /// for it (while Telegram slows uploads down, a request can wait minutes for a slot), and the second
+    /// simply waits for the first one's result instead of uploading the same 32 MB again.
+    /// </summary>
     async Task<bool> UploadPieceAsync(string id, int idx, CancellationToken ct)
+    {
+        var key = (id, idx);
+        var mine = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var running = _pieceUploads.GetOrAdd(key, mine.Task);
+        if (running != mine.Task) return await running.WaitAsync(ct);
+        try
+        {
+            bool ok = await UploadPieceOnceAsync(id, idx, ct);
+            mine.TrySetResult(ok);
+            return ok;
+        }
+        catch (Exception ex)
+        {
+            if (ex is OperationCanceledException) mine.TrySetCanceled(); else mine.TrySetException(ex);
+            _ = mine.Task.Exception; // observed here: a waiter (if any) gets it too
+            throw;
+        }
+        finally { _pieceUploads.TryRemove(KeyValuePair.Create(key, mine.Task)); }
+    }
+
+    async Task<bool> UploadPieceOnceAsync(string id, int idx, CancellationToken ct)
     {
         var st = State(id);
         long gen;
@@ -887,7 +915,22 @@ public sealed class ContentEngine : IAsyncDisposable
         // At most a few pieces in memory at once (read + encrypted copy are 2 x 32 MiB each): without this
         // a folder of hundreds of closed files read them ALL in before waiting for an upload slot.
         await _pieceSlots.WaitAsync(ct);
-        try { return await UploadPieceLockedAsync(id, idx, st, gen, row, ct); }
+        try
+        {
+            // the wait for a slot can be long: the piece may have been uploaded meanwhile (by a run that
+            // started before this one), and its local copy then moved to the cache or deleted
+            lock (st.Lock)
+            {
+                var cur = _db.GetDirty(id, idx);
+                if (cur is null || cur.Kind == 'U') return true;
+            }
+            try { return await UploadPieceLockedAsync(id, idx, st, gen, row, ct); }
+            catch (FileNotFoundException)
+            {
+                lock (st.Lock) if (_db.GetDirty(id, idx) is null or { Kind: 'U' }) return true; // uploaded meanwhile
+                throw;
+            }
+        }
         finally { _pieceSlots.Release(); }
     }
 
