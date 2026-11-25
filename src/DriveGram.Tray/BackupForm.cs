@@ -57,6 +57,23 @@ sealed class BackupForm : Form
         col.Controls.Add(row);
         col.Controls.Add(_addResult);
         _add.Click += async (_, _) => await AddAsync();
+
+        // an account already signed in on this PC: one click, nothing to type
+        var mine = TelegramAccounts.Known().Where(a => a.Key != state.Config.AccountKey).ToList();
+        if (mine.Count > 0 && state.Config.Channels is not null && state.Folder is null)
+        {
+            var hint = Theme.Label(L.T("או חשבון שכבר מחובר במחשב הזה, בלחיצה אחת:", "Or an account already signed in on this PC, in one click:"), Theme.Body, Theme.Text, 680);
+            hint.Margin = new Padding(0, 10, 0, 4);
+            col.Controls.Add(hint);
+            var row2 = Theme.Row();
+            foreach (var a in mine)
+            {
+                var b = Theme.Secondary(L.Name(a.Name));
+                b.Click += async (_, _) => await AddSignedInAsync(a, b);
+                row2.Controls.Add(b);
+            }
+            col.Controls.Add(row2);
+        }
         AcceptButton = _add;
 
         var noName = Theme.Label(L.T("אין לחשבון הגיבוי שם משתמש, והוא לא באנשי הקשר?", "The backup account has no username and is not a contact?"), Theme.Body, Theme.Text, 680);
@@ -90,7 +107,11 @@ sealed class BackupForm : Form
             L.T("פתח בטלגרם, עם החשבון של הכונן, את כל אחד משני הערוצים שלמטה.", "In Telegram, signed in as the drive's account, open each of the two channels below."),
             L.T("לחץ על שם הערוץ ← מנהלים ← חשבון הגיבוי.", "Tap the channel name → Administrators → the backup account."),
             L.T("בתחתית: \"העבר בעלות על הערוץ\", ואשר עם סיסמת האימות הדו־שלבי.", "At the bottom: \"Transfer channel ownership\", and confirm with the two-step password."),
+            L.T("אם האפשרות אפורה: טלגרם דורש לפעמים שהאימות הדו־שלבי יהיה פעיל כבר כמה ימים, ושהחשבון מחובר במכשיר הזה זמן מה. חכה ונסה שוב.",
+                "If the option is greyed out: Telegram sometimes requires two-step verification to have been on for a few days, and the account to be signed in on that device for a while. Wait and try again."),
+            L.T("השמות המדויקים של הכפתורים יכולים להיות קצת שונים בין אפליקציות וגרסאות של טלגרם.", "The exact button names can differ a little between Telegram apps and versions."),
             L.T("DriveGram ימשיך לעבוד כרגיל: החשבון הנוכחי נשאר מנהל עם כל ההרשאות.", "DriveGram keeps working as before: the current account stays an admin with all rights."),
+            L.T("אל תמחק את הערוצים, אל תצא מהם ואל תשלח בהם הודעות: הם הכונן עצמו.", "Do not delete, leave or post in the channels: they are the drive itself."),
             L.T("⚠  חשוב: הבעלים יכול להסיר מנהלים ולמחוק את הערוצים. העבר בעלות רק לחשבון שהוא שלך, ושמוגן באימות דו־שלבי לפחות כמו החשבון הנוכחי.",
                 "⚠  Important: the owner can remove admins and delete the channels. Transfer ownership only to an account that is yours and protected (two-step verification) at least as well as the current one."),
         }) Para(col, "•  " + step);
@@ -107,9 +128,9 @@ sealed class BackupForm : Form
         Section(col, L.T("5. איך משחזרים מחשבון הגיבוי", "5. How to restore from the backup account"));
         foreach (var step in new[]
         {
-            L.T("ב־DriveGram (בכל מחשב): בתפריט של האייקון בחר \"הוסף כונן נוסף\".", "In DriveGram (on any PC): in the tray menu choose \"Add another drive\"."),
-            L.T("התחבר עם חשבון הגיבוי (סריקת QR).", "Sign in with the backup account (scan the QR code)."),
-            L.T("ברשימת הכוננים בחר את הכונן המסומן \"אתה מנהל בו (גיבוי)\".", "In the list of drives choose the one marked \"you are an admin (backup)\"."),
+            L.T("ב־DriveGram (בכל מחשב): פתח את DriveGram, ובלשונית \"חשבונות\" לחץ \"הוסף חשבון טלגרם…\".", "In DriveGram (on any PC): open DriveGram, and on the \"Accounts\" tab click \"Add a Telegram account…\"."),
+            L.T("התחבר עם חשבון הגיבוי (סריקת QR). אם הוא כבר מחובר במחשב הזה, לחץ בכרטיס שלו \"חבר כוננים קיימים…\".", "Sign in with the backup account (scan the QR code). If it is already signed in on this PC, click \"Connect existing drives…\" on its card."),
+            L.T("ברשימת הכוננים סמן את הכונן המסומן \"אתה מנהל בו (גיבוי)\".", "In the list of drives tick the one marked \"you are an admin (backup)\"."),
             L.T("הקלד את סיסמת הכונן. זהו, הכונן נפתח עם כל הקבצים.", "Enter the drive password. That's it: the drive comes up with all its files."),
         }) Para(col, "•  " + step);
 
@@ -139,6 +160,44 @@ sealed class BackupForm : Form
 
     static void Para(FlowLayoutPanel col, string text, Color? color = null) =>
         col.Controls.Add(Theme.Label(text, Theme.Body, color ?? Theme.Text, 680));
+
+    /// <summary>
+    /// Make an account signed in on this PC a full admin of both channels: this drive's account creates two
+    /// one-time invite links, the other account joins with them, and is then promoted.
+    /// </summary>
+    async Task AddSignedInAsync(AccountInfo a, Button button)
+    {
+        if (_state.Config.Channels is not { } ch) return;
+        button.Enabled = false;
+        _addResult.ForeColor = Theme.Muted;
+        _addResult.Text = L.T($"מוסיף את {L.Name(a.Name)}…", $"Adding {a.Name}…");
+        try
+        {
+            var probe = AppState.Open(_state.Id); // a copy pointing at the other account (never saved)
+            probe.Config.AccountKey = a.Key;
+            probe.Config.ApiId = a.ApiId;
+            probe.Config.ApiHash = a.ApiHash;
+            using var mine = TelegramAccounts.Acquire(_state);
+            using var other = TelegramAccounts.Acquire(probe);
+            var links = await Task.Run(() => TelegramRemote.CreateInviteLinksAsync(mine.Client, ch));
+            try
+            {
+                await Task.Run(() => TelegramRemote.JoinByInviteAsync(other.Client, links.Journal));
+                await Task.Run(() => TelegramRemote.JoinByInviteAsync(other.Client, links.Data));
+                await Task.Run(() => TelegramRemote.PromoteJoinedAsync(mine.Client, ch, a.Id));
+            }
+            finally { await Task.Run(() => TelegramRemote.RevokeInviteLinksAsync(mine.Client, ch, links)); }
+            _addResult.ForeColor = Theme.Success;
+            _addResult.Text = L.T($"✓  {L.Name(a.Name)} מנהל עכשיו את שני הערוצים של הכונן.", $"✓  {a.Name} now administers both of the drive's channels.");
+            await LoadAdminsAsync();
+        }
+        catch (Exception ex)
+        {
+            _addResult.ForeColor = Theme.Error;
+            _addResult.Text = TelegramErrors.Text(ex);
+        }
+        finally { button.Enabled = true; }
+    }
 
     async Task LoadAdminsAsync()
     {

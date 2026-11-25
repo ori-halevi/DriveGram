@@ -10,6 +10,12 @@ public sealed record TelegramChannels(long DataId, long DataHash, long JournalId
 /// <summary>Someone who administers one of a drive's channels.</summary>
 public sealed record ChannelAdmin(long UserId, string Name, bool IsOwner);
 
+/// <summary>What an account can do with a drive's two channels: found (a member) and allowed to run it.</summary>
+public sealed record DriveAccess(bool JournalFound, bool DataFound, bool JournalRights, bool DataRights)
+{
+    public bool Ok => JournalFound && DataFound && JournalRights && DataRights;
+}
+
 /// <summary>The administrators of one of a drive's channels.</summary>
 public sealed record ChannelAdmins(string Title, bool IsJournal, List<ChannelAdmin> Admins);
 
@@ -211,6 +217,25 @@ public sealed class TelegramRemote : IRemote
         return result;
     }
 
+    /// <summary>The rights DriveGram uses: post pieces and journal entries, edit and pin the control record,
+    /// delete what is no longer needed. The drive's channels are broadcast channels: there pinning comes with
+    /// "edit messages" (the Telegram app has no separate pin right for channels, and may not report one).</summary>
+    const ChatAdminRights.Flags DriveRights = ChatAdminRights.Flags.post_messages | ChatAdminRights.Flags.edit_messages
+        | ChatAdminRights.Flags.delete_messages;
+
+    /// <summary>Can this account run the drive (before a drive is moved to it)?</summary>
+    public static async Task<DriveAccess> DriveAccessAsync(Client client, TelegramChannels ch)
+    {
+        await ResumeAsync(client);
+        var all = (await Patiently(() => client.Messages_GetAllChats())).chats.Values.OfType<Channel>()
+            .Where(c => !c.flags.HasFlag(Channel.Flags.left)).ToList();
+        static bool CanRun(Channel c) => c.flags.HasFlag(Channel.Flags.creator)
+            || (c.admin_rights is { } r && (r.flags & DriveRights) == DriveRights);
+        var j = all.FirstOrDefault(c => c.id == ch.JournalId);
+        var d = all.FirstOrDefault(c => c.id == ch.DataId);
+        return new DriveAccess(j is not null, d is not null, j is not null && CanRun(j), d is not null && CanRun(d));
+    }
+
     static readonly ChatAdminRights BackupRights = new()
     {
         flags = ChatAdminRights.Flags.change_info | ChatAdminRights.Flags.post_messages | ChatAdminRights.Flags.edit_messages
@@ -275,7 +300,31 @@ public sealed class TelegramRemote : IRemote
             var inv = await Patiently(() => client.Messages_ExportChatInvite(c, DateTime.UtcNow.AddHours(24), 1, "DriveGram backup"));
             return inv is ChatInviteExported e ? e.link : throw new IOException("Telegram did not return an invite link.");
         }
-        return (await Link(journal), await Link(data));
+        var first = await Link(journal);
+        try { return (first, await Link(data)); }
+        catch
+        {
+            // the second failed: the first is not left alive (the caller never gets it to cancel)
+            try { await Patiently(() => client.Messages_EditExportedChatInvite(journal, first, revoked: true)); }
+            catch (Exception ex) { Log.Warn($"revoke invite: {ex.Message}"); }
+            throw;
+        }
+    }
+
+    /// <summary>Cancel the two links (used or not): after a one-click backup nothing is left that could be used.
+    /// Never throws (it runs in a finally: the error that matters is the one before it).</summary>
+    public static async Task RevokeInviteLinksAsync(Client client, TelegramChannels ch, (string Journal, string Data) links)
+    {
+        Channel journal, data;
+        try
+        {
+            await ResumeAsync(client);
+            (journal, data) = await DriveChannelsAsync(client, ch);
+        }
+        catch (Exception ex) { Log.Warn($"revoke invites: {ex.Message} (they expire within 24 hours, and work once)"); return; }
+        foreach (var (c, link) in new[] { (journal, links.Journal), (data, links.Data) })
+            try { await Patiently(() => client.Messages_EditExportedChatInvite(c, link, revoked: true)); }
+            catch (Exception ex) { Log.Warn($"revoke invite: {ex.Message}"); } // often: already used up / expired
     }
 
     /// <summary>Accounts that joined BOTH channels but are not admins yet (candidates for the backup).</summary>
@@ -306,6 +355,17 @@ public sealed class TelegramRemote : IRemote
         if (!_joined.TryGetValue(userId, out var u)) { await JoinedNotAdminAsync(client, ch); u = _joined.GetValueOrDefault(userId); }
         if (u is null) throw new RpcException(400, "USER_NOT_PARTICIPANT");
         return await PromoteAsync(client, ch, u);
+    }
+
+    /// <summary>Join a channel with an invite link (another account signed in on this PC, becoming a backup).</summary>
+    public static async Task JoinByInviteAsync(Client client, string link)
+    {
+        await ResumeAsync(client);
+        var hash = link.TrimEnd('/');
+        int cut = Math.Max(hash.LastIndexOf('+'), hash.LastIndexOf('/'));
+        hash = hash[(cut + 1)..];
+        try { await Patiently(() => client.Messages_ImportChatInvite(hash)); }
+        catch (RpcException e) when (e.Message == "USER_ALREADY_PARTICIPANT") { }
     }
 
     /// <summary>Do the drive's channels still exist for this account, and does it own them (may delete them)?</summary>

@@ -10,8 +10,12 @@ public sealed class FolderRemote : IRemote
     readonly string _root, _data, _journal;
     readonly object _gate = new();
     public int Latency { get; set; } // ms, to simulate a slow network in tests
+    /// <summary>Tests: uploads hang without sending anything (a dead connection), until set back to false.</summary>
+    public volatile bool StallUploads;
     /// <summary>Tests: the next N window reads come back cut in half, with no error (as Telegram can do).</summary>
     public int TruncateNextReads;
+    long _bytesSent;
+    public long BytesSent => Interlocked.Read(ref _bytesSent);
 
     public FolderRemote(string root)
     {
@@ -46,7 +50,15 @@ public sealed class FolderRemote : IRemote
 
     public async Task<int> UploadChunkAsync(string name, byte[] payload, CancellationToken ct)
     {
-        await Delay(ct);
+        // a slow "upload" reports progress as it goes, like Telegram's parts
+        while (StallUploads) await Task.Delay(50, ct);
+        int steps = Math.Max(1, Latency / 100);
+        for (int i = 0; i < steps; i++)
+        {
+            if (Latency > 0) await Task.Delay(Latency / steps, ct);
+            // every byte counted once (the remainder of the division goes with the last step)
+            Interlocked.Add(ref _bytesSent, (long)payload.Length * (i + 1) / steps - (long)payload.Length * i / steps);
+        }
         int id = NextId();
         WriteAtomic(Path.Combine(_data, $"{id}.bin"), payload);
         return id;

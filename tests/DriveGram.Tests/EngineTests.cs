@@ -188,4 +188,59 @@ public class EngineTests
         Assert.True(peak <= CS * 4, $"staging peaked at {peak:N0} bytes");
         Assert.Equal(data, a.ReadFile(id));
     }
+
+    [Fact]
+    public async Task ACopyWaitsAsLongAsUploadsMove()
+    {
+        // uploads much slower than the copy (as when Telegram slows them down): the writer waits far longer
+        // than BackpressureTimeout, and the copy still completes, because uploads keep moving
+        await using var kit = await TestKit.CreateAsync();
+        kit.Remote.Latency = 5000; // one piece takes 5 s, with progress along the way
+        var a = kit.Pc("a", new EngineOptions
+        {
+            StagingQuota = CS * 2,
+            SealIdle = TimeSpan.FromMilliseconds(50),
+            CommitDelay = TimeSpan.FromMilliseconds(50),
+            CacheQuota = 64L << 20,
+            UploadConcurrency = 1,
+            BackpressureTimeout = TimeSpan.FromSeconds(2.5),  // the old rule gave up after this
+            MaxWriteWait = TimeSpan.FromSeconds(60),
+        });
+        var data = TestKit.RandomBytes(CS * 4, 7);
+        var id = a.NewFile("big.mkv");
+        a.Engine.Opened(id, true);
+        var started = DateTime.UtcNow;
+        for (int i = 0; i < data.Length; i += 512 * 1024)
+            a.Engine.Write(id, i, data.AsSpan(i, 512 * 1024));
+        Assert.True(DateTime.UtcNow - started > TimeSpan.FromSeconds(3), "the copy should have waited for uploads");
+        a.Engine.Closed(id, true);
+        await a.SettleAsync();
+        Assert.Equal(data, a.ReadFile(id));
+    }
+
+    [Fact]
+    public async Task ACopyGivesUpWhenNothingUploads()
+    {
+        await using var kit = await TestKit.CreateAsync();
+        kit.Remote.StallUploads = true; // a dead connection: nothing is sent at all
+        var a = kit.Pc("a", new EngineOptions
+        {
+            StagingQuota = CS * 2,
+            SealIdle = TimeSpan.FromMilliseconds(50),
+            CacheQuota = 64L << 20,
+            BackpressureTimeout = TimeSpan.FromMilliseconds(500),
+            MaxWriteWait = TimeSpan.FromSeconds(60), // long: the give-up must come from "no progress", well before this
+        });
+        var data = TestKit.RandomBytes(CS * 6, 8);
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var id = a.NewFile("big.mkv");
+        a.Engine.Opened(id, true);
+        var ex = Assert.Throws<IOException>(() =>
+        {
+            for (int i = 0; i < data.Length; i += 512 * 1024) a.Engine.Write(id, i, data.AsSpan(i, 512 * 1024));
+        });
+        Assert.Contains("staging area is full", ex.Message);
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(30), $"gave up after {watch.Elapsed} (MaxWriteWait, not the no-progress rule)");
+        kit.Remote.StallUploads = false;
+    }
 }

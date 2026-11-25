@@ -817,8 +817,7 @@ public sealed partial class SyncService : IAsyncDisposable
                 else
                 {
                     await CheckHeldBackContentAsync(ct);
-                    var held = _db.UncommittedNewFiles();
-                    var batch = _db.PeekOutbox(5000).Where(b => !held.Contains(b.Op.Id)).Take(500).ToList();
+                    var batch = _db.PeekSendable(500); // also past thousands of paused new files at the front
                     if (batch.Count == 0) { _db.SetMeta("inflight", null); return; }
                     while (true)
                     {

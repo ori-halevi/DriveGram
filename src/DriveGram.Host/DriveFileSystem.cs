@@ -231,6 +231,9 @@ public sealed class DriveFileSystem : FileSystemBase
     }
 
     readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _createdAt = new();
+    // names a file paused by itself just left (renamed away by a "safe save"): the file that takes the name
+    // over within a moment is the same document, so it stays paused too (parent + upper-case name → when)
+    readonly System.Collections.Concurrent.ConcurrentDictionary<(string, string), long> _pausedNames = new();
 
     static bool LooksTemporary(string name) =>
         name.StartsWith("~") || name.StartsWith(".~lock") ||
@@ -495,9 +498,18 @@ public sealed class DriveFileSystem : FileSystemBase
         // a save via "temp file + rename over the original" keeps the document's creation date
         long ctime = existing is not null && existing.Id != n.Id && !existing.Dir ? existing.Ctime : n.Ctime;
         ops.Add(new UpsertOp(n.Id, newParent.Id, newName, n.Dir, n.Attrs, ctime, n.Mtime));
+        // a paused document saved again by Word or Excel (a new file taking its name) stays paused
+        long tick = Environment.TickCount64;
+        bool inheritPause = !n.Dir && (
+            (existing is not null && existing.Id != n.Id && _engine.IsPausedByItself(existing.Id))
+            || (_pausedNames.TryRemove((newParent.Id, newName.ToUpperInvariant()), out var leftAt) && tick - leftAt < 120_000));
+        if (!n.Dir && n.Parent is { } oldParent && _engine.IsPausedByItself(n.Id))
+            _pausedNames[(oldParent, n.Name.ToUpperInvariant())] = tick;
         var dropFiles = dropExisting ? _engine.DiscardLater(existing!.Id) : null;
         _db.ApplyLocal(ops);
         if (dropFiles is not null) { _db.Durable(); dropFiles(); } // a trashed replaced file keeps its content (an unfinished upload still completes)
+        if (inheritPause) _engine.Pause(n.Id);
+        if (_pausedNames.Count > 1000) _pausedNames.Clear();
         return STATUS_SUCCESS;
     }
 

@@ -15,14 +15,39 @@ public sealed class BlockCache
     readonly object _gate = new();
     readonly LinkedList<Entry> _lru = new(); // First = most recently used
     readonly Dictionary<string, LinkedListNode<Entry>> _map = new();
-    long _bytes;
+    long _bytes, _keptBytes;
+    Func<string, bool>? _kept;
+    bool _waitForKept; // nothing is evicted until the prepared files are known (they would go first)
+
+    /// <summary>
+    /// Entries of files prepared on this PC on purpose: never evicted and not counted against the quota
+    /// (the user chose to keep them), until the predicate says otherwise. Call again when it changes.
+    /// </summary>
+    public void SetKept(Func<string, bool>? kept)
+    {
+        lock (_gate)
+        {
+            _kept = kept;
+            _waitForKept = false;
+            _keptBytes = kept is null ? 0 : _lru.Where(e => kept(e.Key)).Sum(e => e.Size);
+        }
+        Evict();
+    }
+
+    bool IsKept(string key) => _kept is { } k && k(key);
+
+    /// <summary>Bytes of prepared (kept) files.</summary>
+    public long KeptBytes { get { lock (_gate) return _keptBytes; } }
 
     public long Quota { get; set; }
     public long Bytes { get { lock (_gate) return _bytes; } }
 
-    public BlockCache(string dir, long quota)
+    /// <param name="waitForKept">Evict nothing until <see cref="SetKept"/> is called: on a restart the
+    /// prepared files are not known yet, and as the oldest entries they would be evicted first.</param>
+    public BlockCache(string dir, long quota, bool waitForKept = false)
     {
         Quota = quota;
+        _waitForKept = waitForKept;
         _wDir = Path.Combine(dir, "w");
         _pDir = Path.Combine(dir, "p");
         Directory.CreateDirectory(_wDir);
@@ -99,19 +124,60 @@ public sealed class BlockCache
 
     public string? TryGetPlain(string chunkId) => Touch("p/" + chunkId);
 
+    /// <summary>Is this chunk's plaintext cached (without counting as a use)?</summary>
+    public bool TryGetPlainQuiet(string chunkId)
+    {
+        lock (_gate) return _map.ContainsKey("p/" + chunkId);
+    }
+
     /// <summary>Drop every cached copy (all of it is stored in Telegram too). A read that was about to use
     /// one simply fetches it again. Returns the bytes freed.</summary>
     public long Clear()
     {
-        List<string> victims;
-        long freed;
+        var victims = new List<string>();
+        long freed = 0;
         lock (_gate)
         {
-            victims = _lru.Select(e => e.Path).ToList();
-            freed = _bytes;
-            _lru.Clear();
-            _map.Clear();
-            _bytes = 0;
+            // files prepared on purpose stay (they are freed one by one, by the user)
+            for (var n = _lru.First; n is not null;)
+            {
+                var next = n.Next;
+                if (!IsKept(n.Value.Key))
+                {
+                    victims.Add(n.Value.Path);
+                    freed += n.Value.Size;
+                    _map.Remove(n.Value.Key);
+                    _lru.Remove(n);
+                }
+                n = next;
+            }
+            _bytes -= freed;
+        }
+        foreach (var v in victims) TryDelete(v);
+        return freed;
+    }
+
+    /// <summary>Drop these entries now (a prepared file the user freed).</summary>
+    public long Drop(Func<string, bool> which)
+    {
+        var victims = new List<string>();
+        long freed = 0;
+        lock (_gate)
+        {
+            for (var n = _lru.First; n is not null;)
+            {
+                var next = n.Next;
+                if (which(n.Value.Key))
+                {
+                    victims.Add(n.Value.Path);
+                    freed += n.Value.Size;
+                    if (IsKept(n.Value.Key)) _keptBytes -= n.Value.Size;
+                    _map.Remove(n.Value.Key);
+                    _lru.Remove(n);
+                }
+                n = next;
+            }
+            _bytes -= freed;
         }
         foreach (var v in victims) TryDelete(v);
         return freed;
@@ -147,9 +213,11 @@ public sealed class BlockCache
     {
         lock (_gate)
         {
-            if (_map.Remove(key, out var old)) { _lru.Remove(old); _bytes -= old.Value.Size; }
+            bool kept = IsKept(key);
+            if (_map.Remove(key, out var old)) { _lru.Remove(old); _bytes -= old.Value.Size; if (kept) _keptBytes -= old.Value.Size; }
             _map[key] = _lru.AddFirst(new Entry(key, path, size));
             _bytes += size;
+            if (kept) _keptBytes += size;
         }
         Evict();
     }
@@ -158,7 +226,12 @@ public sealed class BlockCache
     {
         lock (_gate)
         {
-            if (_map.Remove(key, out var node)) { _lru.Remove(node); _bytes -= node.Value.Size; }
+            if (_map.Remove(key, out var node))
+            {
+                _lru.Remove(node);
+                _bytes -= node.Value.Size;
+                if (IsKept(key)) _keptBytes -= node.Value.Size;
+            }
         }
     }
 
@@ -167,13 +240,24 @@ public sealed class BlockCache
         var victims = new List<string>();
         lock (_gate)
         {
-            while (_bytes > Quota && _lru.Last is { } last)
+            if (_waitForKept) return;
+            // oldest first; prepared files are skipped and do not count against the quota
+            var passed = new List<LinkedListNode<Entry>>();
+            for (var n = _lru.Last; n is not null && _bytes - _keptBytes > Quota;)
             {
-                _lru.RemoveLast();
-                _map.Remove(last.Value.Key);
-                _bytes -= last.Value.Size;
-                victims.Add(last.Value.Path);
+                var prev = n.Previous;
+                if (!IsKept(n.Value.Key))
+                {
+                    _lru.Remove(n);
+                    _map.Remove(n.Value.Key);
+                    _bytes -= n.Value.Size;
+                    victims.Add(n.Value.Path);
+                }
+                else passed.Add(n);
+                n = prev;
             }
+            // kept for good: moved to the other end (after the walk), so the next eviction does not pass them again
+            foreach (var k in passed) { _lru.Remove(k); _lru.AddFirst(k); }
         }
         foreach (var v in victims) TryDelete(v);
     }

@@ -25,6 +25,8 @@ public sealed class AppConfig
     /// <summary>Shown to Windows as a network drive (backup/antivirus/indexing tools skip it) instead of a
     /// regular disk. Off by default; chosen in the tray menu ("Drive type…").</summary>
     public bool NetworkDrive { get; set; }
+    /// <summary>The user paused this drive's uploads (kept until resumed, also after a restart).</summary>
+    public bool UploadsPaused { get; set; }
     public double StagingQuotaGb { get; set; } = 8;
     public double CacheQuotaGb { get; set; } = 10;
     public int UploadConcurrency { get; set; } = 2;
@@ -119,6 +121,8 @@ public sealed class AppState
         s.Config.MountPoint = $"{"TUVWXYZSRQPONMLKJIHGFED".FirstOrDefault(c => !used.Contains(c) && !inUse.Contains(c), 'T')}:";
         var withApi = All().FirstOrDefault(a => a.Config.ApiId != 0); // reuse API credentials of an existing drive
         if (withApi is not null) { s.Config.ApiId = withApi.Config.ApiId; s.Config.ApiHash = withApi.Config.ApiHash; }
+        else if (TelegramAccounts.Known().FirstOrDefault(a => a.ApiId != 0) is { } account)
+        { s.Config.ApiId = account.ApiId; s.Config.ApiHash = account.ApiHash; } // signed in, no drive yet
         return s;
     }
 
@@ -187,6 +191,8 @@ public sealed class AppState
         }
     }
     public void ForgetMaster() { if (File.Exists(MasterKeyPath)) File.Delete(MasterKeyPath); }
+    /// <summary>Is the drive key remembered on this PC (without decrypting it)?</summary>
+    public bool HasRememberedMaster => File.Exists(MasterKeyPath);
 }
 
 /// <summary>

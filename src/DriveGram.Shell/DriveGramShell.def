@@ -1,0 +1,4 @@
+LIBRARY DriveGramShell
+EXPORTS
+    DllGetClassObject   PRIVATE
+    DllCanUnloadNow     PRIVATE

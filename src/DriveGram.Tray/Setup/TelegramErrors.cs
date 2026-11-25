@@ -54,9 +54,9 @@ static class TelegramErrors
             "The account is not signed in to Telegram on this PC. Open the drive's \"Settings and sign-in\"."),
         DriveGram.Remote.DriveVanishedException => L.T("הכונן לא נמצא בחשבון הטלגרם הזה (אולי הערוצים שלו נמחקו, או שהחשבון הוסר מהם).",
             "The drive was not found on this Telegram account (its channels may have been deleted, or the account removed from them)."),
-        DriveGram.ControlNotTrustedException => L.T("רשומת הכונן שונתה מחוץ ל־DriveGram. אשר אותה קודם: בתפריט, \"אשר את רשומת הכונן…\".",
-            "The drive's record was changed outside DriveGram. Confirm it first: \"Confirm the drive's record…\" in the menu."),
-        DriveGram.LeaseLostException => L.T("מחשב אחר לקח את הכונן לכתיבה. אפשר לבקש אותו בחזרה מהתפריט.",
+        DriveGram.ControlNotTrustedException => L.T("רשומת הכונן שונתה מחוץ ל־DriveGram. אשר אותה קודם: בתפריט של הכונן, \"אשר את רשומת הכונן…\".",
+            "The drive's record was changed outside DriveGram. Confirm it first: \"Confirm the drive's record…\" in the drive's menu."),
+        DriveGram.LeaseLostException => L.T("מחשב אחר לקח את הכונן לכתיבה. אפשר לבקש אותו בחזרה: בתפריט של הכונן, \"בקש את הכונן מ־…\".",
             "Another PC took the drive for writing. You can ask for it back from the menu."),
         DriveGram.Crypto.WrongPasswordException => L.T("הסיסמה (או מפתח השחזור) שגויה.", "Wrong password (or recovery key)."),
         DriveGram.NewerVaultException { WrongSecret: true } => L.T("הסיסמה לא פותחת את רשומת הכונן שבטלגרם.", "The password does not open the drive's record in Telegram."),
@@ -90,8 +90,8 @@ static class TelegramErrors
         _ when ex.Message.Any(ch => ch is >= '\u0590' and <= '\u05FF') || ex.GetType().Namespace?.StartsWith("DriveGram") == true
             => ex.Message, // ours: already written for people
         _ when !L.Hebrew && OursInEnglish.Any(p => ex.Message.StartsWith(p, StringComparison.Ordinal)) => ex.Message, // ours (L.T), in English
-        _ => L.T($"משהו השתבש ({ex.Message}). נסה שוב בעוד רגע; אם זה חוזר, הפרטים ביומן הפעילות (בתפריט ← \"פתח את תיקיית יומן הפעילות\").",
-                 $"Something went wrong ({ex.Message}). Try again in a moment; if it keeps happening, details are in the log (menu → \"Open the log folder\")."),
+        _ => L.T($"משהו השתבש ({ex.Message}). נסה שוב בעוד רגע; אם זה חוזר, הפרטים ביומן הפעילות (בתפריט של האייקון שליד השעון ← \"פתח את תיקיית יומן הפעילות\").",
+                 $"Something went wrong ({ex.Message}). Try again in a moment; if it keeps happening, details are in the log (the menu of the icon next to the clock → \"Open the log folder\")."),
     };
 
     /// <summary>Messages DriveGram.Host builds with L.T on standard exception types: in English they have

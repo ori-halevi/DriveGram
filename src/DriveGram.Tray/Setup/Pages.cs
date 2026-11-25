@@ -165,6 +165,7 @@ sealed class ApiPage : WizardPage
 // ── 3. Telegram sign-in ─────────────────────────────────────────────────────
 sealed class LoginPage : WizardPage
 {
+    public override string NextText => Ctx.AccountOnly ? L.T("המשך לבחירת כונן", "Continue to choosing a drive") : base.NextText;
     readonly Panel _account = Theme.Card(Color.FromArgb(0xEC, 0xF7, 0xEE), Color.FromArgb(0xB7, 0xDF, 0xC0));
     readonly Label _accountText = Theme.Label("", Theme.Body, Theme.Text, 600);
     readonly FlowLayoutPanel _signIn = Theme.Column();
@@ -358,7 +359,7 @@ sealed class LoginPage : WizardPage
     void ShowKnownAccounts()
     {
         _known.Controls.Clear();
-        var accounts = TelegramAccounts.Known().Where(a => a.Key != Ctx.State.Config.AccountKey && a.Key != _revoked).ToList();
+        var accounts = Ctx.AccountOnly ? new List<AccountInfo>() : TelegramAccounts.Known().Where(a => a.Key != Ctx.State.Config.AccountKey && a.Key != _revoked).ToList();
         _known.Visible = accounts.Count > 0;
         if (accounts.Count == 0) return;
         _known.Controls.Add(Theme.Label(L.T("חשבון שכבר מחובר במחשב הזה (בלי התחברות נוספת):", "An account already signed in on this PC (no new sign-in):"), Theme.Heading));
@@ -533,6 +534,7 @@ sealed class LoginPage : WizardPage
 
     async Task ShowTwoFaAsync(string? error)
     {
+        _known.Visible = false; // mid sign-in: not the place to pick another account
         _twoFa.Visible = true;
         _twoFaBox.Text = "";
         _error.Text = error ?? "";
@@ -634,6 +636,7 @@ sealed class LoginPage : WizardPage
     {
         if (Ui.Ask(L.T("להתנתק מהחשבון הנוכחי ולהתחבר עם חשבון אחר?", "Sign out of this account and use a different one?"),
                 def: MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+        _revoked = Ctx.State.Config.AccountKey; // signing out now: not offered again on this page
         await Task.Run(() => Ctx.ResetClient(signOut: true));
         Ctx.State.Config.Channels = null; // the drive lives on the other account
         Ctx.State.Config.AccountId = 0;
@@ -667,21 +670,29 @@ sealed class DrivePage : WizardPage
     readonly Label _pwLabel = Theme.Label(L.T("סיסמה:", "Password:"), Theme.Small, Theme.Muted);
     readonly Label _confirmLabel = Theme.Label(L.T("הקלד שוב:", "Repeat it:"), Theme.Small, Theme.Muted);
     readonly TextBox _pw2 = Theme.Input(290, password: true);
-    readonly CheckBox _show = new() { Text = L.T("הצג סיסמה", "Show password"), AutoSize = true, Font = Theme.Small };
+    readonly CheckBox _show = new ToggleSwitch(L.T("הצג סיסמה", "Show password"));
     readonly FlowLayoutPanel _strength = Theme.Row();
     readonly Panel _meter = new() { Size = new Size(290, 6), BackColor = Theme.Border, Margin = new Padding(0, 8, 0, 0) };
     readonly Panel _meterFill = new() { Dock = L.Rtl ? DockStyle.Right : DockStyle.Left, Width = 0 };
     readonly Label _meterText = Theme.Label("", Theme.Small, Theme.Muted);
     readonly Panel _warning = Theme.Card(Theme.WarnBack, Theme.WarnBorder);
     readonly CheckBox _saved = new() { Text = L.T("שמרתי את הסיסמה במקום בטוח", "I saved the password somewhere safe"), AutoSize = true };
-    // wraps at the page's text width (on one line it was wider than the page: a horizontal scroll bar)
-    readonly CheckBox _remember = Theme.WrapCheck(
-        L.T("לזכור את הסיסמה במחשב הזה (כדי שהכונן ייפתח לבד, בלי לשאול)", "Remember the password on this PC (so the drive opens by itself, without asking)"),
-        Theme.Body, 640, on: true);
-    readonly Label _rememberNote = Theme.Label(L.T(
-        "היא נשמרת מוצפנת, רק למשתמש שלך בווינדוס: מי שנכנס למשתמש הזה יוכל לפתוח את הכונן בלי סיסמה. אם אנשים אחרים משתמשים באותו משתמש, עדיף לא לסמן (ואז הסיסמה תתבקש בכל חיבור של הכונן).",
-        "It is kept encrypted, for your Windows user only: anyone who can use that Windows user can open the drive without the password. If others share that Windows user, better leave it off (the password is then asked each time the drive connects)."),
-        Theme.Small, Theme.Muted, 640);
+    readonly CheckBox _remember = new ToggleSwitch(L.T("לזכור את הסיסמה במחשב הזה", "Remember the password on this PC")) { Checked = true };
+    // the details of "remember" sit behind an (i): one glance at the page stays simple
+    readonly Label _rememberInfo = new() { Text = "ⓘ", AutoSize = true, Font = new Font(Theme.Body.FontFamily, 13f), ForeColor = Theme.Accent, Cursor = Cursors.Help, Margin = new Padding(4, 3, 4, 0) };
+    readonly ToolTip _tips = new() { AutoPopDelay = 30000, InitialDelay = 200 };
+    static readonly string RememberText = L.T(
+        "הסיסמה נשמרת מוצפנת, רק למשתמש שלך בווינדוס, כדי שהכונן ייפתח לבד בלי לשאול. מי שנכנס למשתמש הזה יוכל לפתוח את הכונן בלי סיסמה: אם אנשים אחרים משתמשים באותו משתמש, עדיף לכבות (ואז הסיסמה תתבקש בכל חיבור של הכונן).",
+        "The password is kept encrypted, for your Windows user only, so the drive opens by itself without asking. Anyone who can use that Windows user can open the drive without the password: if others share that Windows user, better turn it off (the password is then asked each time the drive connects).");
+    readonly FlowLayoutPanel _settingsRow = Theme.Row();
+    // what the last page used to ask (a new Telegram drive): the drive type, and starting with Windows
+    // each drive's own type and "remember" (a new drive's here; an existing drive's in its card)
+    readonly ComboBox _newType = TypeBox();
+    readonly FlowLayoutPanel _newRememberRow = Theme.Row();
+    readonly Dictionary<long, ComboBox> _types = [];
+    readonly Dictionary<long, CheckBox> _remembers = [];
+    readonly CheckBox _autostart = new ToggleSwitch(L.T("הפעל את DriveGram אוטומטית כשנכנסים לווינדוס", "Start DriveGram automatically when I sign in to Windows")) { Checked = true };
+    bool _askAutostart;
     readonly Label _error = Theme.Label("", Theme.Small, Theme.Error);
     Mode _mode = Mode.Checking;
     bool _wasVanished;
@@ -696,16 +707,35 @@ sealed class DrivePage : WizardPage
     /// a drive chosen yet); changing an existing drive's settings, or a drive already chosen, is one drive.</summary>
     bool Multi => Ctx.IsNew && Ctx.UsesTelegram && Ctx.Current is not { Candidate: not null } and not { CreateNew: true };
 
-    // the other ticked drives' passwords, typed on this page (empty = the same as the first one)
-    readonly FlowLayoutPanel _others = Theme.Column();
+    /// <summary>This page also chooses the letter, name, drive type and autostart, and is the last step
+    /// (a queued drive got them from the page that queued it).</summary>
+    bool ChoosesAll => Ctx.DrivePageFinishes && Ctx.Current is not { Candidate: not null };
+
+    public override string NextText => !ChoosesAll || _mode is not (Mode.Connect or Mode.Create) ? base.NextText
+        : Ticked.Count + (_newTick?.Checked == true ? 1 : 0) > 1 ? L.T("סיום וחיבור הכוננים", "Finish and connect the drives")
+        : L.T("סיום וחיבור הכונן", "Finish and connect");
+
+    // with check boxes: each ticked drive's password right under it (empty = the same as the one before),
+    // and the new drive's fields right under "a new drive", shown only while it is ticked
     readonly Dictionary<long, TextBox> _otherBoxes = [];
+    readonly Dictionary<long, Label> _sameHints = [];
+    readonly Dictionary<CheckBox, Control> _tickBoxes = [];  // tick → its card (password, letter, name)
+    readonly Dictionary<long, ComboBox> _letters = [];
+    readonly Dictionary<long, TextBox> _labels = [];
+    readonly ComboBox _newLetter = LetterBox();
+    readonly FlowLayoutPanel _newLetterRow = Theme.Row();
     readonly Dictionary<long, string> _otherVerified = [];
+    readonly FlowLayoutPanel _createGroup = Theme.Column();
+    readonly Label _pickHint = Theme.Label(L.T("סמן כונן אחד או יותר.", "Tick one drive or more."), Theme.Small, Theme.Muted);
     bool _autoTried, _autoDone;
+    string? _typedNewName; // the new drive's name as typed, kept while another drive is shown
+    TelegramChannels? _createdChannels; // this run already created the new drive's channels (a retry reuses them)
+    string? _createdDriveId, _createdFor; // ...on this account
     public override bool Skip => _autoDone;
 
     // a new drive's piece size (fixed for the drive's life)
-    readonly RadioButton _chunk32 = new() { Text = L.T("32MB (מומלץ)", "32 MB (recommended)"), AutoSize = true, Checked = true, Margin = new Padding(0, 2, 0, 2) };
-    readonly RadioButton _chunk64 = new() { Text = "64MB", AutoSize = true, Margin = new Padding(0, 2, 0, 2) };
+    readonly RadioButton _chunk32 = new() { Text = L.T("32 MB (מומלץ)", "32 MB (recommended)"), AutoSize = true, Checked = true, Margin = new Padding(0, 2, 0, 2) };
+    readonly RadioButton _chunk64 = new() { Text = "64 MB", AutoSize = true, Margin = new Padding(0, 2, 0, 2) };
     readonly FlowLayoutPanel _chunkBox = Theme.Column();
     IRemote? _remote;
 
@@ -718,7 +748,7 @@ sealed class DrivePage : WizardPage
         Mode.Connected => L.T("הכל מוכן כאן.", "All set here."),
         _ => L.T("רגע אחד…", "One moment…"),
     };
-    public override int DemoVariants => 4;
+    public override int DemoVariants => 5;
 
     public DrivePage(SetupContext ctx) : base(ctx)
     {
@@ -749,8 +779,8 @@ sealed class DrivePage : WizardPage
         _meterText.Margin = new Padding(10, 0, 10, 0);
         _strength.Controls.AddRange([_meter, _meterText]);
         _warning.Controls.Add(Theme.Label(L.T(
-            "⚠  אי אפשר לשחזר את הסיסמה, גם לא DriveGram. בלעדיה (ובלי מפתח שחזור) אף אחד, גם לא אתה, לא יוכל לקרוא את הקבצים, אפילו עם גישה מלאה לחשבון הטלגרם. שמור אותה במנהל סיסמאות או רשום אותה. אחרי ההגדרה מומלץ ליצור מפתח שחזור: בתפריט ← \"סיסמה ומפתח שחזור…\".",
-            "⚠  The password cannot be recovered, not even by DriveGram. Without it (or a recovery key) nobody, including you, can read the files, even with full access to the Telegram account. Keep it in a password manager or write it down. After setup, creating a recovery key is recommended: menu → \"Password and recovery key…\"."),
+            "⚠  אי אפשר לשחזר את הסיסמה, גם לא DriveGram. בלעדיה (ובלי מפתח שחזור) אף אחד, גם לא אתה, לא יוכל לקרוא את הקבצים, אפילו עם גישה מלאה לחשבון הטלגרם. שמור אותה במנהל סיסמאות או רשום אותה. אחרי ההגדרה מומלץ ליצור מפתח שחזור: בתפריט של הכונן ← \"סיסמה ומפתח שחזור…\".",
+            "⚠  The password cannot be recovered, not even by DriveGram. Without it (or a recovery key) nobody, including you, can read the files, even with full access to the Telegram account. Keep it in a password manager or write it down. After setup, creating a recovery key is recommended: the drive's menu → \"Password and recovery key…\"."),
             Theme.Small, Theme.Text, 640));
         _name.RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No;
         _name.Font = Theme.Body;
@@ -760,8 +790,8 @@ sealed class DrivePage : WizardPage
         var chunkWhy = new LinkLabel { Text = L.T("מה ההבדל?", "What is the difference?"), AutoSize = true, Font = Theme.Body, LinkColor = Theme.Accent, Margin = new Padding(12, 4, 12, 2) };
         chunkWhy.LinkClicked += (_, _) => Ui.Info(L.T(
             "כל קובץ נשמר בטלגרם בחתיכות בגודל קבוע. המהירות כמעט זהה בשני הגדלים: כל חתיכה עולה בחלקים קטנים, כמה במקביל.\n\n" +
-            "32MB (מומלץ): מתאים לכל שימוש, ובמיוחד כשעורכים קבצים גדולים בתוך הכונן (וידאו, ‏Outlook, מכונות וירטואליות): שינוי קטן מוריד ומעלה מחדש עד 32MB. פחות זיכרון ופחות מקום זמני במחשב.\n\n" +
-            "64MB: מתאים לכונן שרק מעתיקים אליו קבצים גדולים מאוד ולא עורכים אותם (ארכיון, גיבויים): חצי מכמות הפניות לטלגרם. אבל כל שינוי בקובץ קיים מוריד ומעלה מחדש עד 64MB, ודורש יותר זיכרון ומקום זמני.\n\n" +
+            "32 MB (מומלץ): מתאים לכל שימוש, ובמיוחד כשעורכים קבצים גדולים בתוך הכונן (וידאו, ‏Outlook, מכונות וירטואליות): שינוי קטן מוריד ומעלה מחדש עד 32MB. פחות זיכרון ופחות מקום זמני במחשב.\n\n" +
+            "64 MB: מתאים לכונן שרק מעתיקים אליו קבצים גדולים מאוד ולא עורכים אותם (ארכיון, גיבויים): חצי מכמות הפניות לטלגרם. אבל כל שינוי בקובץ קיים מוריד ומעלה מחדש עד 64MB, ודורש יותר זיכרון ומקום זמני.\n\n" +
             "אי אפשר לשנות את זה אחרי שהכונן נוצר.",
             "Every file is stored in Telegram in pieces of a fixed size. Speed is about the same with both: each piece is uploaded in small parts, several at once.\n\n" +
             "32 MB (recommended): suits every use, especially editing large files inside the drive (video, Outlook, virtual machines): a small change downloads and uploads again at most 32 MB. Less memory and less temporary space on this PC.\n\n" +
@@ -770,7 +800,27 @@ sealed class DrivePage : WizardPage
         chunkRow.Controls.AddRange([_chunk32, _chunk64, chunkWhy]);
         _chunkBox.Controls.AddRange([chunkTitle, chunkRow]);
 
-        _form.Controls.AddRange([_intro, _nameLabel, _name, grid, _strength, _show, _others, _chunkBox, _warning, _saved, _remember, _rememberNote, _error]);
+        var newLetterLabel = Theme.Label(L.T("אות הכונן:", "Drive letter:"), Theme.Small, Theme.Muted);
+        newLetterLabel.Margin = new Padding(0, 6, 8, 0);
+        _newLetterRow.Controls.AddRange([newLetterLabel, _newLetter, TypeCaption(), _newType, TypeWhy(_newType, () => _name.Text)]);
+        _newLetterRow.Visible = false;
+        _newLetter.SelectedIndexChanged += (_, _) => UpdateState();
+        _createGroup.Controls.AddRange([_nameLabel, _name, grid, _strength, _show, _newLetterRow, _chunkBox, _warning, _saved]);
+        _tips.SetToolTip(_rememberInfo, RememberText);
+        _createGroup.Paint += (_, e) =>
+        {
+            if (_createGroup.Padding.All == 0 && _createGroup.Padding.Left == 0) return; // inside the one-drive form: no frame
+            using var pen = new Pen(Theme.Border);
+            e.Graphics.DrawRectangle(pen, 0, 0, _createGroup.Width - 1, _createGroup.Height - 1);
+        };
+        _rememberInfo.Click += (_, _) => Ui.Info(RememberText);
+        _settingsRow.Controls.AddRange([_remember, _rememberInfo]);
+        _autostart.Margin = new Padding(0, 6, 0, 2);
+        // the first drive on this PC: on (later drives keep what the user chose; the tray menu has it too)
+        _askAutostart = ChoosesAll && !AppState.All().Any(a => a.Dir != Ctx.State.Dir);
+        _autostart.Visible = _askAutostart;
+        _newLetterRow.Visible = ChoosesAll;
+        _form.Controls.AddRange([_intro, _createGroup, _settingsRow, _autostart, _error]);
         _form.Visible = false;
 
         col.Controls.AddRange([_checking, _driveRetry, _connected, _vanished, _choices, _form]);
@@ -785,7 +835,7 @@ sealed class DrivePage : WizardPage
         };
         _pw.TextChanged += (_, _) => UpdateState();
         _pw2.TextChanged += (_, _) => UpdateState();
-        _name.TextChanged += (_, _) => UpdateState();
+        _name.TextChanged += (_, _) => { UpdateState(); RefreshPlaceholders(); };
         _saved.CheckedChanged += (_, _) => UpdateState();
         _vanishedOk.CheckedChanged += (_, _) => UpdateState();
         Changed(false);
@@ -821,7 +871,15 @@ sealed class DrivePage : WizardPage
             }
 
             var candidates = await Task.Run(() => TelegramRemote.DiscoverAsync(client));
-            if (Ctx.Current is { CreateNew: true }) { Select(null); return; }
+            if (Ctx.Current is { CreateNew: true } cn)
+            {
+                Select(null);
+                if (cn.Label is { Length: > 0 } l) _name.Text = l;
+                if (cn.Letter is { } lt && _newLetter.Items.Contains(lt)) _newLetter.SelectedItem = lt;
+                if (cn.Network is { } nw) _newType.SelectedIndex = nw ? 0 : 1;
+                _remember.Checked = cn.Remember;
+                return;
+            }
             if (Ctx.Current is { Candidate: { Channels: { } wanted } want })
             {
                 // a drive ticked earlier in this sitting: straight to its password (the previous one is tried first)
@@ -837,11 +895,14 @@ sealed class DrivePage : WizardPage
                         // its password was typed and checked with the first drive: no second password window.
                         // Only once: coming Back here shows the page as usual.
                         _autoTried = true;
+                        Busy?.Invoke(true);
                         try { _autoDone = await NextAsync(); }
                         catch (Exception ex) { _error.Text = TelegramErrors.Text(ex); }
+                        finally { Busy?.Invoke(false); }
                     }
                     return;
                 }
+                Ctx.QueuedDriveGone = true;
                 ShowChoices(candidates); // selects a default, which clears the error line: the note comes after
                 _error.Text = L.T($"הכונן \"{want.Name}\" כבר לא זמין לחיבור (אולי הוא כבר מחובר, או שהוסר). אפשר לבחור כונן אחר, או ללחוץ \"ביטול\" כדי לדלג עליו.",
                     $"The drive \"{want.Name}\" can no longer be connected (perhaps it is connected already, or was removed). You can choose another one, or press \"Cancel\" to skip it.");
@@ -887,9 +948,21 @@ sealed class DrivePage : WizardPage
     {
         _choices.Controls.Clear();
         _ticks.Clear();
+        _tickBoxes.Clear();
+        _otherBoxes.Clear();
+        _sameHints.Clear();
         _newTick = null;
         var onThisPc = OnThisPc();
+        _letters.Clear();
+        _labels.Clear();
+        _types.Clear();
+        _remembers.Clear();
         if (Multi) { ShowTicks(candidates, onThisPc); return; }
+        if (_createGroup.Parent != _form) { _form.Controls.Add(_createGroup); _form.Controls.SetChildIndex(_createGroup, 1); }
+        if (_show.Parent != _createGroup) { _createGroup.Controls.Add(_show); _createGroup.Controls.SetChildIndex(_show, 4); }
+        if (_settingsRow.Parent != _form) { _form.Controls.Add(_settingsRow); _form.Controls.SetChildIndex(_settingsRow, 2); }
+        _createGroup.Margin = Padding.Empty;
+        _createGroup.Padding = Padding.Empty;
         RadioButton? first = null;
         if (candidates.Count > 0)
             _choices.Controls.Add(Theme.Label(L.T("כוננים שהחשבון הזה יכול לפתוח:", "Drives this account can open:"), Theme.Heading));
@@ -914,13 +987,37 @@ sealed class DrivePage : WizardPage
     /// handles the first; the others follow right after, each with its own letter and name.</summary>
     void ShowTicks(List<DriveCandidate> candidates, Dictionary<long, string> onThisPc)
     {
-        if (candidates.Count > 0)
+        // settings for every drive on the page, apart from the list: switches, not check boxes
+        // the settings of this page (not of one drive): plain switches under a title
+        _settingsRow.Controls.Clear();
+        _show.Text = L.T("הצג את הסיסמאות שאני מקליד", "Show the passwords I type");
+        _autostart.Text = L.T("הפעל את DriveGram אוטומטית כשנכנסים לווינדוס", "Start DriveGram automatically when I sign in to Windows");
+        _show.Margin = new Padding(0, 4, 0, 2);
+        _autostart.Margin = new Padding(0, 2, 0, 2);
+        var switches = Theme.Column();
+        switches.Controls.Add(_show);
+        if (_askAutostart) switches.Controls.Add(_autostart);
+        // the new drive's own "remember", in its group under the letter and type
+        _remember.Text = L.T("לזכור את הסיסמה במחשב הזה", "Remember the password on this PC");
+        _remember.Margin = new Padding(0, 6, 0, 2);
+        _rememberInfo.Margin = new Padding(4, 8, 4, 0);
+        if (_newRememberRow.Parent != _createGroup)
         {
-            _choices.Controls.Add(Theme.Label(L.T("כוננים שהחשבון הזה יכול לפתוח:", "Drives this account can open:"), Theme.Heading));
-            _choices.Controls.Add(Theme.Label(L.T("אפשר לסמן כמה כוננים, וגם כונן חדש: הם יתחברו אחד אחרי השני, כל אחד עם האות והשם שלו.",
-                "You can tick several drives, and a new one too: they are added one after another, each with its own letter and name."),
-                Theme.Small, Theme.Muted, 640));
+            _newRememberRow.Controls.AddRange([_remember, _rememberInfo]);
+            _createGroup.Controls.Add(_newRememberRow);
+            _createGroup.Controls.SetChildIndex(_newRememberRow, _createGroup.Controls.GetChildIndex(_newLetterRow) + 1);
         }
+        var title = Theme.Label(L.T("הגדרות לעמוד הזה", "Settings for this page"), Theme.Body, Theme.Text);
+        title.Font = new Font(Theme.Body, FontStyle.Bold);
+        title.Margin = new Padding(0, 0, 0, 2);
+        var bar = Theme.Card(Theme.Surface, Theme.Border);
+        var barCol = Theme.Column();
+        barCol.Controls.AddRange([title, switches]);
+        bar.Controls.Add(barCol);
+        bar.Margin = new Padding(0, 0, 0, 12);
+        _choices.Controls.Add(bar);
+        _choices.Controls.Add(Theme.Label(candidates.Count > 0 ? L.T("סמן את הכוננים שיתחברו למחשב הזה:", "Tick the drives to connect to this PC:")
+            : L.T("בחשבון הזה עוד אין כוננים:", "This account has no drives yet:"), Theme.Heading));
         foreach (var c in candidates)
         {
             string? why = c.Channels is null ? L.T("ערוץ הקבצים שלו חסר", "its data channel is missing")
@@ -931,7 +1028,13 @@ sealed class DrivePage : WizardPage
             var cb = new CheckBox { Text = $"{c.Name}  ·  {owner}{(why is null ? "" : $"  —  {why}")}", AutoSize = true, Enabled = why is null, Tag = c, Margin = new Padding(0, 2, 0, 4) };
             cb.CheckedChanged += (_, _) => TicksChanged();
             _choices.Controls.Add(cb);
-            if (why is null) _ticks.Add(cb);
+            if (why is null)
+            {
+                _ticks.Add(cb);
+                var card = DriveCard(c);
+                _tickBoxes[cb] = card;
+                _choices.Controls.Add(card);
+            }
         }
         _newTick = new CheckBox
         {
@@ -940,6 +1043,12 @@ sealed class DrivePage : WizardPage
         };
         _newTick.CheckedChanged += (_, _) => TicksChanged();
         _choices.Controls.Add(_newTick);
+        // the new drive's fields right under it, in a card like the others
+        _createGroup.Margin = new Padding(26, 0, 0, 10);
+        _createGroup.Padding = new Padding(12, 10, 12, 10); // drawn as a card (see the constructor)
+        _choices.Controls.Add(_createGroup);
+        _newLetterRow.Visible = true;
+        _choices.Controls.Add(_pickHint);
         _choices.Visible = true;
         if (_ticks.Count > 0) _ticks[0].Checked = true; else _newTick.Checked = true;
         if (_wasVanished) _vanished.Visible = true;
@@ -947,15 +1056,196 @@ sealed class DrivePage : WizardPage
 
     List<DriveCandidate> Ticked => _ticks.Where(t => t.Checked).Select(t => (DriveCandidate)t.Tag!).ToList();
 
+    static ComboBox TypeBox()
+    {
+        var b = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 190, Font = Theme.Body, RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No };
+        b.Items.AddRange([L.T("כונן רשת (מומלץ)", "Network drive (recommended)"), L.T("דיסק רגיל", "Regular disk")]);
+        b.SelectedIndex = 0;
+        return b;
+    }
+
+    static Label TypeCaption()
+    {
+        var l = Theme.Label(L.T("סוג:", "Type:"), Theme.Small, Theme.Muted);
+        l.Margin = new Padding(22, 6, 8, 0);
+        return l;
+    }
+
+    /// <summary>"What is the difference?" next to a drive's type: the comparison, and its choice back in the box.</summary>
+    LinkLabel TypeWhy(ComboBox box, Func<string> name)
+    {
+        var link = new LinkLabel { Text = L.T("מה ההבדל?", "What is the difference?"), AutoSize = true, Font = Theme.Small, LinkColor = Theme.Accent, Margin = new Padding(8, 6, 8, 0) };
+        link.LinkClicked += (_, _) =>
+        {
+            using var f = new DriveTypeForm(name().Trim() is { Length: > 0 } n ? n : "DriveGram", box.SelectedIndex == 0, inWizard: true);
+            if (f.ShowDialog(FindForm()) == DialogResult.OK) box.SelectedIndex = f.Network ? 0 : 1;
+        };
+        return link;
+    }
+
+    /// <summary>The drive this run handles: its "remember" and its type (a new drive's, or the first ticked one's).</summary>
+    bool FirstRemember => Multi && _mode == Mode.Connect && Ticked.FirstOrDefault()?.Channels is { } ch && _remembers.TryGetValue(ch.JournalId, out var r) ? r.Checked : _remember.Checked;
+    bool FirstNetwork => Multi && _mode == Mode.Connect && Ticked.FirstOrDefault()?.Channels is { } ch && _types.TryGetValue(ch.JournalId, out var t) ? t.SelectedIndex == 0 : _newType.SelectedIndex == 0;
+
+    static ComboBox LetterBox() => new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 80, Font = Theme.Body, RightToLeft = RightToLeft.No };
+
+    /// <summary>Letters free for a new drive here (not in use, not another DriveGram drive's).</summary>
+    List<string> FreeLetters()
+    {
+        var inUse = DriveInfo.GetDrives().Select(d => char.ToUpperInvariant(d.Name[0])).ToHashSet();
+        var others = AppState.All().Where(a => a.Dir != Ctx.State.Dir).Select(a => char.ToUpperInvariant(a.Config.MountPoint[0])).ToHashSet();
+        return "TUVWXYZSRQPONMLKJIHGFED".Where(ch => !inUse.Contains(ch) && !others.Contains(ch)).OrderBy(ch => ch).Select(ch => $"{ch}:").ToList();
+    }
+
+    /// <summary>A ticked drive's card: its password, its letter and its name in This PC (all labelled).</summary>
+    Panel DriveCard(DriveCandidate c)
+    {
+        var id = c.Channels!.JournalId;
+        var card = Theme.Card(Color.White, Theme.Border);
+        card.Margin = new Padding(26, 0, 0, 10);
+        card.Visible = false;
+        var grid = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Margin = new Padding(0) };
+        Label Caption(string t) { var l = Theme.Label(t, Theme.Small, Theme.Muted); l.Margin = new Padding(0, 7, 12, 0); return l; }
+        var box = Theme.Input(300, password: true);
+        box.UseSystemPasswordChar = !_show.Checked;
+        box.Margin = new Padding(0, 0, 0, 2);
+        var sameHint = Theme.Label("", Theme.Small, Theme.Muted, 300);
+        sameHint.Margin = new Padding(0, 0, 0, 8);
+        sameHint.Visible = false;
+        var pwCell = Theme.Column();
+        pwCell.Margin = new Padding(0);
+        pwCell.Controls.AddRange([box, sameHint]);
+        _sameHints[id] = sameHint;
+        box.TextChanged += (_, _) => UpdateState();
+        var letter = LetterBox();
+        letter.Margin = new Padding(0, 0, 0, 8);
+        letter.SelectedIndexChanged += (_, _) => UpdateState();
+        var label = Theme.Input(300);
+        label.Text = c.Name;
+        label.RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No;
+        label.Font = Theme.Body;
+        label.Margin = new Padding(0, 0, 0, 8);
+        label.TextChanged += (_, _) => { UpdateState(); RefreshPlaceholders(); };
+        letter.Margin = new Padding(0);
+        var type = TypeBox();
+        var letterAndType = Theme.Row();
+        letterAndType.Margin = new Padding(0, 0, 0, 4);
+        letterAndType.Controls.AddRange([letter, TypeCaption(), type, TypeWhy(type, () => label.Text)]);
+        var remember = new ToggleSwitch(L.T("לזכור את הסיסמה במחשב הזה", "Remember the password on this PC")) { Checked = true };
+        var info = new Label { Text = "ⓘ", AutoSize = true, Font = _rememberInfo.Font, ForeColor = Theme.Accent, Cursor = Cursors.Help, Margin = new Padding(4, 8, 4, 0) };
+        _tips.SetToolTip(info, RememberText);
+        info.Click += (_, _) => Ui.Info(RememberText);
+        var rememberRow = Theme.Row();
+        rememberRow.Margin = new Padding(0);
+        rememberRow.Controls.AddRange([remember, info]);
+        grid.Controls.Add(Caption(L.T("שם הכונן:", "Drive name:")), 0, 0);
+        grid.Controls.Add(label, 1, 0);
+        grid.Controls.Add(Caption(L.T("סיסמת הכונן:", "Drive password:")), 0, 1);
+        grid.Controls.Add(pwCell, 1, 1);
+        grid.Controls.Add(Caption(L.T("אות הכונן:", "Drive letter:")), 0, 2);
+        grid.Controls.Add(letterAndType, 1, 2);
+        grid.Controls.Add(new Label { AutoSize = true, Margin = new Padding(0) }, 0, 3);
+        grid.Controls.Add(rememberRow, 1, 3);
+        card.Controls.Add(grid);
+        _types[id] = type;
+        _remembers[id] = remember;
+        _otherBoxes[id] = box;
+        _letters[id] = letter;
+        _labels[id] = label;
+        return card;
+    }
+
+    /// <summary>Each ticked drive (and a ticked new one) gets a free letter no other ticked drive has.</summary>
+    void AssignLetters()
+    {
+        var free = FreeLetters();
+        var boxes = new List<ComboBox>();
+        foreach (var c in Ticked) if (c.Channels is { } ch && _letters.TryGetValue(ch.JournalId, out var b)) boxes.Add(b);
+        if (_newTick?.Checked == true || (!Multi && _mode == Mode.Create)) boxes.Insert(0, _newLetter);
+        // in order (the new drive first): a box keeping a letter an earlier ticked box already has picks again
+        var taken = new HashSet<string>();
+        foreach (var b in boxes)
+            if (b.SelectedItem is string l && !taken.Add(l)) b.SelectedIndex = -1;
+        foreach (var b in boxes.Append(_newLetter).Concat(_letters.Values).Distinct())
+        {
+            if (b.Items.Count == free.Count) continue;
+            var keep = b.SelectedItem as string;
+            b.Items.Clear();
+            foreach (var l in free) b.Items.Add(l);
+            if (keep is not null && free.Contains(keep)) b.SelectedItem = keep;
+        }
+        foreach (var b in boxes)
+        {
+            if (b.SelectedItem is string) continue;
+            // T: first, as before (then the letters after it, then back towards D:)
+            var pick = "TUVWXYZSRQPONMLKJIHGFED".Select(ch => $"{ch}:").FirstOrDefault(l => free.Contains(l) && !taken.Contains(l));
+            if (pick is null) continue;
+            b.SelectedItem = pick;
+            taken.Add(pick);
+        }
+    }
+
+    /// <summary>Two ticked drives with the same letter (null: all different).</summary>
+    string? LetterClash()
+    {
+        var chosen = new List<(string Name, string Letter)>();
+        if (_newTick?.Checked == true && _newLetter.SelectedItem is string nl) chosen.Add((_name.Text.Trim(), nl));
+        foreach (var c in Ticked)
+            if (c.Channels is { } ch && _letters.TryGetValue(ch.JournalId, out var b) && b.SelectedItem is string l) chosen.Add((c.Name, l));
+        var dup = chosen.GroupBy(x => x.Letter).FirstOrDefault(g => g.Count() > 1);
+        return dup is null ? null : L.T($"שני כוננים קיבלו את האות {L.Ltr(dup.Key)}. בחר לאחד מהם אות אחרת.", $"Two drives got the letter {dup.Key}. Choose another letter for one of them.");
+    }
+
+    /// <summary>A new drive, if ticked, is made first (its fields are on this page); the existing drives
+    /// ticked with it follow, their passwords checked here.</summary>
     void TicksChanged()
     {
         var ticked = Ticked;
         bool wantNew = _newTick?.Checked == true;
         _noneChosen = ticked.Count == 0 && !wantNew;
-        if (ticked.Count > 0) Select(ticked[0]);
+        _pickHint.Visible = _noneChosen;
+        foreach (var (cb, box) in _tickBoxes) box.Visible = cb.Checked;
+        AssignLetters();
+        KeepOrder();
+        RefreshPlaceholders();
+        if (wantNew && _mode == Mode.Create) SetMode(Mode.Create); // keeps the name typed (only the texts follow)
         else if (wantNew) Select(null);
-        else { _form.Visible = false; UpdateState(); }
+        else if (ticked.Count > 0) Select(ticked[0]);
+        else { _form.Visible = false; _createGroup.Visible = false; UpdateState(); }
     }
+
+    /// <summary>
+    /// Each box right under its tick, the new drive's fields under "a new drive". Windows moves a control
+    /// shown for the first time to the end of the list (its window is created only then), so put them back.
+    /// </summary>
+    void KeepOrder()
+    {
+        var all = _choices.Controls;
+        foreach (var (cb, box) in _tickBoxes)
+            if (all.Contains(box)) all.SetChildIndex(box, all.GetChildIndex(cb) + 1);
+        if (_newTick is not null && all.Contains(_createGroup)) all.SetChildIndex(_createGroup, all.GetChildIndex(_newTick) + 1);
+        if (all.Contains(_pickHint)) all.SetChildIndex(_pickHint, all.Count - 1);
+    }
+
+    /// <summary>The first box to type in is the one that must be filled; the others may stay empty (the same password).</summary>
+    void RefreshPlaceholders()
+    {
+        // the drive whose password an empty box borrows: the one before it (the new drive comes first)
+        string? before = _newTick?.Checked == true ? _name.Text.Trim() : null;
+        foreach (var c in Ticked)
+        {
+            if (c.Channels is not { } ch || !_otherBoxes.TryGetValue(ch.JournalId, out var box)) continue;
+            if (_sameHints.TryGetValue(ch.JournalId, out var hint))
+            {
+                hint.Text = before is null ? "" : L.T($"אפשר להשאיר ריק אם הסיסמה זהה לזו של \"{L.Name(before)}\".", $"Leave it empty if the password is the same as \"{before}\"'s.");
+                hint.Visible = before is not null;
+            }
+            before = _labels.TryGetValue(ch.JournalId, out var n) && n.Text.Trim().Length > 0 ? n.Text.Trim() : c.Name;
+        }
+    }
+
+    /// <summary>Where the password of the drive handled first is typed.</summary>
+    TextBox PwBox => Multi && _mode == Mode.Connect && Ticked.FirstOrDefault()?.Channels is { } ch && _otherBoxes.TryGetValue(ch.JournalId, out var b) ? b : _pw;
 
     RadioButton Choice(string text, DriveCandidate? candidate, bool enabled)
     {
@@ -967,42 +1257,18 @@ sealed class DrivePage : WizardPage
 
     void Select(DriveCandidate? c)
     {
+        if (c is not null && _mode == Mode.Create && !string.IsNullOrWhiteSpace(_name.Text)) _typedNewName = _name.Text;
         _selected = c;
         _ctrl = null;
         _error.Text = "";
         if (c is null)
         {
             var taken = AppState.All().Select(a => a.Config.VolumeLabel).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            _name.Text = Enumerable.Range(1, 99).Select(i => i == 1 ? "DriveGram" : $"DriveGram {i}").First(n => !taken.Contains(n));
+            _name.Text = _typedNewName
+                ?? Enumerable.Range(1, 99).Select(i => i == 1 ? "DriveGram" : $"DriveGram {i}").First(n => !taken.Contains(n));
             SetMode(Mode.Create);
         }
         else SetMode(Mode.Connect);
-    }
-
-    /// <summary>One password box per other ticked drive, under the first one's (empty: the same password).</summary>
-    void BuildOthers()
-    {
-        var rest = _mode == Mode.Connect && Multi ? Ticked.Skip(1).Where(c => c.Channels is not null).ToList() : [];
-        _others.Visible = rest.Count > 0;
-        var keep = _otherBoxes.ToDictionary(x => x.Key, x => x.Value.Text);
-        _others.Controls.Clear();
-        _otherBoxes.Clear();
-        if (rest.Count == 0) return;
-        var head = Theme.Label(L.T("הסיסמאות של שאר הכוננים שסימנת (השאר ריק אם הסיסמה זהה לזו שלמעלה):",
-            "The passwords of the other drives you ticked (leave empty if it is the same as above):"), Theme.Small, Theme.Muted, 640);
-        head.Margin = new Padding(0, 10, 0, 4);
-        _others.Controls.Add(head);
-        foreach (var c in rest)
-        {
-            var id = c.Channels!.JournalId;
-            _others.Controls.Add(Theme.Label(L.Name(c.Name), Theme.Small, Theme.Text));
-            var box = Theme.Input(290, password: true);
-            box.PlaceholderText = L.T("כמו הסיסמה למעלה", "same as above");
-            box.Text = keep.GetValueOrDefault(id, "");
-            box.UseSystemPasswordChar = !_show.Checked;
-            _otherBoxes[id] = box;
-            _others.Controls.Add(box);
-        }
     }
 
     /// <summary>The other ticked drives' passwords, checked now: a wrong one is said here, not in a later window.</summary>
@@ -1010,10 +1276,12 @@ sealed class DrivePage : WizardPage
     {
         _otherVerified.Clear();
         if (!Multi) return true;
-        foreach (var c in Ticked.Skip(1))
+        var prev = first;
+        foreach (var c in Ticked.Skip(_mode == Mode.Connect ? 1 : 0))
         {
             if (c.Channels is not { } ch || !_otherBoxes.TryGetValue(ch.JournalId, out var box)) continue;
-            var pw = box.Text.Length > 0 ? box.Text : first;
+            var pw = box.Text.Length > 0 ? box.Text : prev;
+            prev = pw;
             var remote = await Task.Run(() => TelegramRemote.OpenAsync(Ctx.GetClient(), ch, ownsClient: false));
             try
             {
@@ -1024,7 +1292,7 @@ sealed class DrivePage : WizardPage
                 {
                     _error.Text = box.Text.Length > 0
                         ? L.T($"הסיסמה של \"{c.Name}\" שגויה.", $"The password of \"{c.Name}\" is wrong.")
-                        : L.T($"הסיסמה שלמעלה לא פותחת את \"{c.Name}\". הקלד את הסיסמה שלו בשדה שלו.", $"The password above does not open \"{c.Name}\". Type its own password in its box.");
+                        : L.T($"הסיסמה שלמעלה לא פותחת את \"{c.Name}\". הקלד את הסיסמה שלו בשדה שמתחתיו.", $"The password above does not open \"{c.Name}\". Type its own password in the box under it.");
                     box.SelectAll();
                     box.Focus();
                     return false;
@@ -1048,10 +1316,14 @@ sealed class DrivePage : WizardPage
         if (!Multi || Ctx.Account is not { } account) return;
         foreach (var c in Ticked.Skip(_mode == Mode.Connect ? 1 : 0))
         {
-            bool known = c.Channels is { } ch && _otherVerified.ContainsKey(ch.JournalId);
-            _enqueued.Add(new NextDrive(account, c, false, known ? _otherVerified[c.Channels!.JournalId] : pw, known, _remember.Checked));
+            var id = c.Channels!.JournalId;
+            bool known = _otherVerified.ContainsKey(id);
+            _enqueued.Add(new NextDrive(account, c, false, known ? _otherVerified[id] : pw, known, _remembers.GetValueOrDefault(id)?.Checked ?? true,
+                _letters.GetValueOrDefault(id)?.SelectedItem as string, _labels.GetValueOrDefault(id)?.Text.Trim() is { Length: > 0 } n ? n : c.Name,
+                _types.GetValueOrDefault(id)?.SelectedIndex is { } t ? t == 0 : null));
         }
-        if (_newTick?.Checked == true && _mode == Mode.Connect) _enqueued.Add(new NextDrive(account, null, true, pw, Remember: _remember.Checked));
+        if (_newTick?.Checked == true && _mode == Mode.Connect) _enqueued.Add(new NextDrive(account, null, true, pw, Remember: _remember.Checked,
+            Letter: _newLetter.SelectedItem as string, Label: _name.Text.Trim(), Network: _newType.SelectedIndex == 0));
         Ctx.Queue.InsertRange(0, _enqueued);
     }
 
@@ -1059,14 +1331,15 @@ sealed class DrivePage : WizardPage
     public override void Demo(int variant)
     {
         _wasVanished = variant == 3;
-        if (variant == 0)
+        if (variant is 0 or 4)
         {
             ShowChoices([
                 new DriveCandidate("a", "DriveGram", new TelegramChannels(1, 1, 2, 2), true, true, true),
                 new DriveCandidate("b", "Photos", new TelegramChannels(3, 3, 4, 4), true, true, true),
                 new DriveCandidate("c", "DriveGram", new TelegramChannels(5, 5, 6, 6), false, true, false)]);
-            _pw.Text = "secret";
-            if (_ticks.Count > 1) _ticks[1].Checked = true; // two drives: shows the second one's password box
+            if (_ticks.Count > 1) _ticks[1].Checked = true; // two drives: each with its password box
+            PwBox.Text = "secret";
+            if (variant == 4 && _newTick is not null) { _newTick.Checked = true; _pw.Text = _pw2.Text = "Correct-Horse-7"; }
             return;
         }
         _choices.Visible = false;
@@ -1089,28 +1362,41 @@ sealed class DrivePage : WizardPage
         bool create = mode == Mode.Create;
         _nameLabel.Visible = _name.Visible = create && Ctx.UsesTelegram;
         _confirmLabel.Visible = _pw2.Visible = _strength.Visible = _warning.Visible = _saved.Visible = _chunkBox.Visible = create;
-        BuildOthers();
+        if (Multi) _show.Visible = true; // in the settings bar, for every box
+        // with check boxes the new drive's fields are under its tick: only while it is ticked
+        _createGroup.Visible = !Multi || create;
+        // with check boxes, a new drive's explanation goes above its own fields (under its tick)
+        var introHome = Multi && create ? _createGroup : _form;
+        if (_intro.Parent != introHome) { introHome.Controls.Add(_intro); introHome.Controls.SetChildIndex(_intro, 0); }
+        if (Multi) KeepOrder();
+        else if (create && ChoosesAll) AssignLetters(); // one new drive (from the main window): its letter here too
         _intro.Text = create
             ? L.T("בחר סיסמה לכונן, לפחות 10 תווים. היא מצפינה כל קובץ לפני שהוא עולה לטלגרם.",
                   "Choose a drive password, at least 10 characters. It encrypts every file before it goes to Telegram.")
               + (Ctx.UsesTelegram ? L.T(
-                  " בחשבון ייווצרו שני ערוצים פרטיים: \"DriveGram Data · <שם הכונן>\" (הקבצים) ו־\"DriveGram Journal · <שם הכונן>\" (היומן: רשימת הקבצים והשינויים). הם הכונן עצמו: אל תמחק אותם ואל תכתוב בהם.",
+                  " בחשבון ייווצרו שני ערוצים פרטיים: \"DriveGram Data · <שם הכונן>\" (הקבצים) ו־\"DriveGram Journal · <שם הכונן>\" (היומן: רשימת הקבצים והשינויים). הם הכונן עצמו: אל תמחק אותם ואל תשלח בהם הודעות.",
                   " Two private channels are created on the account: \"DriveGram Data · <drive name>\" (the files) and \"DriveGram Journal · <drive name>\" (the journal: the list of files and changes). They are the drive itself: do not delete them or post in them.") : "")
             : _selected is not null && Ctx.Current is { Candidate: not null }
             ? L.T($"הקלד את הסיסמה של \"{_selected.Name}\" (או את מפתח השחזור שלו). אם יש לו אותה סיסמה כמו לכונן הקודם, היא כבר כתובה כאן.",
                   $"Enter the password of \"{_selected.Name}\" (or its recovery key). If it is the same as the previous drive's, it is already filled in.")
+            : Multi ? L.T("הקלד מתחת לכל כונן שסימנת את הסיסמה שלו (או את מפתח השחזור שלו).", "Type each ticked drive's password (or its recovery key) under it.")
             : L.T("הקלד את הסיסמה של הכונן (או את מפתח השחזור שלו) כדי לחבר אליו את המחשב הזה.", "Enter the drive's password (or its recovery key) to connect this PC to it.");
-        int later = Multi && mode == Mode.Connect ? Ticked.Count + (_newTick?.Checked == true ? 1 : 0) - 1 : 0;
-        if (later > 0)
+        int later = Multi && mode is Mode.Connect or Mode.Create ? Ticked.Count + (_newTick?.Checked == true ? 1 : 0) - 1 : 0;
+        if (Multi && mode == Mode.Connect) _intro.Text = ""; // every ticked drive has its own labelled card
+        _intro.Visible = _intro.Text.Length > 0;
+        if (later > 0 && Multi && mode == Mode.Create)
         {
-            var first = _selected?.Name ?? L.T("הכונן החדש", "the new drive");
+            // the name typed for the new drive, if any (not generic words in quotes, as if they were a name)
+            var typed = _name.Text.Trim();
+            string firstHe = typed.Length > 0 ? $"ב־\"{L.Name(typed)}\"" : "בכונן החדש";
+            string firstEn = typed.Length > 0 ? $"\"{typed}\"" : "the new drive";
             _intro.Text += L.N(later,
-                $" מתחילים ב־\"{first}\", ומיד אחריו נמשיך לכונן הנוסף שסימנת.",
-                $" מתחילים ב־\"{first}\", ומיד אחריו נמשיך ל־{{0}} הכוננים הנוספים שסימנת.",
-                $" Starting with \"{first}\"; right after it we continue to the other drive you ticked.",
-                $" Starting with \"{first}\"; right after it we continue to the {{0}} other drives you ticked.");
+                $" מתחילים {firstHe}, ומיד אחריו ממשיכים לכונן הנוסף שסימנת.",
+                $" מתחילים {firstHe}, ומיד אחריו ממשיכים ל־{{0}} הכוננים הנוספים שסימנת.",
+                $" Starting with {firstEn}; right after it we continue to the other drive you ticked.",
+                $" Starting with {firstEn}; right after it we continue to the {{0}} other drives you ticked.");
         }
-        if (_form.Visible) (create && _name.Visible ? _name : _pw).Focus();
+        if (_form.Visible) (create && _name.Visible ? _name : PwBox).Focus();
         UpdateState();
     }
 
@@ -1135,7 +1421,7 @@ sealed class DrivePage : WizardPage
         bool vanishedOk = !_wasVanished || _vanishedOk.Checked;
         if (_noneChosen && Multi) ok = false;
         else if (_mode == Mode.Connected) ok = true;
-        else if (_mode == Mode.Connect) ok = _pw.Text.Length > 0 && vanishedOk;
+        else if (_mode == Mode.Connect) ok = PwBox.Text.Length > 0 && vanishedOk && (!Multi || LetterClash() is null);
         else if (_mode == Mode.Create)
         {
             var (score, text, color) = Strength(_pw.Text);
@@ -1146,9 +1432,11 @@ sealed class DrivePage : WizardPage
             bool match = _pw2.Text.Length == 0 || _pw2.Text == _pw.Text;
             _error.Text = match ? "" : L.T("הסיסמאות לא זהות.", "The passwords do not match.");
             ok = _pw.Text.Length >= 10 && _pw2.Text == _pw.Text && _saved.Checked && vanishedOk &&
-                 (!_name.Visible || _name.Text.Trim().Length > 0);
+                 (!_name.Visible || _name.Text.Trim().Length > 0) && (!Multi || LetterClash() is null);
         }
         else ok = false;
+        if (Multi && _mode is Mode.Connect or Mode.Create && LetterClash() is { } clash) _error.Text = clash;
+        else if (Multi && _error.Text.StartsWith(L.T("שני כוננים", "Two drives"))) _error.Text = "";
         Changed(ok);
     }
 
@@ -1157,7 +1445,7 @@ sealed class DrivePage : WizardPage
     {
         if (_mode == Mode.Connected) return true;
         _error.Text = "";
-        var pw = _pw.Text;
+        var pw = PwBox.Text;
         var cfg = Ctx.State.Config;
         // Binding this profile to a different drive (another account, another drive, a new one, or the
         // old one vanished): its local index and cache belong to the old drive and must be reset — but
@@ -1217,7 +1505,7 @@ sealed class DrivePage : WizardPage
             _wasVanished = false;
         }
 
-        if (_mode == Mode.Connect && !await CheckOtherPasswordsAsync(pw)) return false;
+        if (!await CheckOtherPasswordsAsync(pw)) return false;
 
         Keys keys;
         if (_mode == Mode.Create)
@@ -1226,9 +1514,13 @@ sealed class DrivePage : WizardPage
             if (Ctx.UsesTelegram)
             {
                 var name = _name.Text.Trim();
-                var driveId = Guid.NewGuid().ToString("N");
                 var client = Ctx.GetClient();
-                var channels = await Task.Run(() => TelegramRemote.CreateChannelsAsync(client, name, driveId));
+                // tried before in this run and failed after the channels were made: the same pair again,
+                // not a second one left behind in Telegram
+                if (_createdFor != Ctx.State.Config.AccountKey) (_createdChannels, _createdDriveId) = (null, null);
+                var driveId = _createdDriveId ?? Guid.NewGuid().ToString("N");
+                var channels = _createdChannels ?? await Task.Run(() => TelegramRemote.CreateChannelsAsync(client, name, driveId));
+                (_createdChannels, _createdDriveId, _createdFor) = (channels, driveId, Ctx.State.Config.AccountKey);
                 await UseRemoteAsync(await Task.Run(() => TelegramRemote.OpenAsync(client, channels, ownsClient: false)));
                 identity = new DriveIdentity(driveId, name, channels.DataId);
                 cfg.Channels = channels;
@@ -1250,25 +1542,47 @@ sealed class DrivePage : WizardPage
                 await UseRemoteAsync(await Task.Run(() => TelegramRemote.OpenAsync(Ctx.GetClient(), chosen, ownsClient: false)));
                 _ctrl = await SyncService.ReadControlAsync(_remote!, default);
                 if (_ctrl is null) { _error.Text = L.T("ההגדרה של הכונן הזה לא הושלמה. בחר כונן אחר או צור חדש.", "This drive was never finished. Choose another one or create a new one."); return false; }
-                cfg.Channels = chosen;
-                cfg.DriveId = c.DriveId ?? "";
-                if (cfg.VolumeLabel is "" or "DriveGram") cfg.VolumeLabel = c.Name;
             }
             try { keys = await Task.Run(() => Keys.UnlockAny(_ctrl!.Vault, pw)); } // the password, or the recovery key
             catch (WrongPasswordException)
             {
-                _error.Text = L.T("הסיסמה שגויה.", "Wrong password.");
-                _pw.SelectAll();
-                _pw.Focus();
+                _error.Text = Multi && Ticked.FirstOrDefault() is { } wrongOne
+                    ? L.T($"הסיסמה של \"{L.Name(wrongOne.Name)}\" שגויה.", $"The password of \"{wrongOne.Name}\" is wrong.")
+                    : L.T("הסיסמה שגויה.", "Wrong password.");
+                PwBox.SelectAll();
+                PwBox.Focus();
                 return false;
+            }
+            // bound to the chosen drive only now: after a wrong password, Back and Next show the list again
+            // (bound earlier, the page came back as "this drive" with its password box hidden in the list)
+            if (_selected is { Channels: { } bound } sel)
+            {
+                cfg.Channels = bound;
+                cfg.DriveId = sel.DriveId ?? "";
+                if (cfg.VolumeLabel is "" or "DriveGram") cfg.VolumeLabel = sel.Name;
             }
             ResetIfRebinding();
         }
         Ctx.State.Save();
         Ctx.UnlockedKeys = keys;
         Ctx.LastPassword = pw;
-        if (_remember.Checked) Ctx.State.RememberMaster(keys.ExportMaster());
+        if (FirstRemember) Ctx.State.RememberMaster(keys.ExportMaster());
         else Ctx.State.ForgetMaster();
+        if (Multi)
+        {
+            if (_mode == Mode.Create) { Ctx.PresetLetter = _newLetter.SelectedItem as string; Ctx.PresetLabel = _name.Text.Trim(); }
+            else if (Ticked.FirstOrDefault() is { Channels: { } first } fc)
+            {
+                Ctx.PresetLetter = _letters.GetValueOrDefault(first.JournalId)?.SelectedItem as string;
+                Ctx.PresetLabel = _labels.GetValueOrDefault(first.JournalId)?.Text.Trim() is { Length: > 0 } n ? n : fc.Name;
+            }
+        }
+        if (ChoosesAll)
+        {
+            if (!Multi && _mode == Mode.Create) { Ctx.PresetLetter = _newLetter.SelectedItem as string; Ctx.PresetLabel = _name.Text.Trim(); }
+            Ctx.PresetNetwork = FirstNetwork;
+            Ctx.PresetAutostart = _askAutostart ? _autostart.Checked : null;
+        }
         EnqueueTheRest(pw);
         return true;
     }
@@ -1283,27 +1597,31 @@ sealed class FinishPage : WizardPage
     readonly Label _summary = Theme.Label("", Theme.Body, Theme.Text, 620);
     readonly RadioButton _network = new() { Text = L.T("כונן רשת (מומלץ)", "Network drive (recommended)"), AutoSize = true, Margin = new Padding(0, 2, 0, 2) };
     readonly RadioButton _disk = new() { Text = L.T("דיסק רגיל", "Regular disk"), AutoSize = true, Margin = new Padding(0, 2, 0, 2) };
-    readonly CheckBox _another = Theme.WrapCheck(
-        L.T("אחרי שהכונן הזה יתחבר, הוסף עוד כונן מאותו חשבון (קיים או חדש)", "After this drive connects, add another drive on the same account (existing or new)"),
-        Theme.Body, 640);
     readonly Label _queued = Theme.Label("", Theme.Small, Theme.Muted, 640);
-    bool _typeSet;
-    NextDrive? _addedAnother; // what this page queued (Back and Finish again replaces only that)
+    readonly List<Control> _letterAndName = [];
+    bool _typeSet, _autoUsed, _auto, _presetUsed;
+    public override bool AutoNext { get { bool a = _auto && !_autoUsed; if (a) _autoUsed = true; return a; } }
+    public override bool Counted => !Ctx.DrivePageFinishes || (_entered && !_auto);
+    bool _entered;
 
-    public override string Title => L.T("כמעט סיימנו", "Almost done");
-    public override string Subtitle => L.T("איך הכונן יופיע במחשב.", "How the drive appears on this PC.");
-    public override string NextText => L.T("סיום וחיבור הכונן", "Finish and connect");
+    // a new drive normally never shows this page (the drive page chose everything); changing an existing
+    // drive's settings does: its letter, name and type
+    public override string Title => Ctx.IsNew ? L.T("כמעט סיימנו", "Almost done") : L.T("איך הכונן יופיע במחשב", "How the drive appears on this PC");
+    public override string Subtitle => Ctx.IsNew ? L.T("איך הכונן יופיע במחשב.", "How the drive appears on this PC.") : L.T("האות, השם וסוג הכונן.", "The letter, the name and the drive type.");
+    public override string NextText => Ctx.IsNew ? L.T("סיום וחיבור הכונן", "Finish and connect") : L.T("שמירה וחיבור הכונן", "Save and connect");
 
     public FinishPage(SetupContext ctx) : base(ctx)
     {
+        _label.RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No; // a Hebrew name, typed right to left
+        _label.Font = Theme.Body;
         var col = Theme.Column();
         var summaryCard = Theme.Card(Theme.Surface, Theme.Border);
         summaryCard.Controls.Add(_summary);
         col.Controls.Add(summaryCard);
-        col.Controls.Add(Theme.Label(L.T("אות הכונן:", "Drive letter:"), Theme.Small, Theme.Muted));
-        col.Controls.Add(_letter);
-        col.Controls.Add(Theme.Label(L.T("שם הכונן ב\"מחשב זה\":", "Name in This PC:"), Theme.Small, Theme.Muted));
-        col.Controls.Add(_label);
+        var letterCaption = Theme.Label(L.T("אות הכונן:", "Drive letter:"), Theme.Small, Theme.Muted);
+        var labelCaption = Theme.Label(L.T("שם הכונן ב\"מחשב זה\":", "Name in This PC:"), Theme.Small, Theme.Muted);
+        col.Controls.AddRange([letterCaption, _letter, labelCaption, _label]);
+        _letterAndName.AddRange([letterCaption, _letter, labelCaption, _label]);
 
         // the drive type: a network drive by default, the full comparison one click away
         var typeTitle = Theme.Label(L.T("סוג הכונן:", "Drive type:"), Theme.Small, Theme.Muted);
@@ -1326,7 +1644,6 @@ sealed class FinishPage : WizardPage
 
         _autostart.Margin = new Padding(0, 8, 0, 4);
         col.Controls.Add(_autostart);
-        col.Controls.Add(_another);
         col.Controls.Add(_queued);
         SetContent(col);
     }
@@ -1343,13 +1660,24 @@ sealed class FinishPage : WizardPage
         char pick = free.Contains(current) ? current : "TUVWXYZSRQPONMLKJIHGFED".FirstOrDefault(free.Contains, 'T');
         _letter.SelectedItem = $"{pick}:";
         _label.Text = cfg.VolumeLabel;
+        // chosen on the drive page: this run's drive, or a drive queued from it (that run goes on by itself)
+        var forThis = Ctx.QueuedDriveGone ? null : Ctx.Current;
+        var presetLetter = Ctx.PresetLetter ?? forThis?.Letter;
+        var presetLabel = Ctx.PresetLabel ?? forThis?.Label;
+        bool preset = presetLetter is not null && _letter.Items.Contains(presetLetter);
+        if (preset) { _letter.SelectedItem = presetLetter; if (!string.IsNullOrWhiteSpace(presetLabel)) _label.Text = presetLabel; }
+        foreach (var c in _letterAndName) c.Visible = !preset;
+        _presetUsed = preset;
+        if ((Ctx.PresetNetwork ?? forThis?.Network) is { } net) { (net ? _network : _disk).Checked = true; _typeSet = true; }
+        // a new Telegram drive: everything was chosen on the drive page, this page only saves it
+        _auto = preset && (forThis?.Letter is not null || Ctx.DrivePageFinishes);
+        _entered = true;
         // a new drive: a network drive (the user's choice is kept when coming back to this page);
         // an existing one: as it is now
         if (!Ctx.IsNew) (cfg.NetworkDrive ? _network : _disk).Checked = true;
         else if (!_typeSet) { _network.Checked = true; _typeSet = true; }
-        // more drives in this sitting (only while adding drives on a Telegram account)
+        // more drives ticked on the drive page (they follow this one)
         int queued = Ctx.Queue.Count;
-        _another.Visible = Ctx.IsNew && Ctx.UsesTelegram && queued == 0;
         _queued.Visible = queued > 0;
         _queued.Text = L.N(queued, "אחרי שהכונן הזה יתחבר, נמשיך לכונן הנוסף שסימנת.", "אחרי שהכונן הזה יתחבר, נמשיך ל־{0} הכוננים הנוספים שסימנת.",
             "After this drive connects, we continue to the other drive you ticked.", "After this drive connects, we continue to the {0} other drives you ticked.");
@@ -1358,9 +1686,13 @@ sealed class FinishPage : WizardPage
 
         var account = Ctx.State.Folder is { } folder ? L.LtrPath(folder)
             : string.IsNullOrEmpty(cfg.AccountName) ? null : L.Name(cfg.AccountName);
-        _summary.Text = (account is null ? "" : L.T($"חשבון: {account}\n", $"Account: {account}\n")) +
-                        L.T("הכונן מוכן. הקבצים יעלו מוצפנים ברקע, ואייקון ליד השעון יראה מה המצב.",
-                            "The drive is ready. Files upload encrypted in the background; an icon next to the clock shows what is happening.");
+        var where = !_presetUsed ? "" : L.T($"הכונן יופיע כ־{L.Ltr((string)_letter.SelectedItem!)} {L.Name(_label.Text)}\n", $"The drive appears as {(string)_letter.SelectedItem!} {_label.Text}\n");
+        var ready = Ctx.IsNew ? L.T("הכונן מוכן. הקבצים יעלו מוצפנים ברקע, ואייקון ליד השעון יראה מה המצב.",
+            "The drive is ready. Files upload encrypted in the background; an icon next to the clock shows what is happening.") : "";
+        _summary.Text = ((account is null ? "" : L.T($"חשבון: {account}\n", $"Account: {account}\n")) + where + ready).TrimEnd('\n');
+        _summary.Parent!.Visible = _summary.Text.Length > 0;
+        // starting with Windows belongs to the whole app (the tray menu), not to one drive's settings
+        _autostart.Visible = Ctx.IsNew;
         return Task.CompletedTask;
     }
 
@@ -1371,12 +1703,10 @@ sealed class FinishPage : WizardPage
         cfg.VolumeLabel = string.IsNullOrWhiteSpace(_label.Text) ? "DriveGram" : _label.Text.Trim();
         cfg.NetworkDrive = _network.Checked;
         Ctx.State.Save();
-        // "add another": a run where the user picks (existing or new), on the same account
-        if (_addedAnother is not null) Ctx.Queue.Remove(_addedAnother);
-        _addedAnother = null;
-        if (_another.Visible && _another.Checked && Ctx.Account is { } account)
-            Ctx.Queue.Add(_addedAnother = new NextDrive(account, null, false, Ctx.LastPassword));
-        try { ShellIntegration.SetAutostart(_autostart.Checked); }
+        // the drives queued from the drive page get the same drive type
+        for (int i = 0; i < Ctx.Queue.Count; i++)
+            if (Ctx.Queue[i] is { Letter: not null, Network: null } q) Ctx.Queue[i] = q with { Network = _network.Checked };
+        if (Ctx.IsNew) try { ShellIntegration.SetAutostart(Ctx.PresetAutostart ?? _autostart.Checked); }
         catch (Exception ex) { Log.Warn($"autostart: {ex.Message}"); }
         return Task.FromResult(true);
     }

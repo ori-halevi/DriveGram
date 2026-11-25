@@ -187,8 +187,10 @@ public sealed class DriveSession : IAsyncDisposable
     }
 
     /// <summary>Open everything and mount. `unlock` turns the vault header into keys (remembered key or a prompt).</summary>
+    /// <param name="startPaused">Uploads start paused (e.g. the daily cap holds): set before the engine's first
+    /// upload, not a moment after it. The user's own pause (Config.UploadsPaused) applies anyway.</param>
     public static async Task<DriveSession> StartAsync(AppState state,
-        Func<ControlState, Task<Keys>> unlock, string? mountPoint, bool takeOver, CancellationToken ct = default)
+        Func<ControlState, Task<Keys>> unlock, string? mountPoint, bool takeOver, CancellationToken ct = default, bool startPaused = false)
     {
         if (!WinFspInstalled()) throw new WinFspMissingException();
         mountPoint ??= state.Config.MountPoint;
@@ -269,6 +271,7 @@ public sealed class DriveSession : IAsyncDisposable
                     state.Save();
                 }
             }
+            engine.PausedAll = startPaused || state.Config.UploadsPaused;
             engine.Start();
 
             var stopEvent = new EventWaitHandle(false, EventResetMode.AutoReset, StopEventName(state));
@@ -393,8 +396,9 @@ public sealed class DriveSession : IAsyncDisposable
         }
         try { ShellIntegration.ClearDriveIcon(MountPoint); } catch { }
         Engine.ReleaseAllHandles(); // lazily-closed files would otherwise never commit
-        if (waitForUploads && Db.PendingNodes().Count > 0)
+        if (waitForUploads && Engine.PendingNotPaused() > 0)
         {
+            // waits for the files that are not paused: paused ones stay on this PC (and stay paused)
             // waits while uploads make progress; gives up after 3 minutes without any (offline / signed
             // out) — the files stay on this PC and upload the next time the drive starts here
             try { await Engine.DrainAsync(progress, ct, stall: TimeSpan.FromMinutes(3)); }
@@ -445,6 +449,19 @@ public sealed class DriveSession : IAsyncDisposable
     }
 
     // ── trash ────────────────────────────────────────────────────────────────
+    /// <summary>Where a file is, as Windows sees it (e.g. T:\Movies\a.mkv).</summary>
+    public string FullPathOf(string id) => MountPoint + PathOf(id);
+
+    /// <summary>The file at a Windows path on this drive (null: not on it, gone, a folder, or in the trash).</summary>
+    public string? FileIdOf(string fullPath)
+    {
+        if (!fullPath.StartsWith(MountPoint, StringComparison.OrdinalIgnoreCase)) return null;
+        var rest = fullPath[MountPoint.Length..].Trim('\\');
+        if (rest.Length == 0) return null;
+        // the index lookup by name (Explorer asks for every file it shows: no scan of whole folders)
+        return Db.Resolve(rest) is { Dir: false } n ? n.Id : null;
+    }
+
     string PathOf(string id)
     {
         var parts = new List<string>();
@@ -526,6 +543,8 @@ public sealed class DriveSession : IAsyncDisposable
         try
         {
             if (!await Sync.BeginHandoverAsync(r, Engine.Status.PendingFiles, ct)) return false; // withdrawn
+            // the other PC gets the drive only with everything uploaded: a pause (or the daily cap) cannot hold
+            // it — the pauses are kept, and hold again if the handover does not happen
             Engine.CommitAllNow();
             var lastReport = DateTime.UtcNow;
             var moved = (Pending: -1, Sent: -1L);
@@ -557,6 +576,7 @@ public sealed class DriveSession : IAsyncDisposable
         finally
         {
             if (!done && Sync.HandingOver) await Sync.FailHandoverAsync(r, default);
+            Engine.ForceUploads = false; // handed over or not: the user's pauses (and the daily cap) hold again
             Sync.EndHandover();
         }
     }
@@ -565,6 +585,40 @@ public sealed class DriveSession : IAsyncDisposable
     {
         if (!Writable) throw new InvalidOperationException(L.T("הכונן במצב קריאה בלבד במחשב הזה כרגע.", "The drive is read-only on this PC right now."));
         Db.ApplyLocal(new PurgeOp(id));
+    }
+
+    /// <summary>
+    /// "Cancel" in the uploads window. A file already saved in Telegram and changed here goes back to the
+    /// saved version. A new file is removed from the drive for good (not to the recycle bin, where it would
+    /// still upload) — unless it may stand for an earlier saved document (an Office save): then nothing is
+    /// deleted and the user is told to delete it in Explorer, where it can still be restored.
+    /// </summary>
+    public void CancelUpload(string id)
+    {
+        if (!Writable) throw new InvalidOperationException(L.T("הכונן במצב קריאה בלבד במחשב הזה כרגע.", "The drive is read-only on this PC right now."));
+        if (Db.Get(id) is not { Dir: false } n) return; // also a file in the recycle bin (it still uploads)
+        if (Engine.IsWriting(id) || Engine.WrittenWithin(id, 10_000))
+            throw new InvalidOperationException(L.T($"\"{L.Name(n.Name)}\" עדיין נכתב. סגור את התוכנה שכותבת אליו ונסה שוב בעוד כמה שניות.",
+                $"\"{n.Name}\" is still being written. Close the program writing it and try again in a few seconds."));
+        var path = PathOf(id);
+        bool saved = Db.CommittedChunks(id).Count > 0;
+        if (!saved && Db.MayReplaceSaved(id))
+            throw new InvalidOperationException(L.T(
+                $"\"{L.Name(n.Name)}\" לא נמחק: נראה שהוא נשמר במקום קובץ קודם באותה תיקייה (כך Word ו־Excel שומרים מסמך). אם אתה בטוח שאינך צריך אותו, מחק אותו בסייר הקבצים: הוא יעבור לסל המחזור של הכונן, ואפשר יהיה לשחזר אותו.",
+                $"\"{n.Name}\" was not deleted: it seems to have been saved in place of an earlier file in the same folder (that is how Word and Excel save a document). If you are sure you do not need it, delete it in Explorer: it goes to the drive's recycle bin and can be restored."));
+        // the pause is forgotten only after the drop (before it, a waiting upload would start sending it)
+        if (saved && Engine.DropLocalChange(id))
+        {
+            Engine.Forget(id);
+            // a file already in Telegram, changed here: back to the saved version (only the change is dropped)
+            Notify(path, NotifyAction.Modified, false, NotifyFilter.ChangeSize | NotifyFilter.ChangeLastWrite);
+            Log.Info($"upload cancelled: {n.Name} is back to the version saved in Telegram");
+            return;
+        }
+        Engine.DropNewFile(id);
+        Engine.Forget(id);
+        Notify(path, NotifyAction.Removed, false);
+        Log.Info($"upload cancelled: {n.Name} removed from the drive");
     }
 
     // ── Explorer change notifications ────────────────────────────────────────

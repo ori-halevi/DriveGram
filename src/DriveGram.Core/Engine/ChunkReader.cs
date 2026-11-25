@@ -147,6 +147,17 @@ public sealed class ChunkReader
         }
     }
 
+    /// <summary>How many 1 MiB windows a stored chunk has.</summary>
+    public int WindowCount(ChunkLoc c) =>
+        (int)((ChunkCipher.EncryptedSize(c.Size, _keys.FrameSize) + IRemote.WindowSize - 1) / IRemote.WindowSize);
+
+    /// <summary>Bring one window into the cache (no decryption), for files prepared ahead.</summary>
+    public async Task FetchWindowAsync(ChunkLoc c, int win, CancellationToken ct)
+    {
+        if (_cache.HasWindow(c.Msg, win)) return;
+        await Window(c, win, ct);
+    }
+
     public async Task<byte[]> ReadWholeAsync(ChunkLoc c, CancellationToken ct)
     {
         var buf = new byte[c.Size];

@@ -344,9 +344,10 @@ public static class TelegramAccounts
         }
     }
 
-    public static async Task SignOutIfUnusedAsync(string key)
+    /// <summary>True when the account is signed out on this PC (false: in use, or Telegram could not be reached).</summary>
+    public static async Task<bool> SignOutIfUnusedAsync(string key)
     {
-        if (AppState.All().Any(a => a.Config.AccountKey == key) || InUse(key)) return;
+        if (AppState.All().Any(a => a.Config.AccountKey == key) || InUse(key)) return false;
         var dir = Path.Combine(AccountsDir, key);
         var probe = AppState.Open("__signout");
         try
@@ -362,12 +363,13 @@ public static class TelegramAccounts
                 catch (Exception ex)
                 {
                     Log.Warn($"sign out of {key} did not reach Telegram ({ex.Message}); the sign-in is kept and tried again later");
-                    return;
+                    return false;
                 }
             }
             Directory.Delete(dir, true);
+            return true;
         }
-        catch (Exception ex) { Log.Warn($"sign out {key}: {ex.Message}"); }
+        catch (Exception ex) { Log.Warn($"sign out {key}: {ex.Message}"); return false; }
         finally { probe.Delete(); }
     }
 }

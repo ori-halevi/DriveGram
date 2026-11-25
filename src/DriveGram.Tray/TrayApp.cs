@@ -38,6 +38,21 @@ sealed class DriveController
     public long UploadedAtStart;      // the engine's byte counter then
     public int MostFiles;             // the most files waiting at once (for "N files uploaded")
     public bool ToldUploadStart;      // the "uploading, wait for the message" balloon was shown
+    public DateTime DiskShortQuietUntil;
+    public SwitchAccountForm? SwitchAccount;
+    /// <summary>The user paused every upload of this drive: saved with the drive, so it holds after Settings,
+    /// an account switch or a restart.</summary>
+    public bool ManualPaused
+    {
+        get => State.Config.UploadsPaused;
+        set
+        {
+            if (State.Config.UploadsPaused == value) return;
+            State.Config.UploadsPaused = value;
+            try { State.Save(); } catch (Exception ex) { Log.Warn($"saving the pause: {ex.Message}"); }
+        }
+    }
+    public Form? DiskShortNotice;
     public long SampleBytes;          // last sample of the byte counter, for the speed
     public DateTime SampleAt;
     public double Speed;              // bytes/s, smoothed
@@ -55,16 +70,19 @@ sealed class DriveController
 
     public string Letter => Session?.MountPoint ?? State.Config.MountPoint;
     public string Name => $"{L.Ltr(Letter)} {State.Config.VolumeLabel}";
-    public bool Busy => !Stopping && Session is { } s && (s.Status.PendingFiles > 0 || s.Status.UploadsInFlight > 0);
+    public bool Busy => !Stopping && Session is { } s && (s.Status.UploadsInFlight > 0 || s.Engine.PendingNotPaused() > 0);
 }
 
 /// <summary>
 /// The notification-area app. One running copy per Windows user; it mounts every drive configured
 /// on this PC (each on its own Telegram account) and shows what each is doing.
 /// </summary>
-sealed class TrayApp : ApplicationContext
+sealed class TrayApp : ApplicationContext, IMainHost
 {
     readonly SynchronizationContext _ui;
+    readonly DailyUploads _daily = new();
+    readonly Preparer _preparer;
+    ShellBridge? _bridge;
     readonly NotifyIcon _icon;
     readonly Icon _idle, _busy;
     readonly ContextMenuStrip _menu = new() { Font = Ui.Font };
@@ -77,6 +95,8 @@ sealed class TrayApp : ApplicationContext
     public TrayApp()
     {
         _ui = SynchronizationContext.Current!;
+        _preparer = new Preparer(_ui);
+        _preparer.Finished += OnPrepared;
         var dir = AppContext.BaseDirectory;
         _idle = new Icon(Path.Combine(dir, "drivegram.ico"), SystemInformation.SmallIconSize);
         _busy = new Icon(Path.Combine(dir, "drivegram-busy.ico"), SystemInformation.SmallIconSize);
@@ -97,12 +117,26 @@ sealed class TrayApp : ApplicationContext
         ShellIntegration.ClearStaleDriveIcons(_drives.Select(x => x.State.Config.MountPoint)); // left by a crash on a borrowed letter
         SystemEvents.PowerModeChanged += (_, e) => { if (e.Mode == PowerModes.Resume) _ui.Post(_ => OnResume(), null); };
 
+        // Explorer's overlay icons and right-click menu ask here (the shell extension)
+        try
+        {
+            _bridge = new ShellBridge
+            {
+                Resolve = ResolveShellPath,
+                Prepare = paths => _ui.Post(_ => PrepareFiles(paths.Select(ResolveShellPath).Where(f => f is not null).Select(f => f!.Value)), null),
+                Free = paths => _ui.Post(_ => _ = FreeFiles(paths.Select(ResolveShellPath).Where(f => f is not null).Select(f => f!.Value)), null),
+                IsPreparing = _preparer.IsPreparing,
+            };
+            _bridge.Start();
+        }
+        catch (Exception ex) { Log.Warn($"shell bridge: {ex.Message}"); }
+
         _activate = new EventWaitHandle(false, EventResetMode.AutoReset, Program.ActivateEvent);
         _quit = new EventWaitHandle(false, EventResetMode.AutoReset, DriveSession.QuitEventName);
         Listen(_activate, () => Activate());
         Listen(_quit, async () => await QuitAsync(ask: false));
 
-        if (_drives.Count == 0) _ui.Post(async _ => await AddDriveAsync(), null);
+        if (_drives.Count == 0) _ui.Post(_ => ShowMain(), null); // the first run: the accounts tab, "add your first account"
         else
         {
             foreach (var d in _drives) _ = MountAsync(d);
@@ -188,7 +222,8 @@ sealed class TrayApp : ApplicationContext
         UpdateIcon();
         try
         {
-            var session = await Task.Run(() => DriveSession.StartAsync(d.State, ctrl => UnlockAsync(d, ctrl), null, takeOver: false));
+            bool capHolds = _daily.CapReached;
+            var session = await Task.Run(() => DriveSession.StartAsync(d.State, ctrl => UnlockAsync(d, ctrl), null, takeOver: false, startPaused: capHolds));
             if (!_drives.Contains(d) || _quitting)
             {
                 // the drive was replaced (settings) or removed while it was starting: never leave it orphaned
@@ -197,6 +232,7 @@ sealed class TrayApp : ApplicationContext
                 return;
             }
             d.Session = session;
+            ApplyPause(d); // the daily cap (or the user's pause) holds from the first moment
             StopRetrying(d);
             d.RetryDelaySeconds = 15;
             d.RetryDelaySeconds = 15;
@@ -204,6 +240,7 @@ sealed class TrayApp : ApplicationContext
             session.SignedOut += () => _ui.Post(async _ => await OnSignedOutAsync(d), null);
             session.Sync.HandoverRequested += r => _ui.Post(async _ => await OnHandoverRequestedAsync(d, session, r), null);
             session.Engine.RemoteUnreachable += () => _ui.Post(_ => OnRemoteUnreachable(d, session), null);
+            session.Engine.LocalDiskShort += (root, free) => _ui.Post(_ => OnLocalDiskShort(d, session, root, free), null);
             session.Sync.FileIncomplete += (orig, kept, folderId) => _ui.Post(async _ => await OnFileIncompleteAsync(d, session, orig, kept, folderId), null);
             if (session.Sync.NeedsUpdate)
                 Balloon(L.T("צריך לעדכן את DriveGram", "Update DriveGram"),
@@ -283,8 +320,8 @@ sealed class TrayApp : ApplicationContext
             Log.Error($"tray: mounting {d.Name} failed (local problem)", ex);
             d.Problem = L.T("לא ניתן לפתוח את הכונן במחשב הזה (בעיה מקומית)", "the drive could not be opened on this PC (a local problem)");
             Balloon(L.T("לא ניתן לפתוח את הכונן", "The drive could not be opened"),
-                L.T($"{d.Name}: בעיה במחשב הזה, לא באינטרנט ({Short(Setup.TelegramErrors.Text(ex))}). פרטים ביומן הפעילות: בתפריט ← \"פתח את תיקיית יומן הפעילות\".",
-                    $"{d.Name}: a problem on this PC, not the internet ({Short(Setup.TelegramErrors.Text(ex))}). Details in the log: menu → \"Open the log folder\"."),
+                L.T($"{d.Name}: בעיה במחשב הזה, לא באינטרנט ({Short(Setup.TelegramErrors.Text(ex))}). פרטים ביומן הפעילות: בתפריט של האייקון שליד השעון ← \"פתח את תיקיית יומן הפעילות\".",
+                    $"{d.Name}: a problem on this PC, not the internet ({Short(Setup.TelegramErrors.Text(ex))}). Details in the log: the menu of the icon next to the clock → \"Open the log folder\"."),
                 ToolTipIcon.Error, () => OpenFolder(Path.Combine(AppState.Root, "logs")));
         }
         catch (Exception ex)
@@ -410,7 +447,7 @@ sealed class TrayApp : ApplicationContext
                           $"{d.Name} has {{0}} files open for editing in apps. After disconnecting they cannot be saved (what was already saved is kept).\n\nDisconnect anyway?"),
                 icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes)
             return false;
-        int pending = session.Status.PendingFiles;
+        int pending = session.Engine.PendingNotPaused(); // paused files stay on this PC: not waited for
         if (pending > 0 && ask && waitForUploads)
         {
             var answer = Ui.Choose(
@@ -423,6 +460,8 @@ sealed class TrayApp : ApplicationContext
             if (answer is 2 or -1) return false;
             waitForUploads = answer == 0;
         }
+        if (d.Session != session) return d.Session is null; // it changed while the questions were open
+        _preparer.CancelAll(session); // only now: answering "cancel" above keeps the drive, and its downloads
         d.Stopping = true;
         while (d.Trash is { IsDisposed: false, Acting: true }) await Task.Delay(200); // a restore / delete still running
         d.Trash?.Close();
@@ -467,7 +506,7 @@ sealed class TrayApp : ApplicationContext
                               "{0} files are open for editing in apps. After exiting they cannot be saved on the drive (what was already saved is kept).\n\nExit anyway?"),
                     icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes)
                 return;
-            int pending = _drives.Sum(d => d.Session?.Status.PendingFiles ?? 0);
+            int pending = _drives.Sum(d => d.Session?.Engine.PendingNotPaused() ?? 0); // paused ones stay here
             if (pending > 0)
             {
                 var answer = Ui.Choose(
@@ -483,7 +522,11 @@ sealed class TrayApp : ApplicationContext
         }
         _quitting = true;
         _wizard?.Close();
-        foreach (var d in _drives.ToList()) await StopAsync(d, ask: false);
+        // a paused drive (by the user or the daily cap) is not waited for: its files stay safely on this PC and
+        // go up the next time, within the limits the user chose
+        foreach (var d in _drives.ToList()) await StopAsync(d, ask: false); // waits only for files that are not paused
+        TrackDaily();
+        _daily.Flush();
         _timer.Stop();
         _icon.Visible = false;
         _icon.Dispose();
@@ -731,10 +774,12 @@ sealed class TrayApp : ApplicationContext
         int i = _drives.IndexOf(old);
         if (i < 0) return false;
         _drives[i] = fresh;
+        old.DiskShortNotice?.Close();
+        old.SwitchAccount?.Close();
+        old.Backup?.Close(); // it works on the old record (and maybe an account signed out now)
         return true;
     }
 
-    Task AddDriveAsync() => SetupAsync(null);
 
     bool _removing;
 
@@ -917,6 +962,62 @@ sealed class TrayApp : ApplicationContext
     /// A file whose data is only in Telegram was opened or changed while Telegram could not be reached: the
     /// app shows only a vague error (or hangs for a while first), so say why — at most every 10 minutes.
     /// </summary>
+    /// <summary>
+    /// A copy into the drive waits for room on the local disk (staging lives there): explain how it works,
+    /// that it goes on by itself, and how to speed it up. Not a blocking dialog: the copy keeps going.
+    /// </summary>
+    void OnLocalDiskShort(DriveController d, DriveSession s, string root, long free)
+    {
+        if (d.Session != s || d.Stopping || _quitting || d.DiskShortNotice is not null
+            || DateTime.UtcNow < d.DiskShortQuietUntil) return;
+        var disk = root.TrimEnd('\\');
+        // paused (by the user or the daily cap): nothing goes up, so the copy cannot go on by itself
+        bool paused = d.ManualPaused || _daily.CapReached;
+        string text;
+        if (paused)
+            text = L.T(
+                $"העתקה גדולה ל־{L.Ltr(d.Letter)}: אין מספיק מקום פנוי ב־{L.Ltr(disk)}.\n\n" +
+                $"ההעלאות לטלגרם מושהות ({(d.ManualPaused ? "השהית אותן" : "הגעת לתקרה היומית")}), ולכן כל מה שמעתיקים לכונן נשאר בינתיים ב־{L.Ltr(disk)}. " +
+                $"נשארו שם {Ui.Size(free)} שאפשר להשתמש בהם (DriveGram תמיד משאיר עוד 3 GB פנויים), וההעתקה נעצרה.\n\n" +
+                "כדי להמשיך להעתיק: המשך את ההעלאות, או פנה מקום במחשב ונסה שוב.",
+                $"A big copy into {d.Letter}: there is not enough free space on {disk}.\n\n" +
+                $"Uploads to Telegram are paused ({(d.ManualPaused ? "you paused them" : "the daily cap was reached")}), so everything copied into the drive stays on {disk} for now. " +
+                $"It has {Ui.Size(free)} left to use (DriveGram always keeps another 3 GB free), and the copy stopped.\n\n" +
+                "To go on copying: resume the uploads, or free up space on this PC and try again.");
+        else
+            text = L.T(
+                $"העתקה גדולה ל־{L.Ltr(d.Letter)}: אין מספיק מקום פנוי ב־{L.Ltr(disk)}.\n\n" +
+                $"איך זה עובד: מה שמעתיקים לכונן נשמר קודם במחשב הזה, בכונן {L.Ltr(disk)}, ומשם עולה לטלגרם. כל חלק שעלה נמחק מ־{L.Ltr(disk)} ומפנה מקום לחלק הבא. " +
+                $"כרגע ההעלאה לטלגרם איטית יותר מההעתקה, וב־{L.Ltr(disk)} נשארו {Ui.Size(free)} שאפשר להשתמש בהם (DriveGram תמיד משאיר עוד 3 GB פנויים).\n\n" +
+                $"לא צריך לעצור: ההעתקה תאט ותמשיך לבד, בקצב ההעלאה. כדי להאיץ אותה, פנה מקום ב־{L.Ltr(disk)}.\n" +
+                "אם וינדוס יציג בכל זאת \"אין מספיק מקום\", לחץ שם \"נסה שוב\" בעוד כמה דקות.",
+                $"A big copy into {d.Letter}: there is not enough free space on {disk}.\n\n" +
+                $"How it works: what you copy into the drive is first kept on this PC, on {disk}, and uploaded to Telegram from there. Each part that was uploaded is deleted from {disk}, making room for the next one. " +
+                $"Right now the upload to Telegram is slower than the copy, and {disk} has {Ui.Size(free)} left to use (DriveGram always keeps another 3 GB free).\n\n" +
+                $"No need to stop: the copy slows down and goes on by itself, at the upload speed. To speed it up, free up space on {disk}.\n" +
+                "If Windows still says \"not enough space\", press \"Try Again\" there in a few minutes.");
+        var storage = L.T("פתח את הגדרות האחסון של וינדוס", "Open Windows storage settings");
+        var ok = L.T("הבנתי", "OK");
+        string[] buttons = paused ? [L.T("המשך את ההעלאות", "Resume uploads"), storage, ok] : [storage, ok];
+        var f = new ChoiceForm(text, buttons, buttons.Length - 1, buttons.Length - 1, MessageBoxIcon.Warning);
+        d.DiskShortNotice = f;
+        f.FormClosed += (_, _) =>
+        {
+            d.DiskShortNotice = null;
+            var chosen = f.Choice >= 0 && f.Choice < buttons.Length ? buttons[f.Choice] : ok;
+            if (chosen == storage)
+            {
+                // Windows' own storage page (what takes the space, temporary files, the recycle bin)
+                try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("ms-settings:storagesense") { UseShellExecute = true }); }
+                catch (Exception ex) { Log.Warn($"tray: opening storage settings: {ex.Message}"); }
+            }
+            else if (paused && f.Choice == 0 && _drives.Contains(d)) SetPaused(d, false); // asks first when the daily cap holds
+            d.DiskShortQuietUntil = DateTime.UtcNow.AddMinutes(chosen == ok ? 30 : 10); // still short later: said again
+            f.Dispose();
+        };
+        f.Show();
+    }
+
     void OnRemoteUnreachable(DriveController d, DriveSession s)
     {
         if (d.Session != s || d.Stopping || _quitting) return;
@@ -993,24 +1094,31 @@ sealed class TrayApp : ApplicationContext
     }
 
     /// <summary>Delete the local copies of files that are safely in Telegram, only when nothing waits here.</summary>
-    void FreeUpSpace(DriveController d)
+    async void FreeUpSpace(DriveController d)
     {
         if (d.Session is not { } s) return;
         if (s.CacheClearBlocker() is { } why) { Ui.Info(why); return; }
-        long size = s.Status.CacheBytes;
+        long size = Math.Max(0, s.Status.CacheBytes - s.Engine.PreparedBytes); // prepared files stay
         if (size < 1 << 20) { Ui.Info(L.T("אין כרגע עותקים מקומיים שאפשר לפנות.", "There are no local copies to free right now.")); return; }
         if (Ui.Ask(L.T(
                 $"יימחקו מהמחשב הזה עותקים מקומיים של קבצים מ־{d.Name}, בגודל {Ui.Size(size)}.\n\n" +
-                "הקבצים עצמם שמורים בטלגרם ולא נפגעים: כשתפתח אותם הם יורדו שוב. עד אז הם ייפתחו רק כשיש חיבור לאינטרנט.\n\nלפנות?",
+                "הקבצים עצמם שמורים בטלגרם ולא נפגעים: כשתפתח אותם הם יורדו שוב. עד אז הם ייפתחו רק כשיש חיבור לאינטרנט. קבצים שהכנת נשארים במחשב.\n\nלפנות?",
                 $"Local copies of files from {d.Name} will be deleted from this PC ({Ui.Size(size)}).\n\n" +
-                "The files themselves are stored in Telegram and are not affected: they are downloaded again when you open them. Until then they open only with an internet connection.\n\nFree up the space?"),
+                "The files themselves are stored in Telegram and are not affected: they are downloaded again when you open them. Until then they open only with an internet connection. Files you prepared stay on this PC.\n\nFree up the space?"),
                 icon: MessageBoxIcon.Question) != DialogResult.Yes) return;
+        if (d.Session != s) return; // disconnected while the question was open
         try
         {
-            long freed = s.ClearCache();
-            Balloon(L.T("פונה מקום", "Space freed"), L.T($"פונו {Ui.Size(freed)} במחשב הזה.", $"{Ui.Size(freed)} freed on this PC."), onClick: () => OpenDrive(d));
+            long freed = await Task.Run(() => s.ClearCache()); // thousands of small files: not on the UI thread
+            Balloon(L.T("התפנה מקום ✓", "Space freed ✓"), L.T($"פונו {Ui.Size(freed)} במחשב הזה.", $"{Ui.Size(freed)} freed on this PC."), onClick: () => OpenDrive(d));
         }
         catch (InvalidOperationException ex) { Ui.Info(ex.Message); } // something started meanwhile
+        catch (Exception ex)
+        {
+            Log.Warn($"free up space: {ex.Message}");
+            Ui.Error(L.T("לא הצלחתי לפנות את כל המקום (ייתכן שקובץ מהכונן פתוח כרגע). נסה שוב בעוד רגע.",
+                "Could not free all of the space (a file from the drive may be open right now). Try again in a moment."));
+        }
         UpdateIcon();
     }
 
@@ -1166,11 +1274,8 @@ sealed class TrayApp : ApplicationContext
     void Activate()
     {
         if (_wizard is { IsDisposed: false }) { _wizard.Activate(); return; }
-        if (_drives.Count == 0) { _ = AddDriveAsync(); return; }
         if (_pendingSetup is { } p) { _ = SetupAsync(p); return; }
-        var mounted = _drives.FirstOrDefault(d => d.Session is not null);
-        if (mounted is not null) OpenDrive(mounted);
-        else Balloon("DriveGram", Summary(), ToolTipIcon.Info);
+        ShowMain();
     }
 
     static void OpenDrive(DriveController d)
@@ -1213,6 +1318,308 @@ sealed class TrayApp : ApplicationContext
         d.Backup.Show();
     }
 
+    // ── transfers: uploads, files on this PC, the daily limit ────────────────
+    public IReadOnlyList<DriveController> Drives => _drives;
+    public Preparer Preparer => _preparer;
+    public DailyUploads Daily => _daily;
+
+    void ShowTransfers(bool local = false) => ShowMain(DriveGram.Tray.MainForm.Tab.Transfers, local);
+
+    DriveGram.Tray.MainForm? _main;
+
+    /// <summary>The main window (accounts, drives, transfers). Without a tab: accounts when there is no drive yet.</summary>
+    internal void ShowMain(DriveGram.Tray.MainForm.Tab? tab = null, bool localFiles = false)
+    {
+        if (_main is not { IsDisposed: false })
+        {
+            _main = new DriveGram.Tray.MainForm(this);
+            _main.Show();
+        }
+        else
+        {
+            if (_main.WindowState == FormWindowState.Minimized) _main.WindowState = FormWindowState.Normal;
+            _main.Activate();
+        }
+        _main.Select(tab ?? (_drives.Count == 0 ? DriveGram.Tray.MainForm.Tab.Accounts : DriveGram.Tray.MainForm.Tab.Drives), localFiles);
+    }
+
+    /// <summary>"Add account": a short wizard for the sign-in only; then the new account can add drives.</summary>
+    public async Task AddAccountAsync()
+    {
+        if (_wizard is { IsDisposed: false }) { _wizard.Activate(); return; }
+        var before = TelegramAccounts.Known().Select(a => a.Key).ToHashSet();
+        var temp = AppState.CreateNew(); // only carries the sign-in; the account itself is kept by TelegramAccounts
+        bool restart, finished;
+        try
+        {
+            using (_wizard = new Setup.SetupWizard(temp, isNew: true, accountOnly: true, firstRun: TelegramAccounts.Known().Count == 0))
+            {
+                finished = _wizard.ShowDialog() == DialogResult.OK;
+                restart = _wizard.Context.RestartForLanguage;
+                _wizard = null;
+            }
+        }
+        finally { temp.Delete(); }
+        var signedIn = temp.Config.AccountKey; // the account the wizard signed in to (maybe one already here)
+        if (restart) { await AddAccountAsync(); return; }
+        _main?.RefreshAll();
+        if (!finished) return; // closed: the account (if it signed in) is in the accounts list, no drive window
+        var added = TelegramAccounts.Known().FirstOrDefault(a => !before.Contains(a.Key))
+                    ?? (string.IsNullOrEmpty(signedIn) ? null : TelegramAccounts.Known().FirstOrDefault(a => a.Key == signedIn));
+        if (added is null) return;
+        Log.Info("tray: a Telegram account was added");
+        // straight on to its drives: the ones it already has, or a new one
+        await AddDrivesAsync(added, createNew: false);
+    }
+
+    /// <summary>Drives for one account: a new one, or the account's existing drives to connect (several at once).</summary>
+    public async Task AddDrivesAsync(AccountInfo account, bool createNew)
+    {
+        await SetupAsync(null, new Setup.NextDrive(account, null, createNew, null));
+        _main?.RefreshAll();
+    }
+
+    /// <summary>Sign out of an account no drive here uses.</summary>
+    public async Task SignOutAccountAsync(AccountInfo a)
+    {
+        if (_drives.Any(d => d.State.Config.AccountKey == a.Key)) return;
+        if (Ui.Ask(L.T($"להתנתק מהחשבון {L.Name(a.Name)} במחשב הזה?\n\nשום דבר לא נמחק בטלגרם. אפשר להתחבר אליו שוב בכל רגע.",
+                $"Sign out of {a.Name} on this PC?\n\nNothing is deleted in Telegram. You can sign in to it again at any time.")) != DialogResult.Yes) return;
+        bool done = await TelegramAccounts.SignOutIfUnusedAsync(a.Key);
+        _main?.RefreshAll();
+        if (!done)
+            Ui.Info(L.T($"לא הצלחתי להתנתק מ־{L.Name(a.Name)} כרגע (אין חיבור לטלגרם, או שהחשבון בשימוש עכשיו). נסה שוב בעוד רגע.",
+                $"Could not sign out of {a.Name} right now (no connection to Telegram, or the account is in use). Try again in a moment."));
+    }
+
+    public List<AccountInfo> Accounts() => TelegramAccounts.Known();
+    public string DriveStatus(DriveController d) => StatusOf(d);
+    public void OpenDriveNow(DriveController d) => OpenDrive(d);
+    public async Task ConnectOrDisconnectAsync(DriveController d)
+    {
+        if (d.Session is not null) await StopAsync(d);
+        else if (d.NeedsSetup) await SetupAsync(d);
+        else await MountAsync(d);
+    }
+
+    /// <summary>A drive's uploads run unless the user paused them or the daily cap holds them back.</summary>
+    void ApplyPause(DriveController d)
+    {
+        // disconnecting with "wait for the uploads", or handing the drive to another PC: everything must go up
+        if (d.Stopping || d.Session is not { } s || s.Sync.HandingOver) return;
+        s.Engine.PausedAll = d.ManualPaused || _daily.CapReached;
+    }
+
+    public void SetPaused(DriveController d, bool paused)
+    {
+        d.ManualPaused = paused;
+        // resuming while the daily cap holds: the user's pause ends; past the cap only if the user agrees
+        if (!paused && (!_daily.CapReached || AskPastCap())) d.Session?.Engine.ResumeAll();
+        foreach (var x in _drives) ApplyPause(x);
+    }
+
+    /// <summary>"Resume all": the user's pauses end; past the daily cap only if the user agrees.</summary>
+    public void ResumeEverything()
+    {
+        if (_daily.CapReached && !AskPastCap())
+        {
+            // only the user's own pauses end: the cap still holds until midnight
+            foreach (var d in _drives) { d.ManualPaused = false; ApplyPause(d); }
+            return;
+        }
+        foreach (var d in _drives) { d.ManualPaused = false; d.Session?.Engine.ResumeAll(); }
+        foreach (var d in _drives) ApplyPause(d);
+    }
+
+    bool AskPastCap()
+    {
+        if (Ui.Ask(L.T($"הגעת היום לתקרה היומית ({_daily.CapGb:0.#} GB). להמשיך להעלות היום בכל זאת?",
+                $"Today's daily cap ({_daily.CapGb:0.#} GB) was reached. Keep uploading today anyway?")) != DialogResult.Yes) return false;
+        _daily.LiftCapForToday();
+        return true;
+    }
+
+    public void ResumeOnly(IReadOnlyList<(DriveController D, string Id)> files)
+    {
+        if (files.Count == 0) return;
+        bool capHolds = _daily.CapReached;
+        if (capHolds && Ui.Ask(L.N(files.Count,
+                $"הגעת היום לתקרה היומית ({_daily.CapGb:0.#} GB). להעלות את הקובץ שבחרת בכל זאת?\n\nשאר הקבצים יישארו מושהים עד מחר, או עד שתמשיך אותם.",
+                $"הגעת היום לתקרה היומית ({_daily.CapGb:0.#} GB). להעלות את {{0}} הקבצים שבחרת בכל זאת?\n\nשאר הקבצים יישארו מושהים עד מחר, או עד שתמשיך אותם.",
+                $"Today's daily cap ({_daily.CapGb:0.#} GB) was reached. Upload the file you chose anyway?\n\nThe other files stay paused until tomorrow, or until you resume them.",
+                $"Today's daily cap ({_daily.CapGb:0.#} GB) was reached. Upload the {{0}} files you chose anyway?\n\nThe other files stay paused until tomorrow, or until you resume them.")) != DialogResult.Yes) return;
+        // the drive (or the cap) keeps everything else paused, also files copied in later: only these go on
+        foreach (var g in files.GroupBy(f => f.D)) g.Key.Session?.Engine.Resume(g.Select(f => f.Id).ToList());
+    }
+
+    public void LiftCap()
+    {
+        _daily.LiftCapForToday();
+        foreach (var d in _drives) ApplyPause(d);
+    }
+
+    public void EditLimits(IWin32Window owner)
+    {
+        using var f = new LimitsForm(_daily.AlertGb, _daily.CapGb, _daily.TodayBytes);
+        if (f.ShowDialog(owner) != DialogResult.OK) return;
+        _daily.SetLimits(f.AlertGb, f.CapGb);
+        foreach (var d in _drives) ApplyPause(d);
+    }
+
+    void TrackDaily()
+    {
+        var running = _drives.Where(d => d.Session is not null).ToList(); // also a drive finishing its uploads before it stops
+        long waiting = 0;
+        foreach (var d in running) try { waiting += d.Session!.Engine.BytesToUpload(); } catch { }
+        string? say = null;
+        try { say = _daily.Tick(running.Select(d => ((object)d.Session!, d.Session!.Status.BytesUploaded)), waiting); }
+        catch (Exception ex) { Log.Warn($"daily uploads: {ex.Message}"); }
+        foreach (var d in _drives) ApplyPause(d);
+        if (say is not null && !_quitting)
+            Balloon(L.T("העלאות היום", "Today's uploads"), say, ToolTipIcon.Info, () => ShowTransfers());
+    }
+
+    public void PrepareFiles(IEnumerable<(DriveSession Session, string Id)> files)
+    {
+        var list = files.ToList();
+        foreach (var (s, id) in list) _preparer.Start(s, id);
+        Balloon(L.T("מכין במחשב הזה", "Preparing on this PC"),
+            L.N(list.Count,
+                "מוריד את הקובץ כולו. תקבל הודעה כשהוא מוכן, ואפשר לעקוב בלשונית \"העברות\" בחלון של DriveGram.",
+                "מוריד {0} קבצים במלואם. תקבל הודעה כשכל אחד מוכן, ואפשר לעקוב בלשונית \"העברות\" בחלון של DriveGram.",
+                "Downloading the whole file. You will be told when it is ready; follow it on the \"Transfers\" tab of the DriveGram window.",
+                "Downloading {0} whole files. You will be told when each is ready; follow them on the \"Transfers\" tab of the DriveGram window."),
+            ToolTipIcon.Info, () => ShowTransfers(local: true));
+    }
+
+    public async Task FreeFiles(IEnumerable<(DriveSession Session, string Id)> files)
+    {
+        var list = files.ToList();
+        if (list.Count == 0) return;
+        int prepared = list.Count(f => f.Session.Engine.IsPrepared(f.Id));
+        if (prepared > 0 && Ui.Ask(L.N(prepared,
+                "לפנות מהמחשב הזה קובץ שהכנת? הוא שמור בטלגרם, אבל ייפתח שוב רק עם אינטרנט, ויורד מחדש.",
+                "לפנות מהמחשב הזה {0} קבצים שהכנת? הם שמורים בטלגרם, אבל ייפתחו שוב רק עם אינטרנט, ויורדו מחדש.",
+                "Free a file you prepared from this PC? It is stored in Telegram, but opens again only online, downloaded again.",
+                "Free {0} files you prepared from this PC? They are stored in Telegram, but open again only online, downloaded again.")) != DialogResult.Yes)
+            return;
+        foreach (var (s, id) in list) _preparer.Cancel(s, id);
+        // a big prepared file is thousands of small cache files: deleted off the UI thread
+        long freed = await Task.Run(() =>
+        {
+            long n = 0;
+            foreach (var (s, id) in list)
+                try { n += s.Engine.FreeLocal(id); }
+                catch (Exception ex) { Log.Warn($"free {id}: {ex.Message}"); }
+            return n;
+        });
+        foreach (var (s, id) in list) try { ShellChanged(s.FullPathOf(id)); } catch { }
+        if (freed == 0)
+            Ui.Info(L.N(list.Count,
+                "לא היה מה לפנות: הקובץ עוד מחכה להעלאה לטלגרם, או שאין ממנו עותק במחשב הזה.",
+                "לא היה מה לפנות: הקבצים עוד מחכים להעלאה לטלגרם, או שאין מהם עותק במחשב הזה.",
+                "Nothing to free: the file is still waiting to upload to Telegram, or there is no copy of it on this PC.",
+                "Nothing to free: the files are still waiting to upload to Telegram, or there is no copy of them on this PC."));
+        else
+            Balloon(L.T("התפנה מקום ✓", "Space freed ✓"), L.N(list.Count, $"פונו {Ui.Size(freed)} במחשב הזה. הקובץ עצמו שמור בטלגרם.", $"פונו {Ui.Size(freed)} במחשב הזה. הקבצים עצמם שמורים בטלגרם.",
+                $"{Ui.Size(freed)} freed on this PC. The file itself is stored in Telegram.", $"{Ui.Size(freed)} freed on this PC. The files themselves are stored in Telegram."));
+    }
+
+    void OnPrepared(Preparer.Job job, bool ok, string? error)
+    {
+        try { ShellChanged(job.Session.FullPathOf(job.Id)); } catch { }
+        if (ok)
+            Balloon(L.T("הקובץ מוכן במחשב הזה ✓", "The file is ready on this PC ✓"),
+                L.T($"\"{L.Name(job.Name)}\" ייפתח מיד, גם בלי אינטרנט, ונשמר עד שתפנה אותו (בלשונית \"העברות\" בחלון של DriveGram, או בלחיצה ימנית עליו).",
+                    $"\"{job.Name}\" opens at once, even offline, and stays until you free it (on the \"Transfers\" tab of the DriveGram window, or by right-clicking it)."),
+                ToolTipIcon.Info, () => ShowTransfers(local: true));
+        else if (!string.IsNullOrEmpty(error))
+            Balloon(L.T("ההכנה לא הושלמה", "Preparing did not finish"), $"\"{L.Name(job.Name)}\": {error}", ToolTipIcon.Warning, () => ShowTransfers(local: true));
+    }
+
+    /// <summary>A Windows path on one of the running drives: its file (null: not a DriveGram file).</summary>
+    (DriveSession Session, string Id)? ResolveShellPath(string path)
+    {
+        DriveController[] drives;
+        try { drives = _drives.ToArray(); } catch { return null; }
+        foreach (var d in drives)
+        {
+            if (d.Session is not { } s || d.Stopping) continue;
+            if (!path.StartsWith(s.MountPoint, StringComparison.OrdinalIgnoreCase)) continue;
+            try { return s.FileIdOf(path) is { } id ? (s, id) : null; }
+            catch { return null; }
+        }
+        return null;
+    }
+
+    [System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern void SHChangeNotify(int eventId, uint flags, string item1, IntPtr item2);
+
+    /// <summary>Explorer redraws the file's overlay icon (how much of it is on this PC).</summary>
+    static void ShellChanged(string path)
+    {
+        try { SHChangeNotify(0x00002000 /* SHCNE_UPDATEITEM */, 0x0005 /* SHCNF_PATHW */, path, IntPtr.Zero); } catch { }
+    }
+
+    void ShowSwitchAccount(DriveController d)
+    {
+        if (d.SwitchAccount is { IsDisposed: false }) { d.SwitchAccount.Activate(); return; }
+        var f = new SwitchAccountForm(d.State);
+        f.OpenBackup += () => ShowBackup(d);
+        f.SignInAnother += () => { f.Close(); _ = SetupAsync(d); };
+        f.AccountChosen += a => SwitchAccountAsync(d, a);
+        d.SwitchAccount = f;
+        f.Show();
+    }
+
+    /// <summary>
+    /// Move the drive to another account signed in on this PC: check that it administers both channels with
+    /// the rights DriveGram needs, then reconnect the drive with it. Nothing is uploaded again; what waits
+    /// to upload goes on with the new account. Returns null when done, or what is wrong.
+    /// </summary>
+    async Task<string?> SwitchAccountAsync(DriveController d, AccountInfo a)
+    {
+        if (d.State.Config.Channels is not { } ch) return "";
+        DriveAccess access;
+        {
+            // a throw-away copy of the profile, pointing at that account (never saved)
+            var probe = AppState.Open(d.State.Id);
+            probe.Config.AccountKey = a.Key;
+            probe.Config.ApiId = a.ApiId;
+            probe.Config.ApiHash = a.ApiHash;
+            using var lease = TelegramAccounts.Acquire(probe);
+            access = await Task.Run(() => TelegramRemote.DriveAccessAsync(lease.Client, ch));
+        }
+        var who = L.Name(a.Name);
+        if (!access.JournalFound || !access.DataFound)
+            return L.T($"החשבון {who} עוד לא מנהל את {(!access.JournalFound && !access.DataFound ? "שני הערוצים" : !access.JournalFound ? "ערוץ היומן" : "ערוץ הקבצים")} של הכונן. הוסף אותו ב\"גיבוי בחשבון נוסף…\" ונסה שוב.",
+                $"The account {a.Name} does not administer {(!access.JournalFound && !access.DataFound ? "both channels" : !access.JournalFound ? "the journal channel" : "the data channel")} of the drive. Add it in \"Backup on another account…\" and try again.");
+        if (!access.Ok)
+            return L.T($"ל־{who} אין את כל ההרשאות שהכונן צריך (לפרסם, לערוך ולמחוק הודעות) ב{(!access.JournalRights && !access.DataRights ? "שני הערוצים" : !access.JournalRights ? "ערוץ היומן" : "ערוץ הקבצים")}. הוסף אותו שוב ב\"גיבוי בחשבון נוסף…\": זה נותן את כל ההרשאות.",
+                $"{a.Name} lacks some rights the drive needs (post, edit and delete messages) in {(!access.JournalRights && !access.DataRights ? "both channels" : !access.JournalRights ? "the journal channel" : "the data channel")}. Add it again in \"Backup on another account…\": that gives every right.");
+        if (Ui.Ask(L.T($"להעביר את {d.Name} לחשבון {who}?\n\nהכונן יתנתק לרגע ויתחבר מחדש עם החשבון הזה. שום קובץ לא עולה מחדש, ומה שממתין להעלאה ימשיך עם החשבון החדש.",
+                $"Move {d.Name} to the account {a.Name}?\n\nThe drive disconnects for a moment and connects again with that account. No file is uploaded again, and what waits to upload goes on with the new account.")) != DialogResult.Yes)
+            return "";
+        if (d.Session is not null && !await StopAsync(d, ask: false, waitForUploads: false))
+            return L.T("לא הצלחתי לנתק את הכונן כרגע. נסה שוב בעוד רגע.", "Could not disconnect the drive right now. Try again in a moment.");
+        var state = AppState.Open(d.State.Id);
+        state.Config.AccountKey = a.Key;
+        state.Config.ApiId = a.ApiId;
+        state.Config.ApiHash = a.ApiHash;
+        state.Config.AccountId = a.Id;
+        state.Config.AccountName = a.Name;
+        state.Save();
+        Log.Info($"tray: {d.Name} moved to another Telegram account");
+        var fresh = new DriveController(AppState.Open(state.Id));
+        Replace(d, fresh);
+        await MountAsync(fresh);
+        UpdateIcon();
+        if (fresh.Session is not null)
+            Balloon(L.T($"{L.Ltr(fresh.Letter)} עבר לחשבון {who}", $"{fresh.Letter} moved to {a.Name}"),
+                L.T("הכונן מחובר עם החשבון החדש. הקבצים לא השתנו.", "The drive is connected with the new account. The files did not change."), onClick: () => OpenDrive(fresh));
+        return null;
+    }
+
     static void ShowTrash(DriveController d)
     {
         if (d.Session is null) return;
@@ -1242,6 +1649,12 @@ sealed class TrayApp : ApplicationContext
             ? L.T($"קריאה בלבד (פתוח לכתיבה ב־{L.Ltr(h)})", $"read-only (open for writing on {h})")
             : L.T("קריאה בלבד כרגע (בודק…)", "read-only for now (checking…)");
         var wait = s.WaitingUntil is { } until ? L.T($" · טלגרם ביקש להמתין עד {until:HH:mm}", $" · Telegram asked to wait until {until:HH:mm}") : "";
+        if (st.PendingFiles > 0 && st.UploadsInFlight == 0 && s.Engine.PendingNotPaused() == 0)
+            return (s.Engine.PausedAll && !d.ManualPaused
+                    ? L.T("ההעלאות מושהות עד חצות (תקרה יומית): ", "uploads paused until midnight (daily cap): ")
+                    : L.T("ההעלאות מושהות: ", "uploads paused: "))
+                   + L.N(st.PendingFiles, "קובץ אחד מחכה", "{0} קבצים מחכים", "1 file waits", "{0} files wait")
+                   + L.T($" במחשב הזה ({Ui.Size(st.StagedBytes)})", $" on this PC ({Ui.Size(st.StagedBytes)})");
         if (st.PendingFiles > 0 || st.UploadsInFlight > 0)
             return L.T("מעלה: ", "uploading: ") + L.N(st.PendingFiles, "קובץ אחד", "{0} קבצים", "1 file", "{0} files") + $", {Ui.Size(st.StagedBytes)}"
                    + UploadProgress(d, st) + wait;
@@ -1251,11 +1664,11 @@ sealed class TrayApp : ApplicationContext
     }
 
     static string ReadOnlyWhy(DriveSession s) => !s.Sync.ControlTrusted
-        ? L.T("רשומת הכונן שונתה מחוץ ל־DriveGram, ולכן הוא לקריאה בלבד. בתפריט: \"אשר את רשומת הכונן…\".",
-              "The drive's record was changed outside DriveGram, so it is read-only. In the menu: \"Confirm the drive's record…\".")
+        ? L.T("רשומת הכונן שונתה מחוץ ל־DriveGram, ולכן הוא לקריאה בלבד. בתפריט של הכונן: \"אשר את רשומת הכונן…\".",
+              "The drive's record was changed outside DriveGram, so it is read-only. In the drive's menu: \"Confirm the drive's record…\".")
         : s.Sync.LeaseHolder is { } h
-        ? L.T($"הכונן פתוח לכתיבה במחשב {L.Ltr(h)}. כאן אפשר רק לקרוא. כדי לכתוב כאן: בתפריט, \"בקש את הכונן מ־{L.Ltr(h)}…\".",
-              $"The drive is open for writing on {h}. Here it can only be read. To write here: \"Ask {h} for the drive…\" in the menu.")
+        ? L.T($"הכונן פתוח לכתיבה במחשב {L.Ltr(h)}. כאן אפשר רק לקרוא. כדי לכתוב כאן: בתפריט של הכונן, \"בקש את הכונן מ־{L.Ltr(h)}…\".",
+              $"The drive is open for writing on {h}. Here it can only be read. To write here: \"Ask {h} for the drive…\" in the drive's menu.")
         : L.T("הכונן זמין כרגע לקריאה בלבד; DriveGram בודק אם אפשר לכתוב.", "The drive is read-only for now; DriveGram is checking whether it can write.");
 
     string Summary() => _drives.Count == 0
@@ -1266,8 +1679,10 @@ sealed class TrayApp : ApplicationContext
     {
         _menu.RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No;
         _menu.Items.Clear();
-        var title = new ToolStripMenuItem("DriveGram") { Enabled = false, Font = BoldFont };
-        _menu.Items.Add(title);
+        var open = Item(L.T("פתח את DriveGram", "Open DriveGram"), () => ShowMain(), bold: true);
+        open.Image = _idleBitmap;
+        _menu.Items.Add(open);
+        _menu.Items.Add(new ToolStripSeparator());
         foreach (var d in _drives)
         {
             var account = d.State.Folder is not null ? L.T("תיקייה מקומית", "local folder") : L.Name(d.State.Config.AccountName ?? "");
@@ -1276,37 +1691,15 @@ sealed class TrayApp : ApplicationContext
                 Image = d.Busy || d.Starting ? _busyBitmap : _idleBitmap,
             };
             bool on = d.Session is not null && !d.Stopping;
-            item.DropDownItems.Add(Item(L.T("פתח את הכונן", "Open the drive"), () => OpenDrive(d), on, bold: true));
-            item.DropDownItems.Add(Item(L.T("סל המחזור…", "Recycle bin…"), () => ShowTrash(d), on));
-            item.DropDownItems.Add(Item(L.T("ייצוא כל הקבצים לתיקייה…", "Export every file to a folder…"), () => Export(d), on));
-            item.DropDownItems.Add(Item(L.T("פנה מקום במחשב הזה…", "Free up space on this PC…"), () => FreeUpSpace(d), on));
-            item.DropDownItems.Add(new ToolStripSeparator());
-            if (d.Session is null)
-                item.DropDownItems.Add(Item(L.T("חבר", "Connect"), async () => { if (d.NeedsSetup) await SetupAsync(d); else await MountAsync(d); },
-                    !d.Starting));
-            else item.DropDownItems.Add(Item(L.T("נתק", "Disconnect"), async () => await StopAsync(d), !d.Stopping));
-            if (d.Session is { Sync.ControlTrusted: false } tampered)
-                item.DropDownItems.Add(Item(L.T("אשר את רשומת הכונן…", "Confirm the drive's record…"), async () => await ConfirmRecordAsync(d, tampered), !d.Stopping, bold: true));
-            if (d.Session is { Writable: false, Sync: { LeaseHolder: { } holder, NeedsUpdate: false } })
-                item.DropDownItems.Add(Item(L.T($"בקש את הכונן מ־{L.Ltr(holder)}…", $"Ask {holder} for the drive…"), () => AskForDrive(d), !d.Stopping, bold: true));
-            item.DropDownItems.Add(Item(L.T("הגדרות והתחברות…", "Settings and sign-in…"), async () => await SetupAsync(d), !d.Starting && !d.Stopping));
-            item.DropDownItems.Add(Item(L.T("סיסמה ומפתח שחזור…", "Password and recovery key…"), () => ShowSecurity(d), on));
-            item.DropDownItems.Add(Item(d.State.Config.NetworkDrive ? L.T("סוג הכונן: כונן רשת…", "Drive type: network drive…") : L.T("סוג הכונן: דיסק רגיל…", "Drive type: regular disk…"),
-                async () => await ChangeDriveTypeAsync(d), !d.Starting && !d.Stopping));
-            if (d.State.Folder is null && d.State.Config.Channels is not null)
-                item.DropDownItems.Add(Item(L.T("גיבוי בחשבון נוסף…", "Backup on another account…"), () => ShowBackup(d)));
-            item.DropDownItems.Add(new ToolStripSeparator());
-            item.DropDownItems.Add(Item(L.T("הסר מהמחשב הזה…", "Remove from this PC…"), async () => await RemoveAsync(d), !d.Starting && !d.Stopping));
-            // never offered while the drive's pairing is in doubt (it could name another drive's data)
-            var delete = Item(L.T("מחק את הכונן לצמיתות…", "Delete the drive permanently…"), async () => await DeleteForeverAsync(d),
-                !d.Starting && !d.Stopping && !d.MustChooseDrive);
-            delete.ForeColor = Color.FromArgb(0xC6, 0x28, 0x28);
-            item.DropDownItems.Add(delete);
+            item.DropDownItems.AddRange(DriveItems(d).ToArray());
             item.Click += (_, _) => { if (on) OpenDrive(d); };
             _menu.Items.Add(item);
         }
         _menu.Items.Add(new ToolStripSeparator());
-        _menu.Items.Add(Item(L.T("הוסף כונן נוסף…", "Add another drive…"), async () => await AddDriveAsync()));
+        var transfers = Item(L.T("העברות וקבצים במחשב…", "Transfers and files on this PC…"), () => ShowTransfers());
+        transfers.Image = Glyphs.Make(Glyphs.Upload, Setup.Theme.AccentDark, 16);
+        _menu.Items.Add(transfers);
+        _menu.Items.Add(Item(L.T("חשבונות טלגרם והוספת כונן…", "Telegram accounts and adding a drive…"), () => ShowMain(DriveGram.Tray.MainForm.Tab.Accounts)));
 
         var autostart = new ToolStripMenuItem(L.T("הפעל עם וינדוס", "Start with Windows")) { Checked = ShellIntegration.AutostartEnabled };
         autostart.Click += (_, _) =>
@@ -1330,10 +1723,75 @@ sealed class TrayApp : ApplicationContext
         _menu.Items.Add(Item(L.T("יציאה", "Exit"), async () => await QuitAsync(ask: true)));
     }
 
+    /// <summary>Everything that can be done with one drive (the tray menu, and "⋯" in the main window).</summary>
+    public List<ToolStripItem> DriveItems(DriveController d)
+    {
+        var list = new List<ToolStripItem>();
+        bool on = d.Session is not null && !d.Stopping;
+        list.Add(Item(L.T("פתח את הכונן", "Open the drive"), () => OpenDrive(d), on, bold: true));
+        list.Add(Item(L.T("סל המחזור…", "Recycle bin…"), () => ShowTrash(d), on));
+        list.Add(Item(L.T("ייצוא כל הקבצים לתיקייה…", "Export every file to a folder…"), () => Export(d), on));
+        list.Add(Item(L.T("פנה מקום במחשב הזה…", "Free up space on this PC…"), () => FreeUpSpace(d), on));
+        list.Add(new ToolStripSeparator());
+        if (d.Session is null)
+            list.Add(Item(L.T("חבר", "Connect"), async () => { if (d.NeedsSetup) await SetupAsync(d); else await MountAsync(d); },
+                !d.Starting));
+        else list.Add(Item(L.T("נתק", "Disconnect"), async () => await StopAsync(d), !d.Stopping));
+        if (d.Session is { Sync.ControlTrusted: false } tampered)
+            list.Add(Item(L.T("אשר את רשומת הכונן…", "Confirm the drive's record…"), async () => await ConfirmRecordAsync(d, tampered), !d.Stopping, bold: true));
+        if (d.Session is { Writable: false, Sync: { LeaseHolder: { } holder, NeedsUpdate: false } })
+            list.Add(Item(L.T($"בקש את הכונן מ־{L.Ltr(holder)}…", $"Ask {holder} for the drive…"), () => AskForDrive(d), !d.Stopping, bold: true));
+        list.Add(Item(L.T("הגדרות והתחברות…", "Settings and sign-in…"), async () => await SetupAsync(d), !d.Starting && !d.Stopping));
+        list.Add(Item(L.T("סיסמה ומפתח שחזור…", "Password and recovery key…"), () => ShowSecurity(d), on));
+        // on: forget it (the password is asked each time the drive connects); off: remember it again,
+        // from the key of the connected drive (disconnected, it is offered when the password is asked)
+        bool remembered = d.State.HasRememberedMaster;
+        var remember = Item(remembered || on ? L.T("לזכור את הסיסמה במחשב הזה", "Remember the password on this PC")
+            : L.T("לזכור את הסיסמה במחשב הזה (אחרי שהכונן מתחבר)", "Remember the password on this PC (once the drive is connected)"),
+            () => ToggleRemember(d), remembered || on);
+        remember.Checked = remembered;
+        list.Add(remember);
+        list.Add(Item(d.State.Config.NetworkDrive ? L.T("סוג הכונן: כונן רשת…", "Drive type: network drive…") : L.T("סוג הכונן: דיסק רגיל…", "Drive type: regular disk…"),
+            async () => await ChangeDriveTypeAsync(d), !d.Starting && !d.Stopping));
+        if (d.State.Folder is null && d.State.Config.Channels is not null)
+        {
+            list.Add(Item(L.T("גיבוי בחשבון נוסף…", "Backup on another account…"), () => ShowBackup(d)));
+            list.Add(Item(L.T("העבר לחשבון טלגרם אחר…", "Move to another Telegram account…"), () => ShowSwitchAccount(d), !d.Starting && !d.Stopping));
+        }
+        list.Add(new ToolStripSeparator());
+        list.Add(Item(L.T("הסר מהמחשב הזה…", "Remove from this PC…"), async () => await RemoveAsync(d), !d.Starting && !d.Stopping));
+        // never offered while the drive's pairing is in doubt (it could name another drive's data)
+        var delete = Item(L.T("מחק את הכונן לצמיתות…", "Delete the drive permanently…"), async () => await DeleteForeverAsync(d),
+            !d.Starting && !d.Stopping && !d.MustChooseDrive);
+        delete.ForeColor = Color.FromArgb(0xC6, 0x28, 0x28);
+        list.Add(delete);
+        return list;
+    }
+
     static readonly Font BoldFont = new(Ui.Font, FontStyle.Bold);
     Bitmap? _idleBmp, _busyBmp;
     Bitmap _idleBitmap => _idleBmp ??= _idle.ToBitmap();
     Bitmap _busyBitmap => _busyBmp ??= _busy.ToBitmap();
+
+    /// <summary>Remember the drive's password on this PC, or forget it (asked each time the drive connects).</summary>
+    void ToggleRemember(DriveController d)
+    {
+        var name = L.Name(d.State.Config.VolumeLabel);
+        if (d.State.HasRememberedMaster)
+        {
+            if (Ui.Ask(L.T($"לשכוח את הסיסמה של \"{name}\" במחשב הזה?\n\nהכונן יישאר מחובר עכשיו. מהחיבור הבא, הסיסמה תתבקש בכל פעם שהכונן מתחבר (גם כשנכנסים לווינדוס).",
+                    $"Forget the password of \"{name}\" on this PC?\n\nThe drive stays connected now. From the next time, the password is asked each time the drive connects (also when you sign in to Windows).")) != DialogResult.Yes) return;
+            d.State.ForgetMaster();
+            Log.Info($"tray: the password of {d.State.Id} is no longer remembered");
+        }
+        else if (d.Session is { } s)
+        {
+            d.State.RememberMaster(s.Keys.ExportMaster());
+            Log.Info($"tray: the password of {d.State.Id} is remembered");
+            Balloon(L.T("הסיסמה נשמרה ✓", "Password remembered ✓"),
+                L.T($"הסיסמה של \"{name}\" תיזכר במחשב הזה, והכונן יתחבר בלי לשאול.", $"The password of \"{name}\" is remembered on this PC: the drive connects without asking."));
+        }
+    }
 
     static ToolStripMenuItem Item(string text, Action onClick, bool enabled = true, bool bold = false)
     {
@@ -1345,8 +1803,9 @@ sealed class TrayApp : ApplicationContext
 
     void UpdateIcon()
     {
-        if (_quitting) return;
+        if (_quitting) { TrackDaily(); return; } // "wait, then exit": what still goes up counts for today
         foreach (var d in _drives) TrackUploads(d);
+        TrackDaily();
         bool busy = _drives.Any(d => d.Busy || d.Starting || d.Stopping);
         _icon.Icon = busy ? _busy : _idle;
         if (_drives.Any(d => d.Stopping)) return; // the stop progress owns the tooltip
@@ -1372,7 +1831,7 @@ sealed class TrayApp : ApplicationContext
         d.SampleBytes = st.BytesUploaded;
         d.SampleAt = now;
 
-        bool busy = st.PendingFiles > 0 || st.UploadsInFlight > 0;
+        bool busy = st.UploadsInFlight > 0 || s.Engine.PendingNotPaused() > 0; // paused files are not "uploading"
         if (busy && !d.Uploading)
         {
             d.Uploading = true;
@@ -1392,13 +1851,15 @@ sealed class TrayApp : ApplicationContext
                 d.ToldUploadStart = true;
                 _lastStartBalloon = now;
                 Balloon(L.T($"מעלה לטלגרם ({L.Ltr(d.Letter)})", $"Uploading to Telegram ({d.Letter})"),
-                    L.T("אפשר להמשיך לעבוד כרגיל. לפני שמנתקים את הכונן או מכבים את המחשב, חכה להודעה \"הכל שמור בטלגרם\".",
-                        "You can keep working as usual. Before disconnecting the drive or shutting down, wait for the \"everything is saved in Telegram\" message."));
+                    L.T("אפשר להמשיך לעבוד כרגיל. לפני שמנתקים את הכונן או מכבים את המחשב, חכה להודעה \"הכל שמור בטלגרם\". לחץ כאן כדי לראות את ההעלאות.",
+                        "You can keep working as usual. Before disconnecting the drive or shutting down, wait for the \"everything is saved in Telegram\" message. Click here to see the uploads."),
+                    onClick: () => ShowTransfers());
             }
             return;
         }
         if (!d.Uploading || s.Sync.UnsentChanges > 0) return; // the last changes are still on their way
         d.Uploading = false;
+        if (st.PendingFiles > 0) return; // the rest is paused (by the user, or the daily cap): not "everything is saved"
         if (!d.ToldUploadStart && now - d.UploadSince < TimeSpan.FromSeconds(20)) return; // a short one: no news
         long sent = Math.Max(0, st.BytesUploaded - d.UploadedAtStart);
         Balloon(L.T("הכל שמור בטלגרם ✓", "Everything is saved in Telegram ✓"),
@@ -1419,7 +1880,7 @@ sealed class TrayApp : ApplicationContext
         if (d.Speed > 16 * 1024 && DateTime.UtcNow - d.UploadSince > TimeSpan.FromSeconds(6))
         {
             double sec = left / d.Speed;
-            text += sec < 60 ? L.T(", פחות מדקה", ", under a minute")
+            text += sec < 60 ? L.T(", עוד פחות מדקה", ", under a minute left")
                 : sec < 3600 ? L.N((int)Math.Ceiling(sec / 60), ", עוד כדקה", ", עוד כ־{0} דקות", ", about a minute left", ", about {0} minutes left")
                 : L.N((int)Math.Round(sec / 3600), ", עוד כשעה", ", עוד כ־{0} שעות", ", about an hour left", ", about {0} hours left");
         }

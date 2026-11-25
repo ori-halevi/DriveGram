@@ -698,9 +698,49 @@ public sealed class IndexDb : IDisposable
 
     public void ClearPending(string node) => Exec("DELETE FROM pending WHERE node=@n", ("@n", node));
 
+    /// <summary>
+    /// A file not saved yet that may stand for an earlier one: a saved file in the same folder went to the
+    /// recycle bin in the last week (Word and Excel save a document as a new file that takes the old one's
+    /// place, and delete the old one under a temporary name; later saves, while uploads wait, repeat that
+    /// without leaving a trace). Erring on the safe side: such a file is never deleted for good from here.
+    /// </summary>
+    public bool MayReplaceSaved(string id)
+    {
+        // only documents of programs that save this way (a copied-in video is not held by it), and for as
+        // long as the earlier file is in the recycle bin (a document may wait paused for weeks)
+        if (Get(id) is not { Parent: { } parent, Name: var name }) return false;
+        if (!OfficeSaves.Contains(Path.GetExtension(name))) return false;
+        return Scalar("""
+            SELECT 1 FROM nodes t WHERE t.parent=@p AND t.dir=0 AND t.trashed>0 AND t.id<>@n LIMIT 1
+            """, ("@p", parent), ("@n", id)) is not null;
+    }
+
+    // documents saved as a new file that takes the old one's place (Word, Excel, PowerPoint, Visio, Publisher)
+    static readonly HashSet<string> OfficeSaves = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".doc", ".docx", ".docm", ".dot", ".dotx", ".dotm", ".rtf", ".xls", ".xlsx", ".xlsm", ".xlsb", ".xlt", ".xltx",
+        ".xltm", ".csv", ".ppt", ".pptx", ".pptm", ".pot", ".potx", ".pps", ".ppsx", ".vsd", ".vsdx", ".pub",
+        ".odt", ".ods", ".odp", ".mpp", ".one",
+    };
+
     public bool IsPending(string node) => Scalar("SELECT 1 FROM pending WHERE node=@n", ("@n", node)) is not null;
 
     public List<string> PendingNodes() => Query("SELECT node FROM pending ORDER BY since", r => r.GetString(0));
+
+    /// <summary>Per pending file, oldest first: its name and size, and the bytes of its parts in total and
+    /// already uploaded. One query (asked every second by the transfers window, also with thousands waiting).</summary>
+    /// <summary>Pending files with their progress; Saved: a version of the file is already in Telegram (a change made here).</summary>
+    public List<(string Node, string Name, long Size, long Total, long Done, bool Saved)> PendingProgress(int max) => Query("""
+        SELECT p.node, n.name, n.size, COALESCE(SUM(d.size), 0), COALESCE(SUM(CASE WHEN d.kind = 'U' THEN d.size ELSE 0 END), 0),
+               EXISTS(SELECT 1 FROM file_chunks f WHERE f.node = p.node)
+        FROM pending p JOIN nodes n ON n.id = p.node LEFT JOIN dirty d ON d.node = p.node
+        WHERE n.dir = 0
+        GROUP BY p.node ORDER BY p.since LIMIT @m
+        """, r => (r.GetString(0), r.GetString(1), r.GetInt64(2), r.GetInt64(3), r.GetInt64(4), r.GetInt64(5) != 0), ("@m", max));
+
+    /// <summary>Bytes still to upload, over every pending file.</summary>
+    public long PendingBytesLeft() => Convert.ToInt64(Scalar(
+        "SELECT COALESCE(SUM(size), 0) FROM dirty WHERE kind <> 'U' AND node IN (SELECT node FROM pending)") ?? 0L);
 
     // ── outbox ───────────────────────────────────────────────────────────────
     public List<(long Seq, Op Op)> PeekOutbox(int max) => Query(
@@ -733,6 +773,28 @@ public sealed class IndexDb : IDisposable
     public HashSet<string> UncommittedNewFiles() => Query(
         "SELECT p.node FROM pending p WHERE NOT EXISTS (SELECT 1 FROM file_chunks f WHERE f.node = p.node)",
         r => r.GetString(0)).ToHashSet();
+
+    /// <summary>
+    /// The first `max` outbox ops that can be sent now, in order: those of a new file not uploaded yet are
+    /// skipped wherever they are in the queue (a paused folder of thousands of files must not hold the
+    /// changes queued behind it, e.g. a file resumed by itself or an edit of a saved one).
+    /// </summary>
+    public List<(long Seq, Op Op)> PeekSendable(int max)
+    {
+        var held = UncommittedNewFiles();
+        var res = new List<(long Seq, Op Op)>();
+        long after = 0;
+        while (res.Count < max)
+        {
+            var page = Query("SELECT seq, op FROM outbox WHERE seq > @a ORDER BY seq LIMIT 5000",
+                r => (r.GetInt64(0), OpJson.Deserialize(r.GetString(1))), ("@a", after));
+            if (page.Count == 0) break;
+            foreach (var b in page)
+                if (!held.Contains(b.Item2.Id) && res.Count < max) res.Add(b);
+            after = page[^1].Item1;
+        }
+        return res;
+    }
 
     /// <summary>Outbox ops that can be sent now (not those of a new file still being written).</summary>
     public int SendableOutboxCount()

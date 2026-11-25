@@ -11,8 +11,10 @@ namespace DriveGram.Tray.Setup;
 /// Verified: that password was already checked against this drive on the first page, so its run goes
 /// straight to its letter and name (Remember: the first page's "remember the password" choice).
 /// </summary>
-sealed record NextDrive(AccountInfo Account, DriveCandidate? Candidate, bool CreateNew, string? PasswordHint,
-    bool Verified = false, bool Remember = true);
+/// Account null: "a drive from another Telegram account" — that run starts with choosing or signing in to it.
+/// Letter / Label / Network: chosen on the first drive page already, so that run finishes by itself.
+sealed record NextDrive(AccountInfo? Account, DriveCandidate? Candidate, bool CreateNew, string? PasswordHint,
+    bool Verified = false, bool Remember = true, string? Letter = null, string? Label = null, bool? Network = null);
 
 /// <summary>State shared by the wizard pages: the profile, the Telegram client and what was decided.</summary>
 sealed class SetupContext : IDisposable
@@ -32,8 +34,22 @@ sealed class SetupContext : IDisposable
     public NextDrive? Current { get; init; }
     /// <summary>Drives still to add after this one (filled by the drive page and the last page).</summary>
     public List<NextDrive> Queue { get; init; } = [];
+    /// <summary>This run's drive letter and name, chosen on the drive page (null: the last page asks).</summary>
+    public string? PresetLetter { get; set; }
+    public string? PresetLabel { get; set; }
+    /// <summary>The drive type and autostart, chosen on the drive page (null: the last page asks).</summary>
+    public bool? PresetNetwork { get; set; }
+    /// <summary>The drive this queued run was for is no longer there: the user picked another one, so the
+    /// letter, name and type chosen for the queued drive do not apply.</summary>
+    public bool QueuedDriveGone { get; set; }
+    public bool? PresetAutostart { get; set; }
+    /// <summary>A new Telegram drive: everything is chosen on the drive page, and the last page only
+    /// saves it (not shown, not counted in "step N of M"). Changing an existing drive keeps the last page.</summary>
+    public bool DrivePageFinishes => IsNew && UsesTelegram && !AccountOnly;
     /// <summary>The password that opened (or created) this run's drive, for the next drives in the queue.</summary>
     public string? LastPassword { get; set; }
+    /// <summary>Only adding a Telegram account (the main window's "Add account"): no drive here.</summary>
+    public bool AccountOnly { get; init; }
     /// <summary>The user chose another language on the first page: open the wizard again in it.</summary>
     public bool RestartForLanguage { get; set; }
     /// <summary>The account this run's drive is on, to add more drives on it without a new sign-in.</summary>
@@ -161,6 +177,13 @@ abstract class WizardPage : UserControl
     public virtual Task<bool> NextAsync() => Task.FromResult(true);
     /// <summary>Skip this page entirely right now (e.g. already configured).</summary>
     public virtual bool Skip => false;
+    /// <summary>Everything on this page is already decided: go on by itself once (Back still shows it).</summary>
+    public virtual bool AutoNext => false;
+    /// <summary>False for a page that only finishes what an earlier page chose (not in "step N of M").</summary>
+    public virtual bool Counted => true;
+    /// <summary>Set by the wizard: the page's own background work holds the buttons (true) or frees them.</summary>
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Action<bool>? Busy { get; set; }
     /// <summary>Snapshot aid: put the page into an alternative visual state (no network).</summary>
     public virtual void Demo(int variant) { }
     public virtual int DemoVariants => 0;
@@ -193,12 +216,14 @@ sealed class SetupWizard : Form
     public string? SnapshotDir { get; init; }
 
     public SetupWizard(AppState state, bool isNew, TelegramChannels? originalChannels = null,
-        NextDrive? next = null, List<NextDrive>? queue = null)
+        NextDrive? next = null, List<NextDrive>? queue = null, bool accountOnly = false, bool firstRun = false)
     {
-        _ctx = new SetupContext(state, isNew, originalChannels) { Current = next, Queue = queue ?? [] };
-        if (next is not null) _ctx.UseAccount(next.Account); // the same account: no API details, no sign-in
+        _ctx = new SetupContext(state, isNew, originalChannels) { Current = next, Queue = queue ?? [], AccountOnly = accountOnly };
+        if (next?.Account is { } sameAccount) _ctx.UseAccount(sameAccount); // the same account: no API details, no sign-in
         int more = next is null ? 0 : _ctx.Queue.Count;
-        Text = next is not null ? L.T("DriveGram – כונן נוסף", "DriveGram – another drive") + (more > 0 ? L.N(more, " (ועוד אחד אחריו)", " (ועוד {0} אחריו)", " (1 more after it)", " ({0} more after it)") : "")
+        Text = accountOnly ? L.T("DriveGram – הוספת חשבון טלגרם", "DriveGram – add a Telegram account")
+            : next is { CreateNew: true } ? L.T("DriveGram – כונן חדש", "DriveGram – new drive")
+            : next is not null ? L.T("DriveGram – כוננים בחשבון ", "DriveGram – drives on ") + (next.Account is { } na ? L.Name(na.Name) : "") + (more > 0 ? L.N(more, " (ועוד אחד אחריו)", " (ועוד {0} אחריו)", " (1 more after it)", " ({0} more after it)") : "")
             : isNew ? L.T("DriveGram – כונן חדש", "DriveGram – new drive") : L.T($"DriveGram – הגדרות הכונן {Ui.DriveTitle(state)}", $"DriveGram – drive settings: {state.DisplayName}");
         RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No;
         RightToLeftLayout = L.Rtl;
@@ -207,17 +232,22 @@ sealed class SetupWizard : Form
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(760, 600);
+        // not taller than the screen (a 1366x768 laptop): the page scrolls, the buttons stay reachable
+        int room = Screen.FromPoint(Cursor.Position).WorkingArea.Height - (SystemInformation.CaptionHeight + 2 * SystemInformation.FixedFrameBorderSize.Height + 8);
+        ClientSize = new Size(900, Math.Max(560, Math.Min(740, room)));
         var icon = Path.Combine(AppContext.BaseDirectory, "drivegram.ico");
         if (File.Exists(icon)) Icon = new Icon(icon);
 
-        List<WizardPage> pages = next is not null ? [new DrivePage(_ctx), new FinishPage(_ctx)] // the account is known already
+        List<WizardPage> pages = accountOnly
+            ? (firstRun ? [new WelcomePage(_ctx), new ApiPage(_ctx), new LoginPage(_ctx)] : [new ApiPage(_ctx), new LoginPage(_ctx)])
+            : next is { Account: not null } ? [new DrivePage(_ctx), new FinishPage(_ctx)] // the account is known already
+            : next is not null ? [new ApiPage(_ctx), new LoginPage(_ctx), new DrivePage(_ctx), new FinishPage(_ctx)] // another account: sign in first
             : _ctx.UsesTelegram
             ? [new WelcomePage(_ctx), new ApiPage(_ctx), new LoginPage(_ctx), new DrivePage(_ctx), new FinishPage(_ctx)]
             : [new WelcomePage(_ctx), new DrivePage(_ctx), new FinishPage(_ctx)];
-        if (!isNew && next is null) pages.RemoveAt(0); // changing a drive's settings: no welcome tour
+        if (!isNew && next is null && !accountOnly) pages.RemoveAt(0); // changing a drive's settings: no welcome tour
         _pages = pages;
-        foreach (var p in _pages) p.StateChanged += UpdateButtons;
+        foreach (var p in _pages) { p.StateChanged += UpdateButtons; p.Busy = SetBusy; }
 
         // header: logo on the reading-start side, step counter on the other
         var header = _header = new Panel { Dock = DockStyle.Top, Height = 118, BackColor = Color.White, Padding = new Padding(32, 18, 32, 0) };
@@ -305,13 +335,18 @@ sealed class SetupWizard : Form
         bool offline = SnapshotDir is not null && page is (LoginPage or DrivePage);
         try { if (!offline) await page.EnterAsync(); }
         catch (Exception ex) { Ui.Error(TelegramErrors.Text(ex)); }
+        UpdateStep(); // a page may know only now whether it counts (a last page shown after all)
         UpdateButtons();
         if (direction != 0 && page.Skip && index + direction >= 0 && index + direction < _pages.Count)
         {
             _skipped.Add(page); // not counted in "step N of M"
             await GoAsync(index + direction, direction);
         }
-        else if (_skipped.Remove(page)) UpdateStep();
+        else
+        {
+            if (_skipped.Remove(page)) UpdateStep();
+            if (direction > 0 && page.AutoNext) await GoNextAsync();
+        }
     }
 
     readonly HashSet<WizardPage> _skipped = [];
@@ -319,8 +354,8 @@ sealed class SetupWizard : Form
     /// <summary>"Step N of M", without pages that were skipped (e.g. API details already known).</summary>
     void UpdateStep()
     {
-        int total = _pages.Count - _skipped.Count;
-        int step = _pages.Take(_index + 1).Count(p => !_skipped.Contains(p));
+        int total = _pages.Count(p => !_skipped.Contains(p) && p.Counted);
+        int step = Math.Min(total, _pages.Take(_index + 1).Count(p => !_skipped.Contains(p) && p.Counted));
         _step.Text = L.T($"שלב {step} מתוך {total}", $"Step {step} of {total}");
         _progressFill.Width = (int)(_progress.Width * (double)step / Math.Max(1, total)); // the line, not the window: it is inset
     }
