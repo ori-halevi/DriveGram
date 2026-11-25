@@ -65,6 +65,9 @@ public sealed class TelegramRemote : IRemote
             _serverOffset = off;
             if (Math.Abs(off.TotalMinutes) > 2) Log.Warn($"this PC's clock differs from Telegram's by {off.TotalMinutes:0} minutes");
         }
+        // the journal requests need the same check as the file transfers: right after the network comes
+        // back, Telegram can answer a 401 for a moment although the sign-in is fine
+        _ctl.ConfirmSignedOut = up.ConfirmSignedOut;
         _ctl.SignedOut += OnSignedOut;
         _up.SignedOut += OnSignedOut;
         _down.SignedOut += OnSignedOut;

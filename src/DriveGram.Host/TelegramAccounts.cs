@@ -106,15 +106,24 @@ public static class TelegramAccounts
         }
     }
 
+    /// <summary>
+    /// Signed out only if Telegram says so three times, about 20 seconds apart: after a network outage
+    /// (a power cut, a router restart) the first answers can be a passing AUTH_KEY_UNREGISTERED.
+    /// </summary>
     static async Task<bool> StillSignedOutAsync(WTelegram.Client client)
     {
-        try
+        for (int i = 0; i < 3; i++)
         {
-            await TL.SchemaExtensions.Users_GetUsers(client, TL.InputUser.Self).WaitAsync(TimeSpan.FromSeconds(20));
-            return false;
+            if (i > 0) await Task.Delay(TimeSpan.FromSeconds(20));
+            try
+            {
+                await TL.SchemaExtensions.Users_GetUsers(client, TL.InputUser.Self).WaitAsync(TimeSpan.FromSeconds(20));
+                return false;
+            }
+            catch (TL.RpcException e) when (e.Code == 401) { Log.Warn($"telegram answered {e.Message}; checking again"); }
+            catch (Exception) { return false; } // offline / timeout: never sign anyone out on a guess
         }
-        catch (TL.RpcException e) when (e.Code == 401) { return true; }
-        catch (Exception) { return false; } // offline / timeout: never sign anyone out on a guess
+        return true;
     }
 
     /// <summary>The PC woke up from sleep: check every connection now instead of in a minute.</summary>
