@@ -184,6 +184,7 @@ sealed class LoginPage : WizardPage
     readonly RadioButton _byPhone = MethodButton(L.T("מספר טלפון וקוד", "Phone number and code"), false);
 
     readonly FlowLayoutPanel _qr = Theme.Row();
+    // white whatever the look is: a QR code the phone's camera can read
     readonly PictureBox _qrImage = new() { Size = new Size(230, 230), SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.White };
     readonly Label _qrState = Theme.Label(L.T("מכין קוד…", "Preparing a code…"), Theme.Small, Theme.Muted, 360);
     readonly Button _qrRetry = Theme.Secondary(L.T("נסה שוב", "Try again"));
@@ -257,7 +258,7 @@ sealed class LoginPage : WizardPage
         _qrRetry.Visible = false;
         _qrRetry.Click += (_, _) => StartQr();
         qrSide.Controls.Add(_qrRetry);
-        var frame = Theme.Card(Color.White, Theme.Border);
+        var frame = Theme.Card(Slot.Card, Slot.Border);
         frame.Padding = new Padding(6);
         frame.Controls.Add(_qrImage);
         _qr.Controls.AddRange([frame, qrSide]);
@@ -1140,7 +1141,7 @@ sealed class DrivePage : WizardPage
     Panel DriveCard(DriveCandidate c)
     {
         var id = c.Channels!.JournalId;
-        var card = Theme.Card(Color.White, Theme.Border);
+        var card = Theme.Card(Slot.Card, Slot.Border);
         card.Margin = new Padding(26, 0, 0, 10);
         card.Visible = false;
         var grid = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Margin = new Padding(0) };

@@ -28,7 +28,7 @@ sealed class LetterNameForm : Form
         MaximizeBox = MinimizeBox = false;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        BackColor = Color.White;
+        BackColor = Theme.Window;
 
         var cfg = state.Config;
         var inUse = DriveInfo.GetDrives().Select(d => char.ToUpperInvariant(d.Name[0])).ToHashSet();

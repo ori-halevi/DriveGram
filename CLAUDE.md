@@ -24,6 +24,36 @@ WinFsp 2.1 + C# (.NET 10): `src/DriveGram.Core` (engine, index, Telegram), `src/
 - Not wanted: local encryption at rest, re-keying, one drive striped/mirrored over several accounts (deferred).
 - Network drive is the wizard's default drive type; regular disk is a choice.
 
+## How the windows are meant to feel (agreed 2026-11-26; this is the user's design)
+- **One home**: the main window with four equal, full-width tabs — חשבונות / כוננים / העברות / הגדרות — is
+  where the user always comes back to. It opens on "חשבונות".
+- **Every other window does ONE job and then closes**, handing the user back to the main window (adding an
+  account closes when the account is in; it does not go on to drives).
+- **A setting lives in exactly one place.** Language, look and the daily cap: only the Settings tab (the tray
+  menu's "הגדרות…" just opens it). What belongs to one drive (letter, name, type, its space on this PC) lives
+  in that drive's own windows, never in Settings.
+- **Nothing important hides behind a link.** In "העברות" the legend and the help stay visible, with the full
+  explanation on hover.
+- The tray icon: one click = the menu, two = the window on "העברות". The icon artwork itself does not follow
+  the look (it sits on the Windows taskbar); its menus do.
+
+## The look (light / dark / rose)
+- `src/DriveGram.Tray/Setup/Theme.cs` holds three palettes and the colour SLOTS (`Slot.Window`, `Slot.Card`,
+  `Slot.Muted`…). **Never write a literal colour in UI code** — use `Theme.X` or `ctl.Wears(Slot.X, Slot.Y)`,
+  or the look cannot change while the program runs. (The only literals left on purpose: the white behind a QR
+  code, and white on the red "delete for ever" button.)
+- `Theme.Apply(form)` dresses a whole window; `Ui.Prepare` hooks it to `Form.Load`. A control nobody dressed
+  has its slot GUESSED ONCE from the colour it has then — which is why `Theme.Set` applies the old look first
+  (to record the slots) and only then the new one.
+- `Application.SetColorMode` (what makes Windows' own scroll bars, drop-downs and title bars dark) must be
+  called AFTER `Application.SetCompatibleTextRenderingDefault`, and only takes full effect on windows opened
+  after it: the Settings tab says so in one line.
+- A dark list needs its column headers painted by us (`ThemePaint.List`); Windows paints them grey otherwise.
+- `ThemedTabs` replaces `TabControl` (its tabs are painted by Windows and cannot be recoloured).
+- Screenshots: `drivegram-tray --snapshot-main <dir> --theme light|dark|rose --he|--en` renders every tab of
+  the main window, off screen, with sample data. **Rows and column headers of a list never appear in those
+  pictures** (Windows paints them, and they stay out of a window's own drawing) — check lists on a real run.
+
 ## Things that are easy to get wrong
 - **Explorer marks**: the overlay names are machine-wide (HKLM, written once by an elevated `reg.exe` at
   install); the COM classes are per user (HKCU). Explorer shows only 15 overlays, sorted by name: ours start

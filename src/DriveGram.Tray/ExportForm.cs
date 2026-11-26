@@ -21,7 +21,7 @@ sealed class ExportForm : Form
         MaximizeBox = MinimizeBox = false;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        BackColor = Color.White;
+        BackColor = Theme.Window;
 
         var col = Theme.Column();
         col.Controls.Add(Theme.Label(L.T($"מעתיק את כל הקבצים אל: {L.LtrPath(target)}", $"Copying every file to: {target}"), Theme.Body, Theme.Text, 600));

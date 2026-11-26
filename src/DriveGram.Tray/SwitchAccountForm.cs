@@ -26,7 +26,7 @@ sealed class SwitchAccountForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         Size = new Size(760, 640);
         MinimumSize = new Size(620, 460);
-        BackColor = Color.White;
+        BackColor = Theme.Window;
 
         var col = Theme.Column();
         col.AutoScroll = true;

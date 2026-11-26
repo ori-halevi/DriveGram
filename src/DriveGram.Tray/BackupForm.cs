@@ -33,7 +33,7 @@ sealed class BackupForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         Size = new Size(780, 720);
         MinimumSize = new Size(640, 480);
-        BackColor = Color.White;
+        BackColor = Theme.Window;
 
         var col = Theme.Column();
         col.AutoScroll = true;
@@ -220,7 +220,7 @@ sealed class BackupForm : Form
             // a backup exists when some OTHER account administers both channels
             var me = _state.Config.AccountId;
             bool backed = list.Count == 2 && list.All(c => c.Admins.Any(a => a.UserId != me));
-            _adminsState.ForeColor = backed ? Theme.Success : Color.FromArgb(0xB4, 0x6A, 0x00);
+            _adminsState.ForeColor = backed ? Theme.Success : Theme.Attention;
             _adminsState.Text = backed
                 ? L.T("✓  יש חשבון נוסף שמנהל את שני הערוצים.", "✓  Another account administers both channels.")
                 : L.T("עדיין אין חשבון נוסף שמנהל את שני הערוצים.", "No other account administers both channels yet.");

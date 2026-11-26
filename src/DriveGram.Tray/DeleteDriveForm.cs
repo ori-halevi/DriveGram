@@ -9,13 +9,14 @@ namespace DriveGram.Tray;
 /// </summary>
 sealed class DeleteDriveForm : Form
 {
-    static readonly Color Danger = Color.FromArgb(0xC6, 0x28, 0x28);
+    static Color Danger => Theme.Error;
     readonly CheckBox _understand = new() { AutoSize = true };
     readonly TextBox _typed = Theme.Input(300);
     readonly Button _delete = new()
     {
+        // red in every look, with white on it: the one button that cannot be undone
         AutoSize = true, MinimumSize = new Size(170, 38), FlatStyle = FlatStyle.Flat, ForeColor = Color.White,
-        BackColor = Color.FromArgb(0xE8, 0xA9, 0xA9), Enabled = false, Font = Theme.Body, DialogResult = DialogResult.OK,
+        Enabled = false, Font = Theme.Body, DialogResult = DialogResult.OK,
     };
     readonly string _name;
 
@@ -30,7 +31,7 @@ sealed class DeleteDriveForm : Form
         TopMost = true;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        BackColor = Color.White;
+        BackColor = Theme.Window;
 
         var col = Theme.Column();
         col.Controls.Add(Theme.Label(L.T("⚠  מחיקת כונן לצמיתות", "⚠  Delete a drive permanently"), Theme.Title, Danger, 700));
@@ -39,7 +40,7 @@ sealed class DeleteDriveForm : Form
         col.Controls.Add(nameLabel);
         col.Controls.Add(Theme.Label(L.T("את הפעולה הזו אי אפשר לבטל.", "This cannot be undone."), Theme.Heading, Danger));
 
-        var what = Theme.Card(Color.FromArgb(0xFD, 0xEC, 0xEA), Color.FromArgb(0xE5, 0x9A, 0x92));
+        var what = Theme.Card(Slot.DangerBack, Slot.DangerBorder);
         var list = Theme.Column();
         list.MinimumSize = new Size(700 - 28, 0); // the card as wide as the texts around it (700, with its padding)
         list.Controls.Add(Theme.Label(L.T("יימחקו לצמיתות, מטלגרם ומהמחשב הזה:", "Deleted for good, from Telegram and from this PC:"), Theme.Body, Theme.Text, 660));
@@ -95,6 +96,6 @@ sealed class DeleteDriveForm : Form
     {
         bool ok = _understand.Checked && string.Equals(_typed.Text.Trim(), _name, StringComparison.Ordinal);
         _delete.Enabled = ok;
-        _delete.BackColor = ok ? Danger : Color.FromArgb(0xE8, 0xA9, 0xA9);
+        _delete.BackColor = ok ? Danger : Theme.Blend(Danger, Theme.Window, 0.6);
     }
 }

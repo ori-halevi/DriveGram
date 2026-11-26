@@ -32,7 +32,7 @@ sealed class UpdateForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         Size = new Size(720, 520);
         MinimumSize = new Size(600, 400);
-        BackColor = Color.White;
+        BackColor = Theme.Window;
 
         var head = Theme.Column();
         head.Dock = DockStyle.Top;
@@ -43,7 +43,7 @@ sealed class UpdateForm : Form
 
         var notes = new TextBox
         {
-            Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BackColor = Color.White,
+            Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BackColor = Theme.InputBack,
             BorderStyle = BorderStyle.FixedSingle, Font = Ui.Font, Text = Clean(u.Notes, u.Version),
             RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No,
         };

@@ -26,6 +26,12 @@ static class Ui
         f.RightToLeftLayout = L.Rtl;
         f.Font = Font;
         if (AppIcon is not null) f.Icon = AppIcon;
+        f.BackColor = Setup.Theme.Window;
+        f.ForeColor = Setup.Theme.Text;
+        Setup.ThemePaint.TitleBar(f);
+        // called at the top of a window's constructor, before its controls exist: the whole window is
+        // dressed once it is built (and again by itself whenever the look changes)
+        f.Load += (_, _) => Setup.Theme.Apply(f);
     }
 
     static Icon? _appIcon;
@@ -114,7 +120,7 @@ sealed class ChoiceForm : Form
         TopMost = true;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        BackColor = Color.White;
+        BackColor = Setup.Theme.Window;
 
         var sys = icon switch
         {
@@ -158,7 +164,7 @@ sealed class PasswordForm : Form
     readonly CheckBox _remember = Setup.Theme.WrapCheck(
         L.T("לזכור את הסיסמה במחשב הזה (כדי שהכונן ייפתח לבד, בלי לשאול)", "Remember the password on this PC (so the drive opens by itself, without asking)"),
         Ui.Font, 420, on: true);
-    readonly Label _error = new() { ForeColor = Color.Firebrick, AutoSize = true, MaximumSize = new Size(420, 0) };
+    readonly Label _error = new() { ForeColor = Setup.Theme.Error, AutoSize = true, MaximumSize = new Size(420, 0) };
 
     public string Password => _pw.Text;
     public bool Remember => _remember.Checked;
@@ -173,7 +179,7 @@ sealed class PasswordForm : Form
         TopMost = true;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        BackColor = Color.White; // like the other DriveGram windows
+        BackColor = Setup.Theme.Window; // like the other DriveGram windows
 
         // the same buttons as the other DriveGram dialogs (ChoiceForm)
         var ok = Setup.Theme.Primary(L.T("פתח את הכונן", "Open the drive"));
@@ -237,7 +243,7 @@ sealed class TrashForm : Form
             {
                 Text = L.T("פריטים בסל המחזור נמחקים לצמיתות אחרי 30 יום. אלה לא מגיעים לסל ונמחקים מיד: קובץ שנמחק תוך 2 דקות מהרגע שנוצר, לפני שעלה לטלגרם; העתקה שבוטלה; קבצים זמניים.", "Items in the recycle bin are deleted forever after 30 days. These skip the bin and are deleted at once: a file deleted within 2 minutes of being created, before it was uploaded to Telegram; a cancelled copy; temporary files."),
                 // a margin, not a padding: with a padding the Hebrew text wrapped to one line more than was measured (cut off)
-                AutoSize = true, MaximumSize = new Size(520, 0), Margin = new Padding(12, 8, 0, 0), ForeColor = Color.DimGray,
+                AutoSize = true, MaximumSize = new Size(520, 0), Margin = new Padding(12, 8, 0, 0), ForeColor = Setup.Theme.Muted,
             }]);
         Controls.Add(_list);
         Controls.Add(bar);

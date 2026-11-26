@@ -97,6 +97,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
     readonly System.Windows.Forms.Timer _timer = new() { Interval = 2000 };
     readonly List<DriveController> _drives;
     readonly EventWaitHandle _activate, _quit;
+    readonly System.Windows.Forms.Timer _clickWait = new();
     Setup.SetupWizard? _wizard;
     bool _quitting;
 
@@ -113,8 +114,15 @@ sealed class TrayApp : ApplicationContext, IMainHost
 
         _menu.Opening += (_, e) => { BuildMenu(); e.Cancel = false; };
         _updates.Changed += () => _ui.Post(_ => OnUpdatesChanged(), null);
+        _menu.Renderer = Setup.ThemePaint.Renderer;
         _icon = new NotifyIcon { Icon = _idle, Text = "DriveGram", ContextMenuStrip = _menu, Visible = true };
-        _icon.DoubleClick += (_, _) => Activate();
+        // One click opens the menu, two open the window. A second click can only be told from the first by
+        // waiting out Windows' own double-click time, so the menu appears a moment after the click.
+        _clickWait.Interval = Math.Max(200, SystemInformation.DoubleClickTime);
+        _clickWait.Tick += (_, _) => { _clickWait.Stop(); ShowTrayMenu(); };
+        _icon.MouseUp += (_, e) => { if (e.Button == MouseButtons.Left) { _clickWait.Stop(); _clickWait.Start(); } };
+        _icon.DoubleClick += (_, _) => { _clickWait.Stop(); ShowMain(DriveGram.Tray.MainForm.Tab.Transfers); };
+        Setup.Theme.Changed += () => _ui.Post(_ => OnLookChanged(), null);
         _timer.Tick += (_, _) => UpdateIcon();
         _timer.Start();
         SystemEvents.SessionEnding += (_, _) => OnSessionEnding();
@@ -1684,20 +1692,61 @@ sealed class TrayApp : ApplicationContext, IMainHost
         foreach (var d in _drives) ApplyPause(d);
     }
 
-    LimitsForm? _limits;
+    /// <summary>The settings of the program itself: one window, one tab, one of each setting.</summary>
+    public void OpenSettings() => ShowMain(DriveGram.Tray.MainForm.Tab.Settings);
 
-    public void EditLimits(IWin32Window? owner)
+    public void SetLimits(double alertGb, double capGb)
     {
-        if (_limits is { IsDisposed: false }) { _limits.Activate(); return; }
-        using var f = new LimitsForm(_daily.AlertGb, _daily.CapGb, _daily.TodayBytes);
-        if (owner is null) { f.ShowInTaskbar = true; f.StartPosition = FormStartPosition.CenterScreen; f.TopMost = true; } // from the tray menu
-        _limits = f;
-        DialogResult result;
-        try { result = f.ShowDialog(owner); }
-        finally { _limits = null; }
-        if (result != DialogResult.OK) return;
-        _daily.SetLimits(f.AlertGb, f.CapGb);
+        _daily.SetLimits(alertGb, capGb);
         foreach (var d in _drives) ApplyPause(d);
+    }
+
+    public void SetTheme(Setup.ThemeKind kind) => Setup.Theme.Set(kind);
+
+    /// <summary>The look changed: the icons drawn in the accent colour are made again, and every window
+    /// already wears the new colours (Theme.Set saw to that).</summary>
+    void OnLookChanged()
+    {
+        _idleBmp = _busyBmp = null;
+        _main?.RefreshAll();
+        UpdateIcon();
+    }
+
+    /// <summary>
+    /// The language changed: every text on screen was built in the old one, so the main window is built
+    /// again (the tray's menu is built each time it opens, and the other windows when they are opened).
+    /// </summary>
+    public void SetLanguage(string preference)
+    {
+        if (L.Preference == preference) return;
+        L.Set(preference);
+        Log.Info($"tray: the language is now '{preference}'");
+        if (_main is { IsDisposed: false } old)
+        {
+            var place = old.Bounds;
+            var state = old.WindowState;
+            old.Close();
+            old.Dispose();
+            _main = null;
+            ShowMain(DriveGram.Tray.MainForm.Tab.Settings);
+            if (_main is { } fresh && state == FormWindowState.Normal) { fresh.StartPosition = FormStartPosition.Manual; fresh.Bounds = place; }
+            else if (_main is { } max) max.WindowState = state;
+        }
+        UpdateIcon();
+    }
+
+    /// <summary>The icon's menu, as a left click opens it (the same menu a right click shows).</summary>
+    void ShowTrayMenu()
+    {
+        try
+        {
+            // NotifyIcon knows how to place its own menu against the taskbar; nothing public asks for it
+            var show = typeof(NotifyIcon).GetMethod("ShowContextMenu",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            if (show is not null) { show.Invoke(_icon, null); return; }
+        }
+        catch (Exception ex) { Log.Debug($"tray: menu: {ex.Message}"); }
+        _menu.Show(Control.MousePosition);
     }
 
     void TrackDaily()
@@ -2077,8 +2126,8 @@ sealed class TrayApp : ApplicationContext, IMainHost
         if (_updates.Offered is { } update)
         {
             var item = Item(UpdateText(update), ShowUpdate);
-            item.Image = Glyphs.Make('\uE896' /* download arrow */, Color.FromArgb(0xE0, 0x7A, 0x00), 16);
-            item.ForeColor = Color.FromArgb(0xB4, 0x5A, 0x00);
+            item.Image = Glyphs.Make('\uE896' /* download arrow */, Setup.Theme.Attention, 16);
+            item.ForeColor = Setup.Theme.Attention;
             _menu.Items.Add(item);
             _menu.Items.Add(new ToolStripSeparator());
         }
@@ -2103,8 +2152,10 @@ sealed class TrayApp : ApplicationContext, IMainHost
         transfers.Image = Glyphs.Make(Glyphs.Upload, Setup.Theme.AccentDark, 16);
         _menu.Items.Add(transfers);
         _menu.Items.Add(Item(L.T("קבצים שהכנתי…", "Files I prepared…"), ShowPrepared));
-        _menu.Items.Add(Item(L.T("תקרת העלאה יומית…", "Daily upload cap…"), () => EditLimits(null)));
         _menu.Items.Add(Item(L.T("חשבונות טלגרם והוספת כונן…", "Telegram accounts and adding a drive…"), () => ShowMain(DriveGram.Tray.MainForm.Tab.Accounts)));
+        var settings = Item(L.T("הגדרות (שפה, מראה, תקרה יומית)…", "Settings (language, look, daily cap)…"), OpenSettings);
+        settings.Image = Glyphs.Make(Glyphs.Settings, Setup.Theme.AccentDark, 16);
+        _menu.Items.Add(settings);
 
         var autostart = new ToolStripMenuItem(L.T("הפעל עם וינדוס", "Start with Windows")) { Checked = ShellIntegration.AutostartEnabled };
         autostart.Click += (_, _) =>
@@ -2114,19 +2165,12 @@ sealed class TrayApp : ApplicationContext, IMainHost
         };
         _menu.Items.Add(autostart);
 
-        var lang = new ToolStripMenuItem(L.T("שפה / Language", "Language / שפה"));
-        foreach (var (key, label) in new[] { ("auto", L.T("לפי וינדוס", "Same as Windows")), ("he", "עברית"), ("en", "English") })
-        {
-            var li = new ToolStripMenuItem(label) { Checked = L.Preference == key };
-            li.Click += (_, _) => { L.Set(key); UpdateIcon(); };
-            lang.DropDownItems.Add(li);
-        }
-        _menu.Items.Add(lang);
         _menu.Items.Add(Item(L.T("בדוק אם יש גרסה חדשה", "Check for a new version"), () => _ = CheckForUpdateNowAsync()));
         _menu.Items.Add(Item(L.T("פתח את תיקיית יומן הפעילות", "Open the log folder"),
             () => Process.Start(new ProcessStartInfo(Path.Combine(AppState.Root, "logs")) { UseShellExecute = true })));
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(Item(L.T("יציאה", "Exit"), async () => await QuitAsync(ask: true)));
+        Setup.ThemePaint.Menu(_menu); // the menu wears the look the user chose
     }
 
     /// <summary>Everything that can be done with one drive (the tray menu, and "⋯" in the main window).</summary>
@@ -2176,7 +2220,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
         // never offered while the drive's pairing is in doubt (it could name another drive's data)
         var delete = Item(L.T("מחק את הכונן לצמיתות…", "Delete the drive permanently…"), async () => await DeleteForeverAsync(d),
             !d.Starting && !d.Stopping && !d.MustChooseDrive);
-        delete.ForeColor = Color.FromArgb(0xC6, 0x28, 0x28);
+        delete.ForeColor = Setup.Theme.Error;
         list.Add(delete);
         return list;
     }

@@ -161,7 +161,7 @@ abstract class WizardPage : UserControl
     {
         Ctx = ctx;
         Dock = DockStyle.Fill;
-        BackColor = Color.White;
+        BackColor = Theme.Window;
         Font = Theme.Body;
     }
 
@@ -224,7 +224,7 @@ sealed class SetupWizard : Form
     readonly Label _step = new() { Font = Theme.Small, ForeColor = Theme.Muted, AutoSize = true };
     readonly Panel _progress = new() { Height = 3, Dock = DockStyle.Bottom, BackColor = Theme.Border };
     readonly Panel _progressFill = new() { Dock = L.Rtl ? DockStyle.Right : DockStyle.Left, BackColor = Theme.Accent };
-    readonly Panel _host = new() { Dock = DockStyle.Fill, Padding = new Padding(32, 20, 32, 8), BackColor = Color.White };
+    readonly Panel _host = new() { Dock = DockStyle.Fill, Padding = new Padding(32, 20, 32, 8) };
     readonly Button _next = Theme.Primary(L.T("הבא", "Next"));
     readonly Button _back = Theme.Secondary(L.T("חזרה", "Back"));
     readonly Button _cancel = Theme.Secondary(L.T("ביטול", "Cancel"));
@@ -252,7 +252,7 @@ sealed class SetupWizard : Form
         RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No;
         RightToLeftLayout = L.Rtl;
         Font = Theme.Body;
-        BackColor = Color.White;
+        BackColor = Theme.Window;
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
@@ -285,7 +285,7 @@ sealed class SetupWizard : Form
         }
 
         // header: logo on the reading-start side, step counter on the other
-        var header = _header = new Panel { Dock = DockStyle.Top, Height = 118, BackColor = Color.White, Padding = new Padding(32, 18, 32, 0) };
+        var header = _header = new Panel { Dock = DockStyle.Top, Height = 118, Padding = new Padding(32, 18, 32, 0) };
         var logo = new PictureBox { Size = new Size(48, 48), SizeMode = PictureBoxSizeMode.Zoom, Dock = L.Rtl ? DockStyle.Right : DockStyle.Left };
         if (File.Exists(icon)) logo.Image = new Icon(icon, 48, 48).ToBitmap();
         var titles = _titles = Theme.Column();

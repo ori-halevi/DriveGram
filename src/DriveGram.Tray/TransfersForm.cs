@@ -17,7 +17,8 @@ interface ITransfersHost
     /// <summary>Resume just these files: everything else that is paused stays paused (asks before passing the daily cap).</summary>
     void ResumeOnly(IReadOnlyList<(DriveController D, string Id)> files);
     void LiftCap();
-    void EditLimits(IWin32Window? owner);
+    /// <summary>Show the program's settings (where the daily cap is set).</summary>
+    void OpenSettings();
     void PrepareFiles(IEnumerable<(DriveSession Session, string Id)> files);
     /// <param name="confirmed">The caller already asked and says the result itself: no question, no notice.</param>
     Task<long> FreeFiles(IEnumerable<(DriveSession Session, string Id)> files, bool confirmed = false);
@@ -31,7 +32,8 @@ static class Glyphs
     public const char Pause = '', Play = '', Cancel = '', Upload = '', Download = '',
         Pin = '', Delete = '', Clock = '', Warning = '', Check = '', Settings = '',
         Refresh = '', Edit = '', Add = '', Gauge = '', Hourglass = '', Computer = '',
-        OpenFile = '\uE8E5', Folder = '\uE838', Copy = '\uE8C8', SelectAll = '\uE8B3';
+        OpenFile = '\uE8E5', Folder = '\uE838', Copy = '\uE8C8', SelectAll = '\uE8B3',
+        People = '', Disk = '', Person = '', More = '';
 
     static readonly string Family = new System.Drawing.Text.InstalledFontCollection().Families
         .Any(f => f.Name == "Segoe Fluent Icons") ? "Segoe Fluent Icons" : "Segoe MDL2 Assets";
@@ -58,7 +60,7 @@ static class Glyphs
 sealed class TransfersForm : Form
 {
     readonly ITransfersHost _host;
-    readonly TabControl _tabs = new() { Dock = DockStyle.Fill, RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No, RightToLeftLayout = L.Rtl }; // Hebrew: the first tab on the right
+    readonly ThemedTabs _tabs = new() { Dock = DockStyle.Fill };
     readonly Label _summary = Theme.Label("", Theme.Body, Theme.Text, 740);
     readonly Panel _capBar = Theme.Card(Theme.WarnBack, Theme.WarnBorder);
     readonly Label _capText = Theme.Label("", Theme.Small, Theme.Text, 600);
@@ -268,12 +270,11 @@ sealed class TransfersForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         Size = new Size(940, 620);
         MinimumSize = new Size(700, 420);
-        BackColor = Color.White;
 
         _icons.Images.Add("wait", Glyphs.Make(Glyphs.Clock, Theme.Muted, 18));
         // the same marks as on the files in Explorer (the clock and the pencil are only here)
         _icons.Images.Add("up", Mark("upload", Glyphs.Make(Glyphs.Upload, Theme.Accent, 18)));
-        _icons.Images.Add("paused", Mark("paused", Glyphs.Make(Glyphs.Pause, Color.FromArgb(0xB4, 0x6A, 0x00), 18)));
+        _icons.Images.Add("paused", Mark("paused", Glyphs.Make(Glyphs.Pause, Theme.Attention, 18)));
         _icons.Images.Add("writing", Glyphs.Make(Glyphs.Edit, Theme.Muted, 18));
         _icons.Images.Add("ready", Mark("kept", Glyphs.Make(Glyphs.Pin, Theme.Success, 18)));
         _icons.Images.Add("down", Glyphs.Make(Glyphs.Download, Theme.Accent, 18));
@@ -307,7 +308,7 @@ sealed class TransfersForm : Form
         }
 
         // ── tab 1: uploads ──
-        var upTab = new TabPage(L.T("העלאות לטלגרם", "Uploads to Telegram")) { BackColor = Color.White, ImageKey = "up" };
+        var upTab = new Panel { Dock = DockStyle.Fill }.Wears(Slot.Window);
         var upBar = NewBar();
         _pauseAll = Button(upBar, Glyphs.Pause, L.T("השהה הכל", "Pause all"), () => SetAll(true));
         _resumeAll = Button(upBar, Glyphs.Play, L.T("המשך הכל", "Resume all"), () => SetAll(false));
@@ -319,9 +320,10 @@ sealed class TransfersForm : Form
         _resumeSel.ToolTipText = L.T("המשך את הקבצים המסומנים ברשימה", "Resume the files selected in the list");
         _cancelSel.ToolTipText = L.T("בטל את ההעלאה של הקבצים המסומנים ברשימה", "Cancel the upload of the files selected in the list");
         upBar.Items.Add(new ToolStripSeparator());
-        var cap = Button(upBar, Glyphs.Gauge, L.T("תקרה יומית…", "Daily cap…"), () => { _host.EditLimits(this); RefreshNow(); });
+        var cap = Button(upBar, Glyphs.Gauge, L.T("תקרה יומית…", "Daily cap…"), () => _host.OpenSettings());
         cap.Overflow = ToolStripItemOverflow.Never; // never hidden behind the toolbar's "»"
-        cap.ToolTipText = L.T("כמה מותר להעלות ביום, והתראה לפני שמגיעים לזה", "How much may be uploaded a day, and a notice before reaching it");
+        cap.ToolTipText = L.T("נקבעת בהגדרות: כמה מותר להעלות ביום, והתראה לפני שמגיעים לזה",
+            "Set in Settings: how much may be uploaded a day, and a notice before reaching it");
         upBar.Items.Add(_upSearch);
         _upSearch.TextChanged += (_, _) => RefreshNow();
         _up.Columns.Add(L.T("קובץ", "File"), 280);
@@ -349,7 +351,7 @@ sealed class TransfersForm : Form
         upTab.Controls.AddRange([_up, _upEmpty, Help(upNote, Legend(uploading: true)), upBar]);
 
         // ── tab 2: on this PC ──
-        var localTab = new TabPage(L.T("קבצים במחשב הזה", "Files on this PC")) { BackColor = Color.White, ImageKey = "part" };
+        var localTab = new Panel { Dock = DockStyle.Fill }.Wears(Slot.Window);
         var localBar = NewBar();
         Button(localBar, Glyphs.Add, L.T("הכן קובץ מהכונן…", "Prepare a file from the drive…"), PickAndPrepare);
         _prepareSel = Button(localBar, Glyphs.Download, L.T("הכן", "Prepare"), PrepareSelected);
@@ -415,18 +417,15 @@ sealed class TransfersForm : Form
         if (_prefs.LocalFilter is >= 0 and <= 2) _localFilter.SelectedIndex = _prefs.LocalFilter;
         _settingFilter = false;
 
-        _tabs.ImageList = _icons;
-        _tabs.TabPages.AddRange([upTab, localTab]);
-        _tabs.SelectedIndexChanged += (_, _) => { if (_tabs.SelectedIndex == 1 && !_scanning && !_demo) _ = ScanAsync(); UpdateButtons(); };
-        _tabs.Font = Theme.Body;
-        var body = new Panel { Dock = DockStyle.Fill, Padding = new Padding(12, 0, 12, 12) };
-        body.Controls.Add(_tabs);
-        Controls.Add(body);
+        _tabs.Add(L.T("העלאות לטלגרם", "Uploads to Telegram"), Glyphs.Upload, upTab);
+        _tabs.Add(L.T("קבצים במחשב הזה", "Files on this PC"), Glyphs.Computer, localTab);
+        _tabs.SelectedChanged += index => { if (index == 1 && !_scanning && !_demo) _ = ScanAsync(); UpdateButtons(); };
+        Controls.Add(_tabs);
         Controls.Add(head);
 
         _timer.Tick += (_, _) => RefreshNow();
         // a prepare that finished: its row shows the result (not the last progress it reported)
-        Action<Preparer.Job, bool, string?> prepared = (_, _, _) => { if (!_demo && !IsDisposed && _tabs.SelectedIndex == 1) _ = ScanAsync(); };
+        Action<Preparer.Job, bool, string?> prepared = (_, _, _) => { if (!_demo && !IsDisposed && _tabs.Selected == 1) _ = ScanAsync(); };
         _host.Preparer.Finished += prepared;
         Disposed += (_, _) => _host.Preparer.Finished -= prepared;
         Shown += (_, _) => Start();
@@ -435,15 +434,15 @@ sealed class TransfersForm : Form
     }
 
     /// <summary>Back to the uploads list (a notice about uploads opens it there).</summary>
-    public void ShowUploadsTab() => _tabs.SelectedIndex = 0;
+    public void ShowUploadsTab() => _tabs.Selected = 0;
 
     /// <summary>The window is shown again, or the drives changed: the files list shows what is there now.</summary>
-    public void Rescan() { if (_tabs.SelectedIndex == 1 && !_demo && !IsDisposed) _ = ScanAsync(); }
+    public void Rescan() { if (_tabs.Selected == 1 && !_demo && !IsDisposed) _ = ScanAsync(); }
 
     public void ShowLocalTab()
     {
-        if (_tabs.SelectedIndex == 1 && !_demo) _ = ScanAsync(); // already on it: show what is there now
-        _tabs.SelectedIndex = 1;
+        if (_tabs.Selected == 1 && !_demo) _ = ScanAsync(); // already on it: show what is there now
+        _tabs.Selected = 1;
     }
 
     /// <summary>The files I prepared (the tray's "Files I prepared…", and the notice when C: runs low).</summary>
@@ -470,6 +469,7 @@ sealed class TransfersForm : Form
     internal void Demo(int tab)
     {
         _demo = true;
+        _timer.Stop(); // the sample rows stay put (a refresh would replace them with the real ones: none)
         _summary.Text = L.T("נותרו להעלות 11.6 GB   ·   מהירות 4.2 MB/שנייה   ·   עוד כ־47 דקות   ·   היום הועלו 23.4 GB   ·   תקרה יומית 50GB",
             "11.6 GB left to upload   ·   4.2 MB/s   ·   about 47 minutes left   ·   23.4 GB uploaded today   ·   daily cap 50 GB");
         long G = 1L << 30, M = 1L << 20;
@@ -504,7 +504,7 @@ sealed class TransfersForm : Form
         }
         _localState.Text = L.T("קבצים שהוכנו תופסים 5.3 GB. עותקים זמניים של קבצים שנפתחו: 1.1 GB (נמחקים לבד כשצריך מקום).",
             "Prepared files take 5.3 GB. Temporary copies of files you opened: 1.1 GB (removed by themselves when space is needed).");
-        _tabs.SelectedIndex = tab;
+        _tabs.Selected = tab;
         _capBar.Visible = tab == 0;
         _capText.Text = L.T("הגעת לתקרה היומית (50GB): ההעלאות מושהות עד חצות. הקבצים מחכים בבטחה במחשב הזה.",
             "The daily cap (50 GB) was reached: uploads are paused until midnight. The files wait safely on this PC.");
@@ -529,11 +529,16 @@ sealed class TransfersForm : Form
         RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No,
     };
 
-    static ToolStrip NewBar() => new()
+    static ToolStrip NewBar()
     {
-        Dock = DockStyle.Top, GripStyle = ToolStripGripStyle.Hidden, BackColor = Color.White, Font = Ui.Font,
-        Padding = new Padding(4, 4, 4, 4), ImageScalingSize = new Size(16, 16), RenderMode = ToolStripRenderMode.System,
-    };
+        var bar = new ToolStrip
+        {
+            Dock = DockStyle.Top, GripStyle = ToolStripGripStyle.Hidden, Font = Ui.Font,
+            Padding = new Padding(4, 4, 4, 4), ImageScalingSize = new Size(16, 16),
+        };
+        bar.Renderer = ThemePaint.Renderer;
+        return bar.Wears(Slot.Surface, Slot.Text);
+    }
 
     static ToolStripButton Button(ToolStrip bar, char glyph, string text, Action click, Color? color = null)
     {
@@ -578,7 +583,7 @@ sealed class TransfersForm : Form
             $"The daily cap ({_host.Daily.CapGb:0.#} GB) was reached: uploads are paused until midnight. The files wait safely on this PC.");
 
         RefreshUploads(drives);
-        if (_tabs.SelectedIndex == 1) RefreshLocalProgress();
+        if (_tabs.Selected == 1) RefreshLocalProgress();
         UpdateButtons();
     }
 
@@ -672,7 +677,7 @@ sealed class TransfersForm : Form
     /// <summary>F5 and Ctrl+F wherever the focus is in the window (a list, the toolbar, the tabs).</summary>
     protected override bool ProcessCmdKey(ref Message msg, System.Windows.Forms.Keys keyData)
     {
-        bool local = _tabs.SelectedIndex == 1;
+        bool local = _tabs.Selected == 1;
         if (keyData == System.Windows.Forms.Keys.F5) { if (local) _ = ScanAsync(); else RefreshNow(); return true; }
         if (keyData == (System.Windows.Forms.Keys.Control | System.Windows.Forms.Keys.F)) { (local ? _localSearch : _upSearch).Focus(); return true; }
         return base.ProcessCmdKey(ref msg, keyData);
@@ -680,7 +685,8 @@ sealed class TransfersForm : Form
     ContextMenuStrip RowMenu(Action<ContextMenuStrip> fill)
     {
         var m = new ContextMenuStrip { RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No, Font = Ui.Font, ShowImageMargin = true };
-        m.Opening += (_, e) => { m.Items.Clear(); fill(m); e.Cancel = m.Items.Count == 0; };
+        m.Renderer = ThemePaint.Renderer;
+        m.Opening += (_, e) => { m.Items.Clear(); fill(m); ThemePaint.Menu(m); e.Cancel = m.Items.Count == 0; };
         return m;
     }
 

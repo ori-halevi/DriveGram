@@ -22,7 +22,7 @@ sealed class DriveTypeForm : Form
         Text = L.T($"DriveGram – סוג הכונן ({driveName})", $"DriveGram – drive type ({driveName})");
         StartPosition = FormStartPosition.CenterScreen;
         Size = new Size(760, 720);
-        BackColor = Color.White;
+        BackColor = Theme.Window;
 
         var col = Theme.Column();
         col.AutoSize = false;

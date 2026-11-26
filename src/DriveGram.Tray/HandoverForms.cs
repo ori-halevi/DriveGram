@@ -37,7 +37,7 @@ sealed class HandoverAskForm : Form
         ShowInTaskbar = true;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        BackColor = Color.White;
+        BackColor = Theme.Window;
         // the asking PC counts 60 s from the moment this question is on screen ("seen"); answer before that
         _deadline = DateTime.UtcNow + SyncService.HandoverAnswerTime - TimeSpan.FromSeconds(10);
 
@@ -135,7 +135,7 @@ sealed class HandoverWaitForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        BackColor = Color.White;
+        BackColor = Theme.Window;
 
         var col = Theme.Column();
         col.Controls.Add(Theme.Label(L.T($"מבקש את הכונן {_fromHolder}", $"Asking {_holder} for the drive"), Theme.Heading, Theme.Text, 560));

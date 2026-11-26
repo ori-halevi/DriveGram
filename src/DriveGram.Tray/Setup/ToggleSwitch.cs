@@ -37,7 +37,7 @@ sealed class ToggleSwitch : CheckBox
         // logical left: the reading start (a mirrored window puts it on the right by itself)
         var track = new Rectangle(1, (Height - TrackH) / 2, TrackW, TrackH);
         using (var path = Pill(track))
-        using (var fill = new SolidBrush(!Enabled ? Theme.Border : Checked ? Theme.Accent : Color.White))
+        using (var fill = new SolidBrush(!Enabled ? Theme.Border : Checked ? Theme.Accent : Theme.CardBack))
         using (var pen = new Pen(Checked && Enabled ? Theme.Accent : Theme.Muted, 1.4f))
         {
             g.FillPath(fill, path);
@@ -45,7 +45,7 @@ sealed class ToggleSwitch : CheckBox
         }
         int d = TrackH - 8;
         var knob = new Rectangle(Checked ? track.Right - d - 4 : track.X + 4, track.Y + 4, d, d);
-        using (var kb = new SolidBrush(Checked ? Color.White : Theme.Muted)) g.FillEllipse(kb, knob);
+        using (var kb = new SolidBrush(Checked ? Theme.OnAccent : Theme.Muted)) g.FillEllipse(kb, knob);
         if (Focused && ShowFocusCues) using (var fp = new Pen(Theme.AccentDark, 1) { DashStyle = DashStyle.Dot }) g.DrawPath(fp, Pill(Rectangle.Inflate(track, 2, 2)));
         var flags = TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPrefix;
         if (RightToLeft == RightToLeft.Yes) flags |= TextFormatFlags.RightToLeft;

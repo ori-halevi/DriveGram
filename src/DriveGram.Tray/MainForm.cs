@@ -4,7 +4,7 @@ using DriveGram.Tray.Setup;
 namespace DriveGram.Tray;
 
 /// <summary>What the main window needs from the tray (a sample one for the preview).</summary>
-interface IMainHost : ITransfersHost
+interface IMainHost : ITransfersHost, ISettingsHost
 {
     List<AccountInfo> Accounts();
     string DriveStatus(DriveController d);
@@ -17,24 +17,24 @@ interface IMainHost : ITransfersHost
 }
 
 /// <summary>
-/// The main window: the Telegram accounts on this PC (add one, and add drives to each), the drives (open,
-/// connect, and everything else in "⋯"), and the transfers. With nothing set up yet it opens on the
-/// accounts, with one clear first step.
+/// The main window, and the place the user comes back to: the Telegram accounts on this PC (add one, and
+/// add drives to each), the drives (open, connect, and everything else in "⋯"), the transfers, and the
+/// program's settings. With nothing set up yet it opens on the accounts, with one clear first step.
 /// </summary>
 sealed class MainForm : Form
 {
-    public enum Tab { Accounts, Drives, Transfers }
+    public enum Tab { Accounts, Drives, Transfers, Settings }
 
     readonly IMainHost _app;
-    readonly TabControl _tabs = new() { Dock = DockStyle.Fill, RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No, RightToLeftLayout = L.Rtl }; // Hebrew: the first tab on the right
-    readonly TabPage _accountsPage, _drivesPage, _transfersPage;
+    readonly ThemedTabs _tabs = new() { Dock = DockStyle.Fill };
+    readonly Panel _accountsPage = Page(), _drivesPage = Page(), _transfersPage = Page(), _settingsPage = Page();
     readonly FlowLayoutPanel _accounts = Scroller();
     readonly FlowLayoutPanel _drives = Scroller();
     readonly TransfersForm _transfers;
+    readonly SettingsPage _settings;
     readonly System.Windows.Forms.Timer _timer = new() { Interval = 2000 };
     readonly Dictionary<DriveController, (Label Status, Button Open, Button Connect)> _driveRows = [];
     string? _drivesShape, _accountsShape; // null: build on the next tick
-    readonly ImageList _tabIcons = new() { ImageSize = new Size(18, 18), ColorDepth = ColorDepth.Depth32Bit };
 
     const int CardWidth = 760;
 
@@ -46,28 +46,25 @@ sealed class MainForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         Size = new Size(900, 680);
         MinimumSize = new Size(720, 480);
-        BackColor = Color.White;
 
-        _tabIcons.Images.Add("accounts", Glyphs.Make('', Theme.AccentDark, 18)); // people
-        _tabIcons.Images.Add("drives", Glyphs.Make('', Theme.AccentDark, 18));   // hard drive
-        _tabIcons.Images.Add("transfers", Glyphs.Make(Glyphs.Upload, Theme.AccentDark, 18));
-        _tabs.ImageList = _tabIcons;
-        _tabs.Font = new Font(Theme.Body.FontFamily, 11f);
-        _tabs.Padding = new Point(16, 6);
-
-        _accountsPage = new TabPage(L.T("חשבונות", "Accounts")) { BackColor = Color.White, ImageIndex = 0 };
         _accountsPage.Controls.Add(_accounts);
-        _drivesPage = new TabPage(L.T("כוננים", "Drives")) { BackColor = Color.White, ImageIndex = 1 };
         _drivesPage.Controls.Add(_drives);
-        _transfersPage = new TabPage(L.T("העברות", "Transfers")) { BackColor = Color.White, ImageIndex = 2 };
         _transfers = new TransfersForm(app) { TopLevel = false, FormBorderStyle = FormBorderStyle.None, Dock = DockStyle.Fill };
         _transfersPage.Controls.Add(_transfers);
-        _tabs.TabPages.AddRange([_accountsPage, _drivesPage, _transfersPage]);
-        _tabs.SelectedIndexChanged += (_, _) => { if (_tabs.SelectedTab == _transfersPage) _transfers.Rescan(); };
+        _settings = new SettingsPage(app, app.Daily);
+        _settingsPage.Controls.Add(_settings);
 
-        var body = new Panel { Dock = DockStyle.Fill, Padding = new Padding(12, 12, 12, 12) };
-        body.Controls.Add(_tabs);
-        Controls.Add(body);
+        _tabs.Add(L.T("חשבונות", "Accounts"), Glyphs.People, _accountsPage);
+        _tabs.Add(L.T("כוננים", "Drives"), Glyphs.Disk, _drivesPage);
+        _tabs.Add(L.T("העברות", "Transfers"), Glyphs.Upload, _transfersPage);
+        _tabs.Add(L.T("הגדרות", "Settings"), Glyphs.Settings, _settingsPage);
+        _tabs.SelectedChanged += i =>
+        {
+            if (_tabs.PageAt(i) == _transfersPage) _transfers.Rescan();
+            else if (_tabs.PageAt(i) == _settingsPage) _settings.Reload();
+        };
+
+        Controls.Add(_tabs);
         _updateBar.Dock = DockStyle.Top;
         _updateBar.Visible = false;
         Controls.Add(_updateBar);
@@ -78,34 +75,46 @@ sealed class MainForm : Form
         _timer.Tick += (_, _) => Tick();
         _timer.Start();
         FormClosed += (_, _) => { _timer.Dispose(); _transfers.Close(); };
+        Theme.Apply(this);
     }
 
-    static FlowLayoutPanel Scroller() => new()
+    static Panel Page() => new Panel { Dock = DockStyle.Fill }.Wears(Slot.Window);
+
+    static FlowLayoutPanel Scroller() => new FlowLayoutPanel
     {
         Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true,
-        Padding = new Padding(18, 16, 18, 16), BackColor = Color.White,
-    };
+        Padding = new Padding(18, 16, 18, 16),
+    }.Wears(Slot.Window);
 
     public void Select(Tab tab, bool localFiles = false)
     {
-        _tabs.SelectedTab = tab switch { Tab.Accounts => _accountsPage, Tab.Drives => _drivesPage, _ => _transfersPage };
+        _tabs.SelectPage(tab switch
+        {
+            Tab.Accounts => _accountsPage,
+            Tab.Drives => _drivesPage,
+            Tab.Settings => _settingsPage,
+            _ => _transfersPage,
+        });
         if (tab == Tab.Transfers && localFiles) _transfers.ShowLocalTab();
         else if (tab == Tab.Transfers) _transfers.ShowUploadsTab();
     }
 
+    /// <summary>Developer aid (screenshots): sample rows in the transfers lists.</summary>
+    internal void DemoTransfers(int tab) => _transfers.Demo(tab);
+
     /// <summary>The files list, showing only what was prepared on this PC.</summary>
     public void ShowPrepared()
     {
-        _tabs.SelectedTab = _transfersPage;
+        _tabs.SelectPage(_transfersPage);
         _transfers.ShowPrepared();
     }
 
     // a thin bar at the top when a new version is out (the tray decides; clicking opens the update window)
-    readonly LinkLabel _updateBar = new()
+    readonly LinkLabel _updateBar = new LinkLabel
     {
         AutoSize = false, Height = 30, TextAlign = ContentAlignment.MiddleCenter, Font = Theme.Body,
-        BackColor = Color.FromArgb(0xFF, 0xF4, 0xE5), LinkColor = Color.FromArgb(0xB4, 0x5A, 0x00), LinkBehavior = LinkBehavior.HoverUnderline,
-    };
+        LinkBehavior = LinkBehavior.HoverUnderline,
+    }.Wears(Slot.WarnBack, Slot.AccentDark);
     Action? _onUpdate;
 
     /// <summary>Show (text) or hide (null) the new-version bar.</summary>
@@ -120,6 +129,7 @@ sealed class MainForm : Form
     public void RefreshAll()
     {
         _accountsShape = _drivesShape = null;
+        _settings.Reload();
         Tick();
     }
 
@@ -133,6 +143,7 @@ sealed class MainForm : Form
         // the controller object too: after Settings or an account switch a fresh one replaces it (same values)
         var drivesShape = string.Join("|", _app.Drives.Select(d => $"{System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(d)}:{d.State.Id}:{d.Letter}:{(d.Session is { } s ? System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(s) : 0)}:{d.State.Config.VolumeLabel}:{d.State.Config.AccountName}"));
         if (drivesShape != _drivesShape) { _drivesShape = drivesShape; BuildDrives(); _transfers.Rescan(); }
+        if (_tabs.Selected >= 0 && _tabs.PageAt(_tabs.Selected) == _settingsPage) _settings.Tick();
         foreach (var (d, row) in _driveRows)
         {
             row.Status.Text = _app.DriveStatus(d);
@@ -191,7 +202,7 @@ sealed class MainForm : Form
             var col = Theme.Column();
             col.MinimumSize = new Size(CardWidth - 30, 0); // the whole card: in Hebrew everything starts on the right
             var title = Theme.Row();
-            title.Controls.Add(new PictureBox { Image = Glyphs.Make('', Theme.Accent, 28), Size = new Size(28, 28), Margin = new Padding(0, 0, 10, 0) });
+            title.Controls.Add(new PictureBox { Image = Glyphs.Make(Glyphs.Person, Theme.Accent, 28), Size = new Size(28, 28), Margin = new Padding(0, 0, 10, 0) });
             title.Controls.Add(Theme.Label(L.Name(a.Name), new Font(Theme.Heading.FontFamily, 13f, FontStyle.Bold), Theme.Text));
             col.Controls.Add(title);
             col.Controls.Add(Theme.Label(drives.Count == 0
@@ -264,12 +275,13 @@ sealed class MainForm : Form
             var connect = Theme.Secondary(d.Session is null ? L.T("חבר", "Connect") : L.T("נתק", "Disconnect"));
             connect.Click += async (_, _) => { await _app.ConnectOrDisconnectAsync(d); RefreshAll(); };
             var more = Theme.Secondary(L.T("עוד…", "More…"));
-            more.Image = Glyphs.Make('', Theme.AccentDark, 16); // "⋯"
+            more.Image = Glyphs.Make(Glyphs.More, Theme.AccentDark, 16); // "⋯"
             more.TextImageRelation = TextImageRelation.ImageBeforeText;
             more.Click += (_, _) =>
             {
                 var menu = new ContextMenuStrip { Font = Ui.Font, RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No };
                 menu.Items.AddRange(_app.DriveItems(d).ToArray());
+                ThemePaint.Menu(menu);
                 menu.Closed += (_, _) => BeginInvoke(() => { menu.Dispose(); RefreshAll(); });
                 menu.Show(more, new Point(0, more.Height));
             };
@@ -306,11 +318,11 @@ sealed class MainForm : Form
 
     static Bitmap? _driveIcon;
     static Bitmap DriveIcon => _driveIcon ??= File.Exists(Path.Combine(AppContext.BaseDirectory, "drivegram.ico"))
-        ? new Icon(Path.Combine(AppContext.BaseDirectory, "drivegram.ico"), 48, 48).ToBitmap() : Glyphs.Make('', Theme.Accent, 44);
+        ? new Icon(Path.Combine(AppContext.BaseDirectory, "drivegram.ico"), 48, 48).ToBitmap() : Glyphs.Make(Glyphs.Disk, Theme.Accent, 44);
 
     static Panel Card()
     {
-        var card = Theme.Card(Color.White, Theme.Border);
+        var card = Theme.Card(Slot.Card, Slot.Border);
         card.Margin = new Padding(0, 0, 0, 12);
         card.MinimumSize = new Size(CardWidth, 0);
         return card;

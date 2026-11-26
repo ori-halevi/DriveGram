@@ -33,7 +33,7 @@ sealed class SecurityForm : Form
         Text = L.T($"DriveGram – סיסמה ומפתח שחזור ({L.Ltr(session.MountPoint)})", $"DriveGram – password and recovery key ({session.MountPoint})");
         StartPosition = FormStartPosition.CenterScreen;
         Size = new Size(760, 720);
-        BackColor = Color.White;
+        BackColor = Theme.Window;
 
         var col = Theme.Column();
         col.AutoSize = false;
@@ -111,7 +111,7 @@ sealed class SecurityForm : Form
         {
             var ctrl = await Task.Run(() => _session.Sync.ReadControlAsync(default));
             bool has = _hasKey = ctrl?.Vault.Recovery is not null;
-            _recoveryState.ForeColor = has ? Theme.Success : Color.FromArgb(0xB4, 0x6A, 0x00);
+            _recoveryState.ForeColor = has ? Theme.Success : Theme.Attention;
             _recoveryState.Text = has
                 ? L.T("✓  לכונן יש מפתח שחזור.", "✓  The drive has a recovery key.")
                 : L.T("לכונן עדיין אין מפתח שחזור. מומלץ מאוד ליצור אחד.", "The drive has no recovery key yet. Creating one is strongly recommended.");

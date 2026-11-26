@@ -1,11 +1,10 @@
 using System.Globalization;
-using System.Text.Json;
 
 namespace DriveGram.Host;
 
 /// <summary>
 /// UI language: Hebrew or English. "auto" follows the Windows display language (Hebrew when Windows
-/// is in Hebrew, English otherwise); the user can override it from the tray menu.
+/// is in Hebrew, English otherwise); the user can change it in the main window's Settings tab.
 /// Strings are written inline as L.T("עברית", "English") so both versions sit side by side.
 /// </summary>
 public static class L
@@ -61,12 +60,7 @@ public static class L
 
     public static void Load()
     {
-        try
-        {
-            if (File.Exists(Settings.Path))
-                Preference = JsonSerializer.Deserialize<Settings>(File.ReadAllText(Settings.Path))?.Language ?? "auto";
-        }
-        catch { Preference = "auto"; }
+        Preference = AppSettings.Load().Language;
         Apply();
     }
 
@@ -80,14 +74,7 @@ public static class L
     public static void Set(string preference)
     {
         Preference = preference is "he" or "en" ? preference : "auto";
-        Directory.CreateDirectory(System.IO.Path.GetDirectoryName(Settings.Path)!);
-        File.WriteAllText(Settings.Path, JsonSerializer.Serialize(new Settings { Language = Preference }));
+        AppSettings.Update(s => s.Language = Preference); // the theme (and anything else there) is kept
         Apply();
-    }
-
-    sealed class Settings
-    {
-        public static string Path => System.IO.Path.Combine(AppState.Root, "settings.json");
-        public string Language { get; set; } = "auto";
     }
 }
