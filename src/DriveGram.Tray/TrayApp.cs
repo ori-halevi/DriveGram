@@ -35,6 +35,8 @@ sealed class DriveController
     public bool? ToldWritable;
     /// <summary>When the user was last told that Telegram cannot be reached for a file (Environment.TickCount64).</summary>
     public long ToldUnreachableAt;
+    /// <summary>The failing-uploads balloon already shown for this spell (its starting time), or null.</summary>
+    public DateTime? ToldUploadsFailing;
     // ── one "upload session": from the first file waiting to upload until everything is in Telegram ──
     public bool Uploading;            // a session is running
     public DateTime UploadSince;      // when it started
@@ -1999,6 +2001,10 @@ sealed class TrayApp : ApplicationContext, IMainHost
                     : L.T("ההעלאות מושהות: ", "uploads paused: "))
                    + L.N(st.PendingFiles, "קובץ אחד מחכה", "{0} קבצים מחכים", "1 file waits", "{0} files wait")
                    + L.T($" במחשב הזה ({Ui.Size(st.StagedBytes)})", $" on this PC ({Ui.Size(st.StagedBytes)})");
+        if (s.Engine.UploadTrouble is { } bad && (st.PendingFiles > 0 || st.UploadsInFlight > 0))
+            return L.T($"⚠ ההעלאה לא מצליחה מאז {bad.Since:HH:mm} · ", $"⚠ uploads have been failing since {bad.Since:HH:mm} · ")
+                   + L.N(st.PendingFiles, "קובץ אחד מחכה", "{0} קבצים מחכים", "1 file waits", "{0} files wait")
+                   + L.T($" במחשב הזה ({Short(bad.Error)})", $" on this PC ({Short(bad.Error)})");
         if (st.PendingFiles > 0 || st.UploadsInFlight > 0)
             return L.T("מעלה: ", "uploading: ") + L.N(st.PendingFiles, "קובץ אחד", "{0} קבצים", "1 file", "{0} files") + $", {Ui.Size(st.StagedBytes)}"
                    + UploadProgress(d, st) + wait;
@@ -2212,6 +2218,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
     {
         if (_quitting) { TrackDaily(); return; } // "wait, then exit": what still goes up counts for today
         foreach (var d in _drives) TrackUploads(d);
+        foreach (var d in _drives) TrackUploadTrouble(d);
         foreach (var d in _drives) TrackShellIcons(d);
         RedrawLateAnswers();
         TrackLowDisk();
@@ -2221,6 +2228,23 @@ sealed class TrayApp : ApplicationContext, IMainHost
         _icon.Icon = busy ? _busy : _idle;
         if (_drives.Any(d => d.Stopping)) return; // the stop progress owns the tooltip
         SetTooltip(_drives.Count == 1 ? $"{_drives[0].Letter} {StatusOf(_drives[0])}" : Summary().Replace("\n", " | "));
+    }
+
+    /// <summary>
+    /// Uploads that keep failing used to show as "uploading, 0%" for as long as it took. Tell the user
+    /// once per spell: the files are safe here, and the drive goes on by itself when the line is back.
+    /// </summary>
+    void TrackUploadTrouble(DriveController d)
+    {
+        if (d.Session is not { } s || d.Stopping || _quitting) return;
+        if (s.Engine.UploadTrouble is not { } bad) { d.ToldUploadsFailing = null; return; }
+        if (d.ToldUploadsFailing == bad.Since) return;
+        d.ToldUploadsFailing = bad.Since;
+        Log.Warn($"{d.State.Id}: uploads failing since {bad.Since:HH:mm:ss}: {bad.Error}");
+        Balloon(L.T("ההעלאה לטלגרם לא מצליחה", "Uploads to Telegram are failing"),
+            L.T($"{d.Name} לא מצליח להעלות מאז {bad.Since:HH:mm} ({Short(bad.Error)}). הקבצים שמורים במחשב הזה וההעלאה תימשך מעצמה כשהחיבור יחזור.",
+                $"{d.Name} has not been able to upload since {bad.Since:HH:mm} ({Short(bad.Error)}). The files are kept on this PC and uploading continues by itself when the connection is back."),
+            ToolTipIcon.Warning, () => ShowTransfers());
     }
 
     DateTime _lastStartBalloon;

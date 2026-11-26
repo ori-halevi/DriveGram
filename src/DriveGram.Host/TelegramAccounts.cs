@@ -81,6 +81,9 @@ public static class TelegramAccounts
                 // A 401 can also come from a secondary data center's connection (files stored elsewhere):
                 // only a 401 confirmed on the main connection means "signed out".
                 e.Up.ConfirmSignedOut = e.Down.ConfirmSignedOut = () => StillSignedOutAsync(client);
+                // closed for good: nothing can be asked any more, so every drive on the account is told
+                // to stop and ask for a new sign-in instead of retrying into a dead connection for ever
+                e.Healer.Dead += _ => { e.Up.DeclareSignedOut(); e.Down.DeclareSignedOut(); };
                 Entries[path] = e;
             }
             e.Refs++;
@@ -109,6 +112,9 @@ public static class TelegramAccounts
     /// <summary>
     /// Signed out only if Telegram says so three times, about 20 seconds apart: after a network outage
     /// (a power cut, a router restart) the first answers can be a passing AUTH_KEY_UNREGISTERED.
+    /// A disposed client counts as a refusal too: the library closes the connection for good on a fatal
+    /// auth error, and asking a closed connection can never produce the 401 that confirms the sign-out
+    /// (treating that as "probably offline" left drives retrying for ever, telling the user nothing).
     /// </summary>
     static async Task<bool> StillSignedOutAsync(WTelegram.Client client)
     {
@@ -121,6 +127,7 @@ public static class TelegramAccounts
                 return false;
             }
             catch (TL.RpcException e) when (e.Code == 401) { Log.Warn($"telegram answered {e.Message}; checking again"); }
+            catch (ObjectDisposedException) { Log.Warn("the Telegram connection was closed by the library; checking again"); }
             catch (Exception) { return false; } // offline / timeout: never sign anyone out on a guess
         }
         return true;

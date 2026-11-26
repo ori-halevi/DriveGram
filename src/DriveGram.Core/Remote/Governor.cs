@@ -40,6 +40,10 @@ public sealed class Governor
     /// <summary>Asked on a 401: true only if the account's MAIN connection confirms the sign-out.</summary>
     public Func<Task<bool>>? ConfirmSignedOut { get; set; }
 
+    /// <summary>The account's connection is closed for good and cannot be asked anything any more:
+    /// tell everyone holding it, so the drive stops instead of retrying into a dead client.</summary>
+    public void DeclareSignedOut() => SignedOut?.Invoke();
+
     /// <summary>When Telegram asked this account to wait, until when (null: no wait).</summary>
     public DateTime? WaitingUntil
     {

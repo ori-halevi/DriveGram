@@ -1372,8 +1372,7 @@ public sealed class ContentEngine : IAsyncDisposable
             Interlocked.Increment(ref _uploadsInFlight);
             try
             {
-                int msg = await Retry.ForeverAsync(() => _remote.UploadChunkAsync($"{chunkId[..32]}.bin", payload, ct),
-                    $"upload chunk {chunkId[..12]}", ct);
+                int msg = await UploadChunkRetryingAsync(chunkId, payload, $"upload chunk {chunkId[..12]}", ct);
                 _db.AddChunk(new StoredChunk(chunkId, msg, data.Length, hashHex));
                 Interlocked.Add(ref _bytesUploaded, data.Length);
                 return new ChunkLoc(chunkId, msg, data.Length, hashHex);
@@ -1410,8 +1409,7 @@ public sealed class ContentEngine : IAsyncDisposable
         var hashHex = Convert.ToHexStringLower(hash);
         var chunkId = _keys.ChunkId(hash);
         var payload = ChunkCipher.Encrypt(data, _keys.ChunkKey(hash), Convert.FromHexString(chunkId), _keys.FrameSize);
-        int msg = await Retry.ForeverAsync(() => _remote.UploadChunkAsync($"{chunkId[..32]}.bin", payload, ct),
-            $"upload chunk {chunkId[..12]} again", ct);
+        int msg = await UploadChunkRetryingAsync(chunkId, payload, $"upload chunk {chunkId[..12]} again", ct);
         _db.AddChunk(new StoredChunk(chunkId, msg, data.Length, hashHex));
         Interlocked.Add(ref _bytesUploaded, data.Length);
         return (new ChunkRef(chunkId, msg, data.Length, hashHex), lost);
@@ -1750,6 +1748,57 @@ public sealed class ContentEngine : IAsyncDisposable
     /// <summary>The file's content is in Telegram (a rename or move of it may still wait): freeing or
     /// preparing it is safe.</summary>
     public bool IsContentInTelegram(string id) => !_db.IsPending(id) && !_db.HasOutboxContent(id);
+
+    // ── uploads that keep failing ────────────────────────────────────────────
+    // Retrying for ever is right (offline, asleep, a flood wait: the files simply wait), but it must
+    // never look like work in progress. After a few failures in a row the drive says so instead.
+    const int FailuresBeforeTrouble = 5; // ~30 s of back-off: a passing hiccup is not worth a word
+
+    readonly object _troubleGate = new();
+    int _uploadFailures;
+    DateTime _failingSince;
+    string? _lastUploadError;
+
+    /// <summary>Uploads have been failing over and over: since when, and the last reason. Null while
+    /// they work (or while nothing is being uploaded at all).</summary>
+    public (DateTime Since, string Error)? UploadTrouble
+    {
+        get
+        {
+            lock (_troubleGate)
+                return _uploadFailures >= FailuresBeforeTrouble && _lastUploadError is { } e ? (_failingSince, e) : null;
+        }
+    }
+
+    void NoteUploadFailed(Exception ex)
+    {
+        lock (_troubleGate)
+        {
+            if (_uploadFailures++ == 0) _failingSince = DateTime.Now;
+            _lastUploadError = ex.Message;
+        }
+    }
+
+    void NoteUploadWorked()
+    {
+        lock (_troubleGate) { _uploadFailures = 0; _lastUploadError = null; }
+    }
+
+    async Task<int> UploadChunkRetryingAsync(string chunkId, byte[] payload, string what, CancellationToken ct) =>
+        await Retry.ForeverAsync(async () =>
+        {
+            try
+            {
+                int msg = await _remote.UploadChunkAsync($"{chunkId[..32]}.bin", payload, ct);
+                NoteUploadWorked();
+                return msg;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                NoteUploadFailed(ex);
+                throw;
+            }
+        }, what, ct);
 
     /// <summary>What Explorer's previews hold on this PC (thumbnails and details).</summary>
     public long PreviewBytes => _cache.PreviewBytes;
