@@ -61,6 +61,8 @@ sealed class SetupContext : IDisposable
     /// <summary>Someone signed in to Telegram in this run (it is shared at once: closing the window after it
     /// still counts as signed in).</summary>
     public bool SignedInHere { get; set; }
+    /// <summary>The drive page found this run's drive missing on the signed-in account.</summary>
+    public bool DriveVanished { get; set; }
     /// <summary>The account this run's drive is on, to add more drives on it without a new sign-in.</summary>
     public AccountInfo? Account => UsesTelegram && !string.IsNullOrEmpty(State.Config.AccountKey)
         ? new AccountInfo(State.Config.AccountKey, State.Config.AccountId, State.Config.AccountName, State.Config.ApiId, State.Config.ApiHash)
@@ -334,24 +336,26 @@ sealed class SetupWizard : Form
         };
     }
 
-    async Task GoNextAsync()
+    /// <returns>True when it moved on (or finished).</returns>
+    async Task<bool> GoNextAsync()
     {
-        if (_busy || _index < 0) return;
+        if (_busy || _index < 0) return false;
         var page = _pages[_index];
         SetBusy(true);
         bool ok;
         try { ok = await page.NextAsync(); }
         catch (Exception ex) { Ui.Error(TelegramErrors.Text(ex)); ok = false; }
         finally { SetBusy(false); }
-        if (!ok) return;
+        if (!ok) return false;
         if (_index == _pages.Count - 1)
         {
             page.LeavePage();
             DialogResult = DialogResult.OK;
             Close();
-            return;
+            return true;
         }
         await GoAsync(_index + 1, +1);
+        return true;
     }
 
     async Task GoAsync(int index, int direction)
@@ -380,11 +384,19 @@ sealed class SetupWizard : Form
         {
             // the pages shown in this run, in order: Back goes to the one before (a page shown again
             // drops what came after it, e.g. back on the sign-in page after changing the API details)
+            bool auto = direction > 0 && page.AutoNext;
+            if (auto)
+            {
+                // nothing to ask here: on by itself, and not a page to come back to (nor a step)
+                _skipped.Add(page);
+                if (await GoNextAsync()) return;
+                _skipped.Remove(page); // it stayed (its work failed): it is a page the user sees after all
+            }
             int at = _history.IndexOf(index);
             if (at >= 0) _history.RemoveRange(at + 1, _history.Count - at - 1); else _history.Add(index);
-            if (_skipped.Remove(page)) UpdateStep();
+            _skipped.Remove(page);
+            UpdateStep();
             UpdateButtons();
-            if (direction > 0 && page.AutoNext) await GoNextAsync();
         }
     }
 
@@ -394,7 +406,8 @@ sealed class SetupWizard : Form
     /// <summary>"Step N of M", without pages that were skipped (e.g. API details already known).</summary>
     void UpdateStep()
     {
-        bool Shows(WizardPage p) => p.Counted && !_skipped.Contains(p) && !(p.SkipsAhead && !_history.Contains(_pages.IndexOf(p)));
+        bool Shows(WizardPage p) => p.Counted && !_skipped.Contains(p) && !(p.SkipsAhead && !_history.Contains(_pages.IndexOf(p)))
+            && !(p is ApiPage && _ctx.ApiSkipped); // opened from the sign-in page's link: a side trip, not a step
         int total = _pages.Count(Shows);
         int step = Math.Min(total, _pages.Take(_index + 1).Count(Shows));
         _step.Visible = _progress.Visible = total > 1; // one page: no "step 1 of 1"

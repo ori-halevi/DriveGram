@@ -50,7 +50,7 @@ sealed class WelcomePage : WizardPage
             ? [L.T("פרטי API של טלגרם (מזהה חינמי שכל תוכנה צריכה)", "Telegram API details (a free ID every app needs)"),
                L.T("התחברות לחשבון: סריקת קוד QR מהטלפון, או קוד שטלגרם שולח", "Sign in: scan a QR code with your phone, or type a code Telegram sends you"),
                L.T("סיסמה לכונן: מצפינה הכל, ורק אתה יודע אותה", "A drive password: it encrypts everything, only you know it"),
-               L.T("אות לכונן, סוג הכונן, והפעלה אוטומטית עם וינדוס", "A drive letter, the drive type, and starting with Windows")]
+               L.T("אות לכונן וסוג הכונן (DriveGram יופעל עם וינדוס; אפשר לכבות בתפריט של הסמל)", "A drive letter and the drive type (DriveGram starts with Windows; it can be turned off in the icon's menu)")]
             : [L.T("סיסמה לכונן (מצב ניסיון: הקבצים נשמרים בתיקייה מקומית)", "A drive password (trial mode: files are kept in a local folder)"),
                L.T("אות לכונן, סוג הכונן, והפעלה אוטומטית עם וינדוס", "A drive letter, the drive type, and starting with Windows")];
         for (int i = 0; i < steps.Length; i++)
@@ -140,6 +140,7 @@ sealed class ApiPage : WizardPage
     }
 
     public override bool SkipsAhead => !_entered && Valid;
+    public override string NextText => Ctx.ApiSkipped ? L.T("שמירה וחזרה להתחברות", "Save and back to sign-in") : base.NextText;
 
     public override Task EnterAsync()
     {
@@ -173,7 +174,7 @@ sealed class LoginPage : WizardPage
     public override bool AutoNext { get { bool a = !Ctx.IsNew && !Ctx.FreshSignIn && Ctx.User is not null && !_autoUsed; if (a) _autoUsed = true; return a; } }
     readonly LinkLabel _apiLink = new()
     {
-        Text = L.T("פרטי ה־API של טלגרם שכבר הוזנו משמשים גם כאן  ·  שינוי", "The Telegram API details entered before are used here too  ·  change"),
+        Text = L.T("משתמשים בפרטי ההתחברות לטלגרם (API) ששמרת קודם  ·  לשנות אותם", "Using the Telegram sign-in details (API) you saved before  ·  change them"),
         AutoSize = true, LinkColor = Theme.Accent, Font = Theme.Small, Margin = new Padding(0, 0, 0, 10), Visible = false,
     };
     readonly Panel _account = Theme.Card(Color.FromArgb(0xEC, 0xF7, 0xEE), Color.FromArgb(0xB7, 0xDF, 0xC0));
@@ -740,7 +741,10 @@ sealed class DrivePage : WizardPage
     /// (a queued drive got them from the page that queued it).</summary>
     bool ChoosesAll => Ctx.DrivePageFinishes && Ctx.Current is not { Candidate: not null };
 
-    public override string NextText => !Ctx.IsNew ? L.T("חיבור הכונן", "Connect the drive")
+    public override string NextText => !Ctx.IsNew
+        ? _mode == Mode.Create ? L.T("יצירת הכונן וחיבורו", "Create and connect the drive")
+          : Ctx.OriginalChannels is { } o && (_selected?.Channels ?? Ctx.State.Config.Channels) is { } t && t.JournalId != o.JournalId ? L.T("מעבר לכונן הזה", "Switch to this drive")
+          : L.T("חיבור הכונן", "Connect the drive")
         : !ChoosesAll || _mode is not (Mode.Connect or Mode.Create) ? base.NextText
         : Ticked.Count + (_newTick?.Checked == true ? 1 : 0) > 1 ? L.T("סיום וחיבור הכוננים", "Finish and connect the drives")
         : L.T("סיום וחיבור הכונן", "Finish and connect");
@@ -788,8 +792,8 @@ sealed class DrivePage : WizardPage
     public DrivePage(SetupContext ctx) : base(ctx)
     {
         var col = Theme.Column();
-        _connected.Controls.Add(Theme.Label(L.T("✓  המחשב הזה כבר מחובר לכונן, והסיסמה שמורה בו.", "✓  This PC is already connected to the drive, and its password is remembered."), Theme.Heading, Theme.Success));
-        _connected.Controls.Add(Theme.Label(L.T("DriveGram מתחבר אליו עכשיו.", "DriveGram connects to it now."), Theme.Body, Theme.Muted));
+        _connected.Controls.Add(Theme.Label(L.T("✓  המחשב הזה כבר משויך לכונן, והסיסמה שמורה בו.", "✓  This PC is already paired with the drive, and its password is remembered."), Theme.Heading, Theme.Success));
+        _connected.Controls.Add(Theme.Label(L.T("הכונן מתחבר עכשיו. החלון ייסגר, ותופיע הודעה ליד השעון.", "The drive connects now. This window closes, and a notice appears by the clock."), Theme.Body, Theme.Muted));
         _connected.Visible = false;
 
         var vcol = Theme.Column();
@@ -902,7 +906,7 @@ sealed class DrivePage : WizardPage
                     if (_ctrl is not null && RememberedKeyWorks()) { SetMode(Mode.Connected); return; }
                     if (_ctrl is not null) { SetMode(Mode.Connect); return; }
                 }
-                catch (DriveVanishedException) { _wasVanished = true; }
+                catch (DriveVanishedException) { _wasVanished = true; Ctx.DriveVanished = true; }
             }
 
             var candidates = await Task.Run(() => TelegramRemote.DiscoverAsync(client));
@@ -1480,7 +1484,11 @@ sealed class DrivePage : WizardPage
     {
         if (_mode == Mode.Connected)
         {
-            if (!Ctx.IsNew) Ctx.State.Save(); // an existing drive has no last page: its sign-in is kept here
+            if (!Ctx.IsNew)
+            {
+                Ctx.State.Save(); // an existing drive has no last page: its sign-in is kept here
+                await Task.Delay(1200); // a moment to read "all set" before the window closes by itself
+            }
             return true;
         }
         _error.Text = "";
@@ -1512,8 +1520,8 @@ sealed class DrivePage : WizardPage
                 return false;
             }
             else if (!Ctx.IsNew && Ui.Ask(L.T(
-                    "המחשב הזה יעבור לכונן שבחרת. הנתונים המקומיים של הכונן הקודם יימחקו מהמחשב (הקבצים שלו נשארים בטלגרם). אי אפשר לבטל את זה.\n\nלהמשיך?",
-                    "This PC switches to the drive you chose. The previous drive's local data is deleted from this PC (its files stay in Telegram). This cannot be undone.\n\nContinue?"),
+                    $"מעכשיו {L.Ltr(Ctx.State.Config.MountPoint)} יציג את הכונן {(_selected is { } chosen ? $"\"{L.Name(chosen.Name)}\"" : "שבחרת")} במקום הכונן הקודם.\n\nהעותק המקומי של הכונן הקודם יימחק מהמחשב הזה. הקבצים שלו נשארים בטלגרם, ואפשר לחזור אליו אחר כך דרך \"החלפה לכונן אחר באותו חשבון…\".\n\nלהמשיך?",
+                    $"From now on {Ctx.State.Config.MountPoint} shows the drive {(_selected is { } chosenEn ? $"\"{chosenEn.Name}\"" : "you chose")} instead of the previous one.\n\nThe previous drive's local copy is deleted from this PC. Its files stay in Telegram, and you can switch back later with \"Switch to another drive of the account…\".\n\nContinue?"),
                     icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes)
                 return false;
         }
@@ -1604,7 +1612,9 @@ sealed class DrivePage : WizardPage
             {
                 cfg.Channels = bound;
                 cfg.DriveId = sel.DriveId ?? "";
-                if (cfg.VolumeLabel is "" or "DriveGram") cfg.VolumeLabel = sel.Name;
+                // a new drive's default name, or an existing drive switched to another one: the chosen drive's name
+                if (cfg.VolumeLabel is "" or "DriveGram" || (!Ctx.IsNew && Ctx.OriginalChannels is { } was && was.JournalId != bound.JournalId))
+                    cfg.VolumeLabel = sel.Name;
             }
             ResetIfRebinding();
         }
@@ -1737,7 +1747,7 @@ sealed class FinishPage : WizardPage
         _summary.Text = ((account is null ? "" : L.T($"חשבון: {account}\n", $"Account: {account}\n")) + where + ready).TrimEnd('\n');
         _summary.Parent!.Visible = _summary.Text.Length > 0;
         // starting with Windows belongs to the whole app (the tray menu), not to one drive's settings
-        _autostart.Visible = Ctx.IsNew;
+        _autostart.Visible = Ctx.IsNew && !AppState.All().Any(a => a.Dir != Ctx.State.Dir);
         return Task.CompletedTask;
     }
 

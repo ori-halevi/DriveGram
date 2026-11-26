@@ -631,15 +631,16 @@ sealed class TrayApp : ApplicationContext, IMainHost
         List<Setup.NextDrive> after;
         // the window says what this run is for (the menu item that opened it)
         string? title = d is null ? null
-            : chooseOther ? L.T($"DriveGram – בחירת כונן אחר בחשבון ({Ui.DriveTitle(d.State)})", $"DriveGram – choose another drive of the account ({d.State.DisplayName})")
+            : chooseOther ? L.T($"DriveGram – החלפת הכונן ב־{L.Ltr(d.Letter)}", $"DriveGram – switching the drive on {d.Letter}")
             : freshSignIn ? L.T($"DriveGram – התחברות לחשבון טלגרם אחר ({Ui.DriveTitle(d.State)})", $"DriveGram – sign in with another Telegram account ({d.State.DisplayName})")
             : d.MustChooseDrive ? L.T($"DriveGram – בחירת הכונן מחדש ({Ui.DriveTitle(d.State)})", $"DriveGram – choose the drive again ({d.State.DisplayName})")
-            : L.T($"DriveGram – התחברות לטלגרם ({Ui.DriveTitle(d.State)})", $"DriveGram – Telegram sign-in ({d.State.DisplayName})");
-        bool signedInHere;
+            : L.T($"DriveGram – חיבור הכונן מחדש ({Ui.DriveTitle(d.State)})", $"DriveGram – connecting the drive again ({d.State.DisplayName})");
+        bool signedInHere, driveVanished;
         using (_wizard = new Setup.SetupWizard(state, isNew, originalChannels, next, queue, title: title, freshSignIn: freshSignIn))
         {
             result = _wizard.ShowDialog();
             signedInHere = _wizard.Context.SignedInHere;
+            driveVanished = _wizard.Context.DriveVanished;
             wizardKeys = _wizard.Context.UnlockedKeys;
             createdDriveId = _wizard.Context.CreatedDriveId;
             restartForLanguage = _wizard.Context.RestartForLanguage;
@@ -698,10 +699,18 @@ sealed class TrayApp : ApplicationContext, IMainHost
         }
         // signed in, then the window was closed: the sign-in is shared already, and this drive's own record did
         // not change, so it counts as done (the drive connects; others on the account too)
-        if (result != DialogResult.OK && !isNew && signedInHere && !rebound && state.Config.Channels is not null
-            && state.Config.Channels.JournalId == originalChannels?.JournalId)
+        if (result != DialogResult.OK && !isNew && signedInHere && !rebound && !driveVanished && state.Config.Channels is not null
+            && state.Config.Channels.JournalId == originalChannels?.JournalId
+            && state.Config.AccountId == d!.State.Config.AccountId) // the drive's own account (another one: nothing saved)
         {
-            state.Save();
+            // only the sign-in is taken from the wizard's copy: what other windows changed meanwhile stays
+            var live = AppState.Open(state.Id);
+            live.Config.AccountKey = state.Config.AccountKey;
+            live.Config.AccountId = state.Config.AccountId;
+            live.Config.AccountName = state.Config.AccountName;
+            live.Config.ApiId = state.Config.ApiId;
+            live.Config.ApiHash = state.Config.ApiHash;
+            live.Save();
             result = DialogResult.OK;
         }
         if (result != DialogResult.OK && !rebound)
@@ -1571,7 +1580,14 @@ sealed class TrayApp : ApplicationContext, IMainHost
         var signedIn = temp.Config.AccountKey; // the account the wizard signed in to (maybe one already here)
         if (restart) { await AddAccountAsync(); return; }
         _main?.RefreshAll();
-        if (!finished) return; // closed: the account (if it signed in) is in the accounts list, no drive window
+        if (!finished)
+        {
+            // closed after signing in: the account is added (its drives can be added from the main window)
+            if (TelegramAccounts.Known().FirstOrDefault(a => !before.Contains(a.Key)) is { } justAdded)
+                Balloon(L.T("החשבון נוסף", "The account was added"),
+                    L.T($"החשבון {L.Name(justAdded.Name)} נוסף. אפשר להוסיף לו כוננים מהחלון הראשי ← חשבונות.", $"The account {justAdded.Name} was added. Its drives can be added from the main window → Accounts."));
+            return;
+        }
         var added = TelegramAccounts.Known().FirstOrDefault(a => !before.Contains(a.Key))
                     ?? (string.IsNullOrEmpty(signedIn) ? null : TelegramAccounts.Known().FirstOrDefault(a => a.Key == signedIn));
         if (added is null) return;
@@ -2148,7 +2164,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
             list.Add(Item(L.T("העבר לחשבון טלגרם אחר…", "Move to another Telegram account…"), () => ShowSwitchAccount(d), !d.Starting && !d.Stopping));
         }
         if (!d.NeedsSetup) // the full wizard: another drive of the account, or signing in again (rare)
-            list.Add(Item(L.T("בחירת כונן אחר בחשבון…", "Choose another drive of the account…"), async () => await SetupAsync(d, chooseOther: true), idle));
+            list.Add(Item(L.T("החלפה לכונן אחר באותו חשבון…", "Switch to another drive of the account…"), async () => await SetupAsync(d, chooseOther: true), idle));
         list.Add(new ToolStripSeparator());
         list.Add(Item(L.T("הסר מהמחשב הזה…", "Remove from this PC…"), async () => await RemoveAsync(d), idle));
         // never offered while the drive's pairing is in doubt (it could name another drive's data)
