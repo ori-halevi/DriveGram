@@ -90,6 +90,13 @@ sealed class MainForm : Form
         else if (tab == Tab.Transfers) _transfers.ShowUploadsTab();
     }
 
+    /// <summary>The files list, showing only what was prepared on this PC.</summary>
+    public void ShowPrepared()
+    {
+        _tabs.SelectedTab = _transfersPage;
+        _transfers.ShowPrepared();
+    }
+
     public void RefreshAll()
     {
         _accountsShape = _drivesShape = null;

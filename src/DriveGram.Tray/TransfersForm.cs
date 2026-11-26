@@ -69,22 +69,32 @@ sealed class TransfersForm : Form
     readonly ListView _local = NewList();
     readonly Label _localState = Theme.Label("", Theme.Small, Theme.Muted, 740);
     readonly ToolStripButton _prepareSel, _freeSel;
+    readonly Label _localEmpty = Theme.Label("", Theme.Body, Theme.Muted);
+    readonly ToolStripComboBox _localFilter = new() { DropDownStyle = ComboBoxStyle.DropDownList, AutoSize = false, Width = 150 };
+    readonly ToolStripTextBox _localSearch = SearchBox(), _upSearch = SearchBox();
     bool _scanning;
     List<LocalRow> _localRows = [];
+    int _localTotal; // files found (the list shows at most 2,000)
+    readonly ListSort _upSort, _localSort;
+    readonly Dictionary<string, long> _upRank = [], _localRank = [];
+    // the help (notes and the legend of Explorer's marks) under each list: open or closed, the same in both tabs
+    static bool _helpOpen;
+    readonly List<(LinkLabel Link, Control[] Content)> _helps = [];
 
     readonly ImageList _icons = new() { ImageSize = new Size(18, 18), ColorDepth = ColorDepth.Depth32Bit };
     readonly System.Windows.Forms.Timer _timer = new() { Interval = 1000 };
 
     readonly ToolTip _legendTip = new() { AutoPopDelay = 20000, InitialDelay = 300 };
 
-    /// <summary>What the marks on files in Explorer mean (the real icons), one short line each in two groups
-    /// (uploading / on this PC); the full meaning when the mouse rests on one.</summary>
-    Control Legend()
+    /// <summary>What the marks on files in Explorer mean (the real icons), one short line each: the uploads
+    /// tab shows the uploading marks, the files tab the "on this PC" ones; the full meaning when the mouse
+    /// rests on one.</summary>
+    Control Legend(bool uploading)
     {
         var box = new FlowLayoutPanel
         {
-            Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(8, 6, 8, 0),
+            AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(0, 4, 0, 0), Margin = new Padding(0),
         };
         FlowLayoutPanel row = null!;
         void Group(string title)
@@ -108,13 +118,7 @@ sealed class TransfersForm : Form
             _legendTip.SetToolTip(item, tip);
             row.Controls.Add(item);
         }
-        if (!OverlayNamesInstalled())
-        {
-            var missing = Theme.Label(L.T("הסימנים בסייר הקבצים לא הותקנו במלואם (לא אושרה בקשת ווינדוס בהתקנה). כדי להוסיף אותם, התקן את DriveGram שוב ואשר את הבקשה.",
-                "The marks in Explorer are not fully installed (Windows' request at install was not approved). To add them, install DriveGram again and approve the request."), Theme.Small, Theme.Error, 900);
-            missing.Margin = new Padding(0, 0, 0, 4);
-            box.Controls.Add(missing);
-        }
+        if (!uploading) goto OnThisPc;
         Group(L.T("סימנים בסייר הקבצים – העלאה:", "Marks in Explorer – uploading:"));
         Item("upload", L.T("עוד לא בטלגרם", "Not in Telegram yet"),
             L.T("הקובץ (או שינוי בו) מחכה להעלאה או עולה עכשיו. בינתיים הוא שמור רק במחשב הזה, גם אחרי כיבוי, ויעלה לטלגרם כשהכונן יתחבר.",
@@ -122,6 +126,8 @@ sealed class TransfersForm : Form
         Item("paused", L.T("ההעלאה מושהית, עוד לא בטלגרם", "Upload paused, not in Telegram yet"),
             L.T("ההעלאה של הקובץ מושהית. בינתיים הוא שמור רק במחשב הזה, ויעלה כשתמשיך את ההעלאה.",
                 "The file's upload is paused. Meanwhile it is kept only on this PC, and goes up when you resume the upload."));
+        return box;
+    OnThisPc:
         Group(L.T("סימנים בסייר הקבצים – במחשב הזה:", "Marks in Explorer – on this PC:"));
         Item("kept", L.T("בטלגרם, ומוכן כאן", "In Telegram, prepared here"),
             L.T("שמור בטלגרם, והכנת אותו במחשב הזה (\"הכן\"): הוא נשאר כאן עד שתפנה אותו, ונפתח מיד, גם בלי אינטרנט.",
@@ -177,7 +183,75 @@ sealed class TransfersForm : Form
         return null;
     }
 
-    sealed record LocalRow(DriveController Drive, DriveSession Session, string Id, string Name, string Path, long Size, double Fraction, bool Prepared);
+    /// <summary>The help under a list: a link that opens or closes the notes and the legend (closed, the
+    /// list has the room).</summary>
+    Control Help(params Control[] content)
+    {
+        var box = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(8, 4, 8, 6),
+        };
+        var link = new LinkLabel { AutoSize = true, Font = Theme.Small, LinkColor = Theme.AccentDark, Margin = new Padding(0, 0, 0, 2) };
+        link.LinkClicked += (_, _) => { _helpOpen = !_helpOpen; ShowHelp(); };
+        box.Controls.Add(link);
+        foreach (var c in content) { c.Dock = DockStyle.None; c.Margin = new Padding(0, 2, 0, 2); box.Controls.Add(c); }
+        _helps.Add((link, content));
+        ShowHelp();
+        return box;
+    }
+
+    void ShowHelp()
+    {
+        foreach (var (link, content) in _helps)
+        {
+            link.Text = _helpOpen ? L.T("הסתר את העזרה ▴", "Hide the help ▴") : L.T("עזרה: מה אפשר לעשות כאן ומה אומרים הסימנים בסייר ▾", "Help: what you can do here, and what the marks in Explorer mean ▾");
+            foreach (var c in content) c.Visible = _helpOpen;
+        }
+    }
+
+    static ToolStripTextBox SearchBox()
+    {
+        var box = new ToolStripTextBox { AutoSize = false, Width = 170, Alignment = ToolStripItemAlignment.Right, Overflow = ToolStripItemOverflow.Never };
+        box.TextBox.RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No;
+        box.TextBox.HandleCreated += (_, _) => SetCue(box.TextBox, L.T("חיפוש לפי שם…", "Search by name…"));
+        return box;
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, string lParam);
+    static void SetCue(TextBox box, string text) => SendMessage(box.Handle, 0x1501 /* EM_SETCUEBANNER */, 1, text);
+
+    static bool Matches(string name, string search) =>
+        search.Length == 0 || name.Contains(search.Trim(), StringComparison.CurrentCultureIgnoreCase);
+
+    /// <summary>The file column takes the room the others leave (no sideways scrolling in a narrow window).</summary>
+    static void FitColumns(ListView list)
+    {
+        if (list.Columns.Count == 0 || !list.IsHandleCreated) return;
+        int others = 0;
+        for (int i = 1; i < list.Columns.Count; i++) others += list.Columns[i].Width;
+        int w = Math.Max(150, list.ClientSize.Width - others - 2);
+        if (Math.Abs(list.Columns[0].Width - w) > 2) list.Columns[0].Width = w;
+    }
+
+    /// <summary>A mark of Explorer, list size (the rows look like the files in Explorer).</summary>
+    static Image Mark(string name, Image fallback)
+    {
+        if (OverlayMark(name) is not { } m) return fallback;
+        var b = new Bitmap(18, 18);
+        using (var g = Graphics.FromImage(b))
+        {
+            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+            g.DrawImage(m, new Rectangle(0, 0, 18, 18));
+        }
+        m.Dispose();
+        return b;
+    }
+
+    /// <summary>A file on this PC. Session is null for a drive that is not connected (Offline: only what was
+    /// prepared, read from the drive's local index).</summary>
+    sealed record LocalRow(DriveController Drive, DriveSession? Session, string Id, string Name, string Path, long Size, double Fraction, bool Prepared, bool Offline = false);
 
     public TransfersForm(ITransfersHost host)
     {
@@ -190,13 +264,15 @@ sealed class TransfersForm : Form
         BackColor = Color.White;
 
         _icons.Images.Add("wait", Glyphs.Make(Glyphs.Clock, Theme.Muted, 18));
-        _icons.Images.Add("up", Glyphs.Make(Glyphs.Upload, Theme.Accent, 18));
-        _icons.Images.Add("paused", Glyphs.Make(Glyphs.Pause, Color.FromArgb(0xB4, 0x6A, 0x00), 18));
+        // the same marks as on the files in Explorer (the clock and the pencil are only here)
+        _icons.Images.Add("up", Mark("upload", Glyphs.Make(Glyphs.Upload, Theme.Accent, 18)));
+        _icons.Images.Add("paused", Mark("paused", Glyphs.Make(Glyphs.Pause, Color.FromArgb(0xB4, 0x6A, 0x00), 18)));
         _icons.Images.Add("writing", Glyphs.Make(Glyphs.Edit, Theme.Muted, 18));
-        _icons.Images.Add("ready", Glyphs.Make(Glyphs.Pin, Theme.Success, 18));
+        _icons.Images.Add("ready", Mark("kept", Glyphs.Make(Glyphs.Pin, Theme.Success, 18)));
         _icons.Images.Add("down", Glyphs.Make(Glyphs.Download, Theme.Accent, 18));
-        _icons.Images.Add("part", Glyphs.Make(Glyphs.Computer, Theme.Muted, 18));
-        _icons.Images.Add("full", Glyphs.Make(Glyphs.Computer, Theme.Accent, 18)); // all here (temporary)
+        _icons.Images.Add("part", Mark("partial", Glyphs.Make(Glyphs.Computer, Theme.Muted, 18)));
+        _icons.Images.Add("full", Mark("local", Glyphs.Make(Glyphs.Computer, Theme.Accent, 18))); // all here (temporary)
+        _icons.Images.Add("offline", Glyphs.Make(Glyphs.Pin, Theme.Muted, 18));
         _up.SmallImageList = _icons;
         _local.SmallImageList = _icons;
 
@@ -214,6 +290,14 @@ sealed class TransfersForm : Form
         _capBar.Controls.Add(capRow);
         _capBar.Visible = false;
         head.Controls.Add(_capBar);
+        if (!OverlayNamesInstalled())
+        {
+            var missing = Theme.Label(L.T("חלק מהסימנים בסייר הקבצים לא הותקנו – פרטים", "Some of the marks in Explorer are not installed – details"), Theme.Small, Theme.Error, 740);
+            missing.Margin = new Padding(0, 4, 0, 0);
+            _legendTip.SetToolTip(missing, L.T("לא אושרה בקשת ווינדוס בהתקנה, ולכן חלק מהסימנים על הקבצים לא יופיעו. כדי להוסיף אותם, התקן את DriveGram שוב ואשר את הבקשה.",
+                "Windows' request at install was not approved, so some of the marks on files do not show. To add them, install DriveGram again and approve the request."));
+            head.Controls.Add(missing);
+        }
 
         // ── tab 1: uploads ──
         var upTab = new TabPage(L.T("העלאות לטלגרם", "Uploads to Telegram")) { BackColor = Color.White, ImageKey = "up" };
@@ -228,7 +312,11 @@ sealed class TransfersForm : Form
         _resumeSel.ToolTipText = L.T("המשך את הקבצים המסומנים ברשימה", "Resume the files selected in the list");
         _cancelSel.ToolTipText = L.T("בטל את ההעלאה של הקבצים המסומנים ברשימה", "Cancel the upload of the files selected in the list");
         upBar.Items.Add(new ToolStripSeparator());
-        Button(upBar, Glyphs.Gauge, L.T("תקרה יומית…", "Daily cap…"), () => { _host.EditLimits(this); RefreshNow(); });
+        var cap = Button(upBar, Glyphs.Gauge, L.T("תקרה יומית…", "Daily cap…"), () => { _host.EditLimits(this); RefreshNow(); });
+        cap.Overflow = ToolStripItemOverflow.Never; // never hidden behind the toolbar's "»"
+        cap.ToolTipText = L.T("כמה מותר להעלות ביום, והתראה לפני שמגיעים לזה", "How much may be uploaded a day, and a notice before reaching it");
+        upBar.Items.Add(_upSearch);
+        _upSearch.TextChanged += (_, _) => RefreshNow();
         _up.Columns.Add(L.T("קובץ", "File"), 280);
         _up.Columns.Add(L.T("כונן", "Drive"), 60);
         _up.Columns.Add(L.T("גודל", "Size"), 90);
@@ -237,25 +325,42 @@ sealed class TransfersForm : Form
         _up.SelectedIndexChanged += (_, _) => UpdateButtons();
         _up.ContextMenuStrip = RowMenu(UploadMenu);
         _up.KeyDown += (_, e) => Keys(e, _up, cancel: CancelSelected, open: () => ShowInFolder(Selected(_up).Select(x => x.D.Session!.FullPathOf(x.U.Id))));
+        _up.ItemActivate += (_, _) => { if (!DemoSays()) ShowInFolder(Selected(_up).Select(x => x.D.Session!.FullPathOf(x.U.Id))); };
+        _up.Resize += (_, _) => FitColumns(_up);
+        _upSort = ListSort.Attach(_up, (item, col) => item.Tag is not UploadItem u ? null : col switch
+        {
+            0 => u.Name, 2 => u.Size, 3 => u.Total <= 0 ? 0.0 : (double)u.Done / u.Total,
+            _ => item.SubItems[col].Text,
+        }, item => _upRank.TryGetValue(item.Name, out var r) ? r : long.MaxValue); // a third click: the queue's order again
         var upNote = Theme.Label(L.T(
             "השהיה: קבצים שעוד לא עלו מחכים במחשב הזה. אם מעתיקים עוד לכונן בזמן ההשהיה, ההעתקה תיעצר אם ייגמר המקום במחשב. \"בטל\" על קובץ חדש מוחק אותו מהכונן לצמיתות (הוא עוד לא שמור בטלגרם); על קובץ ששונה כאן, מבטל את השינוי ומחזיר אותו לגרסה השמורה.",
             "Paused: files not uploaded yet wait on this PC. Copying more into the drive while paused stops if this PC runs out of space. \"Cancel\" on a new file deletes it from the drive for good (it is not saved in Telegram yet); on a file changed here, it drops the change and brings back the saved version."),
             Theme.Small, Theme.Muted, 740);
-        upNote.Dock = DockStyle.Bottom;
-        upNote.Padding = new Padding(8, 6, 8, 6);
         _upEmpty.Dock = DockStyle.Top;
         _upEmpty.Padding = new Padding(10, 14, 10, 0);
         _upEmpty.Visible = false;
-        upTab.Controls.AddRange([_up, _upEmpty, upNote, Legend(), upBar]);
+        upTab.Controls.AddRange([_up, _upEmpty, Help(upNote, Legend(uploading: true)), upBar]);
 
         // ── tab 2: on this PC ──
         var localTab = new TabPage(L.T("קבצים במחשב הזה", "Files on this PC")) { BackColor = Color.White, ImageKey = "part" };
         var localBar = NewBar();
         Button(localBar, Glyphs.Add, L.T("הכן קובץ…", "Prepare a file…"), PickAndPrepare);
-        _prepareSel = Button(localBar, Glyphs.Download, L.T("הכן את המסומנים", "Prepare selected"), PrepareSelected);
-        _freeSel = Button(localBar, Glyphs.Delete, L.T("פנה את המסומנים מהמחשב", "Free selected from this PC"), FreeSelected);
+        _prepareSel = Button(localBar, Glyphs.Download, L.T("הכן", "Prepare"), PrepareSelected);
+        _freeSel = Button(localBar, Glyphs.Delete, L.T("פנה מהמחשב", "Free from this PC"), FreeSelected);
+        _prepareSel.ToolTipText = L.T("הורד את כל הקבצים שבחרת ברשימה ושמור אותם במחשב הזה", "Download all of the files chosen in the list and keep them on this PC");
+        _freeSel.ToolTipText = L.T("מחק מהמחשב הזה את העותקים של הקבצים שבחרת ברשימה (הם נשארים בטלגרם)", "Delete this PC's copies of the files chosen in the list (they stay in Telegram)");
         localBar.Items.Add(new ToolStripSeparator());
-        Button(localBar, Glyphs.Refresh, L.T("רענן", "Refresh"), () => _ = ScanAsync());
+        var refresh = Button(localBar, Glyphs.Refresh, L.T("רענן", "Refresh"), () => _ = ScanAsync());
+        refresh.ToolTipText = "F5";
+        _localFilter.Items.AddRange([L.T("הכל", "All"), L.T("רק מה שהכנתי", "Only what I prepared"), L.T("עותקים זמניים", "Temporary copies")]);
+        _localFilter.SelectedIndex = 0;
+        _localFilter.Alignment = ToolStripItemAlignment.Right;
+        _localFilter.Overflow = ToolStripItemOverflow.Never;
+        _localFilter.ToolTipText = L.T("אילו קבצים להציג", "Which files to show");
+        _localFilter.SelectedIndexChanged += (_, _) => FillLocal();
+        _localSearch.TextChanged += (_, _) => FillLocal();
+        localBar.Items.Add(_localSearch);
+        localBar.Items.Add(_localFilter);
         _local.Columns.Add(L.T("קובץ", "File"), 280);
         _local.Columns.Add(L.T("כונן", "Drive"), 60);
         _local.Columns.Add(L.T("גודל", "Size"), 90);
@@ -265,15 +370,22 @@ sealed class TransfersForm : Form
         _local.ContextMenuStrip = RowMenu(LocalMenu);
         _local.KeyDown += (_, e) => Keys(e, _local, cancel: FreeSelected, open: () => OpenFiles(SelectedLocal().Select(r => r.Path)));
         _local.ItemActivate += (_, _) => { if (!DemoSays()) OpenFiles(SelectedLocal().Select(r => r.Path)); };
+        _local.Resize += (_, _) => FitColumns(_local);
+        _localSort = ListSort.Attach(_local, (item, col) => item.Tag is not LocalRow r ? null : col switch
+        {
+            0 => r.Name, 2 => r.Size, 3 => r.Fraction,
+            _ => item.SubItems[col].Text,
+        }, item => _localRank.TryGetValue(item.Name, out var k) ? k : long.MaxValue);
         var localNote = Theme.Label(L.T(
             "\"הכן\" מוריד את כל הקובץ עכשיו ושומר אותו במחשב עד שתפנה אותו, למשל סרט לערב: הוא ייפתח מיד, גם בלי אינטרנט. גם בסייר הקבצים: לחיצה ימנית על קובץ בכונן ← \"הצג אפשרויות נוספות\" ← \"הכן במחשב הזה (הורד את כולו)\". אחרי \"פנה\" נשארות רק התמונה הממוזערת והפרטים (כמו אורך סרטון), כדי שהתיקייה תיפתח בלי הורדות.",
             "\"Prepare\" downloads the whole file now and keeps it on this PC until you free it, e.g. a movie for tonight: it opens at once, even offline. In Explorer too: right-click a file in the drive → \"Show more options\" → \"Prepare on this PC (download all of it)\". After \"Free\", only the thumbnail and the details (like a video's length) stay, so the folder opens without downloads."),
             Theme.Small, Theme.Muted, 740);
-        localNote.Dock = DockStyle.Bottom;
-        localNote.Padding = new Padding(8, 6, 8, 2);
         _localState.Dock = DockStyle.Bottom;
-        _localState.Padding = new Padding(8, 2, 8, 6);
-        localTab.Controls.AddRange([_local, localNote, _localState, Legend(), localBar]);
+        _localState.Padding = new Padding(8, 4, 8, 2);
+        _localEmpty.Dock = DockStyle.Top;
+        _localEmpty.Padding = new Padding(10, 14, 10, 0);
+        _localEmpty.Visible = false;
+        localTab.Controls.AddRange([_local, _localEmpty, _localState, Help(localNote, Legend(uploading: false)), localBar]);
 
         _tabs.ImageList = _icons;
         _tabs.TabPages.AddRange([upTab, localTab]);
@@ -303,6 +415,14 @@ sealed class TransfersForm : Form
     {
         if (_tabs.SelectedIndex == 1 && !_demo) _ = ScanAsync(); // already on it: show what is there now
         _tabs.SelectedIndex = 1;
+    }
+
+    /// <summary>The files I prepared (the tray's "Files I prepared…", and the notice when C: runs low).</summary>
+    public void ShowPrepared()
+    {
+        _localSearch.Text = "";
+        _localFilter.SelectedIndex = 1;
+        ShowLocalTab();
     }
 
     /// <summary>Start refreshing (on its own it starts when shown; inside the main window, as a tab, it is called).</summary>
@@ -361,13 +481,13 @@ sealed class TransfersForm : Form
 
     static readonly int BarWidth = TextRenderer.MeasureText("100%  " + new string('\u25B0', 8), Ui.Font).Width + 36;
 
-    /// <summary>A file name as shown in the lists: a Hebrew name keeps its extension at its end (a mark
-    /// before the last dot), e.g. "עונה 1 פרק 3.mp4" and not "עונה 1 פרק mp4.3".</summary>
+    /// <summary>A file name as shown in the lists: a Hebrew name keeps its extension at its end (a right-to-
+    /// left mark before the last dot), e.g. "עונה 1 פרק 3.mp4" and "מצגת.pptx", not "מצגתpptx.".</summary>
     static string FileName(string name)
     {
         int dot = name.LastIndexOf('.');
         bool hebrew = name.Any(c => c >= '\u0590' && c <= '\u05FF');
-        return hebrew && dot > 0 ? name.Insert(dot, "\u200E") : L.Name(name);
+        return hebrew && dot > 0 ? name.Insert(dot, "\u200F") : L.Name(name);
     }
 
     static ListView NewList() => new()
@@ -442,12 +562,18 @@ sealed class TransfersForm : Form
         foreach (var d in drives)
             try { rows.AddRange(d.Session!.Engine.Uploads().Select(u => (d, u))); } catch { }
         var waitUntil = drives.Select(d => d.Session!.WaitingUntil).Where(w => w is not null).Max();
+        int all = rows.Count;
+        var search = _upSearch.Text;
         _up.BeginUpdate();
         var byKey = _up.Items.Cast<ListViewItem>().ToDictionary(i => i.Name);
         var keep = new HashSet<string>();
+        _upRank.Clear();
+        long rank = 0;
         foreach (var (d, u) in rows)
         {
             var key = d.State.Id + "/" + u.Id;
+            _upRank[key] = rank++; // the queue's order (oldest first)
+            if (!Matches(u.Name, search)) continue;
             keep.Add(key);
             if (!byKey.TryGetValue(key, out var item))
             {
@@ -472,14 +598,22 @@ sealed class TransfersForm : Form
             item.ToolTipText = d.Session!.FullPathOf(u.Id) + "\n" + UploadTip(u.State, state);
         }
         foreach (var gone in byKey.Keys.Where(k => !keep.Contains(k))) _up.Items.RemoveByKey(gone);
+        _upSort.Apply();
         _up.EndUpdate();
+        _upSort.Arrows();
+        FitColumns(_up);
         bool allConnected = _host.Drives.All(d => d.Session is not null && !d.Stopping);
         _upEmpty.Text = allConnected ? L.T("✓  אין העלאות כרגע. הכל שמור בטלגרם.", "✓  No uploads right now. Everything is saved in Telegram.")
             : drives.Count == 0 ? L.T("אין כונן מחובר כרגע. קבצים שממתינים להעלאה יעלו כשהכונן יתחבר.", "No drive is connected right now. Files waiting to upload go up when the drive connects.")
             : L.T("אין העלאות כרגע בכוננים המחוברים. קבצים של כונן שאינו מחובר יעלו כשהוא יתחבר.", "No uploads right now on the connected drives. Files of a drive that is not connected go up when it connects.");
         _upEmpty.ForeColor = allConnected ? Theme.Success : Theme.Muted;
-        _upEmpty.Visible = rows.Count == 0;
-        _up.Visible = rows.Count > 0;
+        if (all > 0 && keep.Count == 0)
+        {
+            _upEmpty.Text = L.T($"אין העלאות ששמן מכיל \"{search.Trim()}\".", $"No uploads whose name contains \"{search.Trim()}\".");
+            _upEmpty.ForeColor = Theme.Muted;
+        }
+        _upEmpty.Visible = keep.Count == 0;
+        _up.Visible = keep.Count > 0;
     }
 
     static string UploadTip(UploadState st, string state) => state + ": " + (st switch
@@ -547,6 +681,8 @@ sealed class TransfersForm : Form
 
     void Keys(KeyEventArgs e, ListView list, Action cancel, Action open)
     {
+        if (e.KeyCode == System.Windows.Forms.Keys.F5) { if (list == _local) _ = ScanAsync(); else RefreshNow(); e.Handled = true; return; }
+        if (e.Control && e.KeyCode == System.Windows.Forms.Keys.F) { (list == _local ? _localSearch : _upSearch).Focus(); e.Handled = true; return; }
         if (_demo && !(e.Control && e.KeyCode == System.Windows.Forms.Keys.A)) return;
         if (e.Control && e.KeyCode == System.Windows.Forms.Keys.A) { SelectAll(list); e.Handled = true; }
         else if (e.Control && e.KeyCode == System.Windows.Forms.Keys.C)
@@ -614,8 +750,8 @@ sealed class TransfersForm : Form
         _resumeSel.Enabled = sel.Any(x => x.U.State == UploadState.Paused);
         _cancelSel.Enabled = sel.Count > 0 && !_cancelling;
         var lsel = SelectedLocal().ToList();
-        _prepareSel.Text = Many(L.T("הכן את המסומנים", "Prepare selected"), lsel.Count);
-        _freeSel.Text = Many(L.T("פנה את המסומנים מהמחשב", "Free selected from this PC"), lsel.Count);
+        _prepareSel.Text = Many(L.T("הכן", "Prepare"), lsel.Count);
+        _freeSel.Text = Many(L.T("פנה מהמחשב", "Free from this PC"), lsel.Count);
         _prepareSel.Enabled = lsel.Any(r => r.Fraction < 0.999 || !r.Prepared);
         _freeSel.Enabled = lsel.Count > 0;
     }
@@ -741,7 +877,7 @@ sealed class TransfersForm : Form
     void PrepareSelected()
     {
         if (DemoSays()) return;
-        _host.PrepareFiles(SelectedLocal().Select(r => (r.Session, r.Id)));
+        _host.PrepareFiles(SelectedLocal().Select(r => (r.Session!, r.Id)));
         RefreshLocalProgress();
     }
 
@@ -750,7 +886,7 @@ sealed class TransfersForm : Form
         if (DemoSays()) return;
         var sel = SelectedLocal().ToList();
         if (sel.Count == 0) return;
-        await _host.FreeFiles(sel.Select(r => (r.Session, r.Id))); // the list is made again after the space is freed
+        await _host.FreeFiles(sel.Select(r => (r.Session!, r.Id))); // the list is made again after the space is freed
         if (!IsDisposed) await ScanAsync();
     }
 
@@ -763,6 +899,8 @@ sealed class TransfersForm : Form
         _scanning = true;
         _localState.Text = L.T("בודק מה נמצא במחשב הזה…", "Checking what is on this PC…");
         var drives = _host.Drives.Where(d => d.Session is not null && !d.Stopping).ToList();
+        var offline = _host.Drives.Where(d => d.Session is null && !d.Starting && !d.Stopping).ToList();
+        int total = 0;
         var preparing = _host.Preparer.Running.Select(j => (j.Session, j.Id)).ToHashSet();
         List<LocalRow> rows = [];
         long kept = 0, cache = 0, previews = 0;
@@ -793,6 +931,15 @@ sealed class TransfersForm : Form
                         }
                     }
                 }
+                // a drive that is not connected: what was prepared on this PC, from its local index
+                foreach (var d in offline)
+                    try
+                    {
+                        foreach (var p in OfflineCache.Prepared(d.State))
+                            list.Add(new LocalRow(d, null, p.Id, p.Name, p.Path, p.Size, 1, true, Offline: true));
+                    }
+                    catch (Exception ex) { Log.Debug($"transfers: {d.Name} (not connected): {ex.Message}"); }
+                total = list.Count;
                 return list.OrderByDescending(r => r.Prepared).ThenByDescending(r => r.Fraction).ThenBy(r => r.Name).Take(2000).ToList();
             });
         }
@@ -801,22 +948,56 @@ sealed class TransfersForm : Form
         if (_scanAgain && !IsDisposed) { _scanAgain = false; _ = ScanAsync(); return; }
         if (IsDisposed) return;
         _localRows = rows;
-        _local.BeginUpdate();
-        _local.Items.Clear();
-        foreach (var r in rows)
-        {
-            var item = new ListViewItem(FileName(r.Name)) { Tag = r, Name = r.Session.MountPoint + "/" + r.Id, ToolTipText = r.Path };
-            item.SubItems.AddRange([L.Ltr(r.Drive.Letter), Ui.Size(r.Size), "", ""]);
-            _local.Items.Add(item);
-        }
-        _local.EndUpdate();
-        RefreshLocalProgress();
-        _localState.Text = rows.Count == 0
-            ? (drives.Count == 0 ? L.T("אין כונן מחובר כרגע, ולכן אין מה להציג כאן.", "No drive is connected right now, so there is nothing to show here.")
-              : L.T("אין כרגע קבצים מהכוננים המחוברים במחשב הזה. קבצים שפותחים נשמרים כאן לזמן מה, וקובץ ש\"מכינים\" נשמר עד שמפנים אותו.",
-                  "No files of the connected drives are on this PC right now. Files you open are kept here for a while, and a file you \"prepare\" stays until you free it."))
+        _localTotal = total;
+        _localSizes = rows.Count == 0 && drives.Count == 0 ? ""
             : L.T($"קבצים שהוכנו תופסים {Ui.Size(kept)}. עותקים זמניים של קבצים שנפתחו: {Ui.Size(Math.Max(0, cache - kept))} (נמחקים לבד כשצריך מקום). תמונות ממוזערות ופרטים: {Ui.Size(previews)}.",
                   $"Prepared files take {Ui.Size(kept)}. Temporary copies of files you opened: {Ui.Size(Math.Max(0, cache - kept))} (removed by themselves when space is needed). Thumbnails and details: {Ui.Size(previews)}.");
+        _anyConnected = drives.Count > 0;
+        FillLocal();
+    }
+
+    string _localSizes = "";
+    bool _anyConnected;
+
+    /// <summary>The files list from the last scan, through the filter and the search (no new scan); what was
+    /// chosen stays chosen, the sort stays.</summary>
+    void FillLocal()
+    {
+        if (_demo) return;
+        var chosen = _local.SelectedItems.Cast<ListViewItem>().Select(i => i.Name).ToHashSet();
+        var search = _localSearch.Text;
+        var shown = _localRows.Where(r => _localFilter.SelectedIndex switch { 1 => r.Prepared, 2 => !r.Prepared, _ => true } && Matches(r.Name, search)).ToList();
+        _local.BeginUpdate();
+        _local.Items.Clear();
+        _localRank.Clear();
+        long rank = 0;
+        foreach (var r in shown)
+        {
+            var key = r.Drive.State.Id + "/" + r.Id;
+            _localRank[key] = rank++;
+            var item = new ListViewItem(FileName(r.Name)) { Tag = r, Name = key, ToolTipText = r.Path };
+            item.SubItems.AddRange([L.Ltr(r.Drive.Letter), Ui.Size(r.Size), "", ""]);
+            _local.Items.Add(item);
+            if (chosen.Contains(key)) item.Selected = true;
+        }
+        _localSort.Apply();
+        _local.EndUpdate();
+        _localSort.Arrows();
+        FitColumns(_local);
+        RefreshLocalProgress();
+        bool filtered = _localFilter.SelectedIndex != 0 || search.Trim().Length > 0;
+        _localEmpty.Text = _localRows.Count == 0
+            ? (_anyConnected ? L.T("אין כרגע קבצים מהכוננים במחשב הזה. קבצים שפותחים נשמרים כאן לזמן מה, וקובץ ש\"מכינים\" נשמר עד שמפנים אותו.",
+                    "No files of the drives are on this PC right now. Files you open are kept here for a while, and a file you \"prepare\" stays until you free it.")
+                : L.T("אין כונן מחובר, ולא הוכנו קבצים במחשב הזה.", "No drive is connected, and no files were prepared on this PC."))
+            : L.T("אין קבצים שמתאימים לחיפוש או לסינון.", "No files match the search or the filter.");
+        _localEmpty.Visible = shown.Count == 0;
+        _local.Visible = shown.Count > 0;
+        var count = filtered || _localTotal > _localRows.Count
+            ? L.T($"מוצגים {shown.Count:N0} מתוך {_localTotal:N0} קבצים ({Ui.Size(shown.Sum(r => r.Size))}). ", $"Showing {shown.Count:N0} of {_localTotal:N0} files ({Ui.Size(shown.Sum(r => r.Size))}). ")
+            : L.T($"{shown.Count:N0} קבצים ({Ui.Size(shown.Sum(r => r.Size))}). ", $"{shown.Count:N0} files ({Ui.Size(shown.Sum(r => r.Size))}). ");
+        if (_localTotal > _localRows.Count) count += L.T("אפשר לחפש לפי שם. ", "You can search by name. ");
+        _localState.Text = (_localRows.Count == 0 ? "" : count) + _localSizes;
         UpdateButtons();
     }
 
@@ -826,9 +1007,18 @@ sealed class TransfersForm : Form
         foreach (ListViewItem item in _local.Items)
         {
             if (item.Tag is not LocalRow r) continue;
+            if (r.Offline)
+            {
+                item.SubItems[3].Text = "—";
+                (item.ImageKey, item.SubItems[4].Text) = ("offline", L.T("הוכן (הכונן לא מחובר)", "Prepared (the drive is not connected)"));
+                item.ToolTipText = r.Path + "\n" + L.T("הקובץ הוכן במחשב הזה. הכונן לא מחובר כרגע, ולכן אפשר לפתוח אותו רק אחרי שהכונן יתחבר.",
+                    "The file was prepared on this PC. The drive is not connected right now, so it opens only once the drive connects.");
+                continue;
+            }
             if (!_demo && _host.Drives.FirstOrDefault(x => x.State.Id == r.Drive.State.Id && x.Session is not null) is { } now
                 && now.Session != r.Session)
                 item.Tag = r = r with { Drive = now, Session = now.Session! }; // reconnected since the list was made
+            if (r.Session is null) continue;
             var running = _host.Preparer.ProgressOf(r.Session, r.Id);
             if (running is { } p && p > r.Fraction) item.Tag = r = r with { Fraction = p };
             bool prepared = r.Session.Engine.IsPrepared(r.Id);
