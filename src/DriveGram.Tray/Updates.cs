@@ -16,6 +16,11 @@ sealed record UpdateInfo(Version Version, string Tag, string Notes, string PageU
 /// after the app starts; half an hour after a failed look). It sends nothing about the user: a plain
 /// request named "DriveGram". Only published releases count (not drafts or pre-releases).
 /// The installer is taken only from this project's own release downloads, and only when its SHA-256 is known.
+///
+/// TODO (when DriveGram has many users): sign releases with an offline key. The SHA-256 here only proves the
+/// file is the one published on GitHub; whoever controls the GitHub account could publish another one.
+/// Deferred on purpose by the owner (2026-11-26); the plan and its one-way consequences are in CLAUDE.md,
+/// "Updates and releases".
 /// </summary>
 sealed class Updates
 {

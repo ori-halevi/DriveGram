@@ -45,6 +45,14 @@ WinFsp 2.1 + C# (.NET 10): `src/DriveGram.Core` (engine, index, Telegram), `src/
   is out (`src/DriveGram.Tray/Updates.cs`): a menu line, a bar in the main window, one notice per version,
   "skip this version". "Download and install" fetches the release's `DriveGram-Setup-*.exe` and checks it
   against the SHA-256 written in the release notes.
+- **Deferred on purpose (2026-11-26): signing releases.** Today the installer is trusted because it comes
+  from this repo's release downloads over TLS and matches GitHub's own SHA-256 of it. Whoever controls the
+  GitHub account (a stolen login or token) could therefore publish an installer that every copy offers.
+  The user decided not to sign for now, and to do it **once the app has many users**: an offline Ed25519 key
+  (kept off GitHub and off the build PC), the public key built into the tray, a signature asset next to the
+  installer, and "Download and install" refusing without a valid one. The public key is permanent once
+  shipped (losing the private key breaks one-click updates for every installed copy): raise this with the
+  user before the first signed release. Until then, GitHub two-factor sign-in is the protection.
 - Publishing is public and outward-facing: **only when the user asks** ("תפרסם"). After a build:
   `publish-release.cmd <version> <notes.md>` (appends the SHA-256, runs `gh release create`). Notes in
   Hebrew, short, what changed for the user.
