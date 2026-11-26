@@ -2,7 +2,7 @@
 rem Builds dist\DriveGram-Setup-<version>.exe : self-contained app + WinFsp, Hebrew installer.
 setlocal
 cd /d "%~dp0"
-set VERSION=1.6.1
+set VERSION=1.7.0
 set WINFSP=winfsp-2.1.25156.msi
 set WINFSP_SHA256=073a70e00f77423e34bed98b86e600def93393ba5822204fac57a29324db9f7a
 set ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe

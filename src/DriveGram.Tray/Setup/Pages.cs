@@ -139,10 +139,12 @@ sealed class ApiPage : WizardPage
         }
     }
 
+    public override bool SkipsAhead => !_entered && Valid;
+
     public override Task EnterAsync()
     {
         UpdateState();
-        _autoSkip = !_entered && Valid; // already configured: straight to sign-in (Back still reaches this page)
+        _autoSkip = !_entered && Valid; // already configured: straight to sign-in (a link there leads back here)
         _entered = true;
         return Task.CompletedTask;
     }
@@ -165,7 +167,15 @@ sealed class ApiPage : WizardPage
 // ── 3. Telegram sign-in ─────────────────────────────────────────────────────
 sealed class LoginPage : WizardPage
 {
-    public override string NextText => Ctx.AccountOnly ? L.T("המשך לבחירת כונן", "Continue to choosing a drive") : base.NextText;
+    public override string NextText => Ctx.AccountOnly ? L.T("המשך לכוננים בחשבון", "Continue to the account's drives") : base.NextText;
+    // an existing drive that is signed in already (e.g. "choose another drive"): straight on, once
+    bool _autoUsed, _wasSignedOut, _freshDone;
+    public override bool AutoNext { get { bool a = !Ctx.IsNew && !Ctx.FreshSignIn && Ctx.User is not null && !_autoUsed; if (a) _autoUsed = true; return a; } }
+    readonly LinkLabel _apiLink = new()
+    {
+        Text = L.T("פרטי ה־API של טלגרם שכבר הוזנו משמשים גם כאן  ·  שינוי", "The Telegram API details entered before are used here too  ·  change"),
+        AutoSize = true, LinkColor = Theme.Accent, Font = Theme.Small, Margin = new Padding(0, 0, 0, 10), Visible = false,
+    };
     readonly Panel _account = Theme.Card(Color.FromArgb(0xEC, 0xF7, 0xEE), Color.FromArgb(0xB7, 0xDF, 0xC0));
     readonly Label _accountText = Theme.Label("", Theme.Body, Theme.Text, 600);
     readonly FlowLayoutPanel _signIn = Theme.Column();
@@ -222,6 +232,7 @@ sealed class LoginPage : WizardPage
     {
         var col = Theme.Column();
 
+        _apiLink.LinkClicked += (_, _) => RequestPage(typeof(ApiPage));
         var switchAcc = new LinkLabel { Text = L.T("התחבר עם חשבון אחר", "Use a different account"), AutoSize = true, LinkColor = Theme.Accent, Font = Theme.Small };
         switchAcc.LinkClicked += async (_, _) => await SwitchAccountAsync();
         var accCol = Theme.Column();
@@ -288,7 +299,7 @@ sealed class LoginPage : WizardPage
         EnterClicks(_codeBox, _verify);
         EnterClicks(_twoFaBox, _twoFaOk);
 
-        _signIn.Controls.AddRange([methods, _qr, _phone]);
+        _signIn.Controls.AddRange([_apiLink, methods, _qr, _phone]);
         _known.Visible = false;
         col.Controls.AddRange([_account, _known, _signIn, _twoFa, _error, _enterRetry]);
         _enterRetry.Visible = false;
@@ -322,6 +333,14 @@ sealed class LoginPage : WizardPage
     {
         _error.Text = "";
         _enterRetry.Visible = false;
+        _apiLink.Visible = Ctx.ApiSkipped;
+        if (Ctx.FreshSignIn && !_freshDone)
+        {
+            // "sign in with another account": no current account shown as signed in
+            _freshDone = true;
+            await SwitchAccountAsync(ask: false);
+            return;
+        }
         if (Ctx.User is not null) { ShowSignedIn(Ctx.User); return; }
         try
         {
@@ -334,6 +353,7 @@ sealed class LoginPage : WizardPage
             // or every new attempt would run on the dead session again
             _revoked = Ctx.State.Config.AccountKey;
             Ctx.ResetClient(signOut: true);
+            _wasSignedOut = true;
             _account.Visible = false;
             _signIn.Visible = true;
             ShowKnownAccounts();
@@ -341,6 +361,7 @@ sealed class LoginPage : WizardPage
         }
         catch (NotSignedInException)
         {
+            _wasSignedOut = true;
             _account.Visible = false;
             _signIn.Visible = true;
             ShowKnownAccounts();
@@ -392,6 +413,13 @@ sealed class LoginPage : WizardPage
 
     void ShowSignedIn(TL.User user)
     {
+        if (_wasSignedOut)
+        {
+            // the user just signed in here: it is shared at once, and the page has nothing more to ask
+            _wasSignedOut = false;
+            Ctx.SignedInHere = true;
+            if (!Ctx.IsNew || Ctx.AccountOnly) BeginInvoke(RequestNext);
+        }
         Ctx.User = user;
         _qrCts?.Cancel();
         _tick.Stop();
@@ -632,12 +660,13 @@ sealed class LoginPage : WizardPage
         }
     }
 
-    async Task SwitchAccountAsync()
+    async Task SwitchAccountAsync(bool ask = true)
     {
-        if (Ui.Ask(L.T("להתנתק מהחשבון הנוכחי ולהתחבר עם חשבון אחר?", "Sign out of this account and use a different one?"),
+        if (ask && Ui.Ask(L.T("להתנתק מהחשבון הנוכחי ולהתחבר עם חשבון אחר?", "Sign out of this account and use a different one?"),
                 def: MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
         _revoked = Ctx.State.Config.AccountKey; // signing out now: not offered again on this page
         await Task.Run(() => Ctx.ResetClient(signOut: true));
+        _wasSignedOut = true;
         Ctx.State.Config.Channels = null; // the drive lives on the other account
         Ctx.State.Config.AccountId = 0;
         Ctx.State.Config.AccountName = "";
@@ -711,7 +740,8 @@ sealed class DrivePage : WizardPage
     /// (a queued drive got them from the page that queued it).</summary>
     bool ChoosesAll => Ctx.DrivePageFinishes && Ctx.Current is not { Candidate: not null };
 
-    public override string NextText => !ChoosesAll || _mode is not (Mode.Connect or Mode.Create) ? base.NextText
+    public override string NextText => !Ctx.IsNew ? L.T("חיבור הכונן", "Connect the drive")
+        : !ChoosesAll || _mode is not (Mode.Connect or Mode.Create) ? base.NextText
         : Ticked.Count + (_newTick?.Checked == true ? 1 : 0) > 1 ? L.T("סיום וחיבור הכוננים", "Finish and connect the drives")
         : L.T("סיום וחיבור הכונן", "Finish and connect");
 
@@ -732,6 +762,11 @@ sealed class DrivePage : WizardPage
     TelegramChannels? _createdChannels; // this run already created the new drive's channels (a retry reuses them)
     string? _createdDriveId, _createdFor; // ...on this account
     public override bool Skip => _autoDone;
+    bool _connectedAutoUsed, _committed;
+    // an existing drive already set (password remembered): nothing to ask, so on by itself, once
+    public override bool AutoNext { get { bool a = !Ctx.IsNew && _mode == Mode.Connected && !_connectedAutoUsed; if (a) _connectedAutoUsed = true; return a; } }
+    // after this PC switched to another drive (its old local data is reset), there is no going back
+    public override bool CanGoBack => !_committed;
 
     // a new drive's piece size (fixed for the drive's life)
     readonly RadioButton _chunk32 = new() { Text = L.T("32 MB (מומלץ)", "32 MB (recommended)"), AutoSize = true, Checked = true, Margin = new Padding(0, 2, 0, 2) };
@@ -754,7 +789,7 @@ sealed class DrivePage : WizardPage
     {
         var col = Theme.Column();
         _connected.Controls.Add(Theme.Label(L.T("✓  המחשב הזה כבר מחובר לכונן, והסיסמה שמורה בו.", "✓  This PC is already connected to the drive, and its password is remembered."), Theme.Heading, Theme.Success));
-        _connected.Controls.Add(Theme.Label(L.T("אפשר להמשיך לשלב האחרון.", "Continue to the last step."), Theme.Body, Theme.Muted));
+        _connected.Controls.Add(Theme.Label(L.T("DriveGram מתחבר אליו עכשיו.", "DriveGram connects to it now."), Theme.Body, Theme.Muted));
         _connected.Visible = false;
 
         var vcol = Theme.Column();
@@ -817,7 +852,7 @@ sealed class DrivePage : WizardPage
         _settingsRow.Controls.AddRange([_remember, _rememberInfo]);
         _autostart.Margin = new Padding(0, 6, 0, 2);
         // the first drive on this PC: on (later drives keep what the user chose; the tray menu has it too)
-        _askAutostart = ChoosesAll && !AppState.All().Any(a => a.Dir != Ctx.State.Dir);
+        _askAutostart = false; // starting with Windows is in the icon's menu; the first drive turns it on by itself
         _autostart.Visible = _askAutostart;
         _newLetterRow.Visible = ChoosesAll;
         _form.Controls.AddRange([_intro, _createGroup, _settingsRow, _autostart, _error]);
@@ -1443,7 +1478,11 @@ sealed class DrivePage : WizardPage
     // ── next ─────────────────────────────────────────────────────────────────
     public override async Task<bool> NextAsync()
     {
-        if (_mode == Mode.Connected) return true;
+        if (_mode == Mode.Connected)
+        {
+            if (!Ctx.IsNew) Ctx.State.Save(); // an existing drive has no last page: its sign-in is kept here
+            return true;
+        }
         _error.Text = "";
         var pw = PwBox.Text;
         var cfg = Ctx.State.Config;
@@ -1472,6 +1511,11 @@ sealed class DrivePage : WizardPage
                     " (only on this PC for now). Connect it first (sign in again if needed) and wait for the upload to finish, or remove it from this PC.");
                 return false;
             }
+            else if (!Ctx.IsNew && Ui.Ask(L.T(
+                    "המחשב הזה יעבור לכונן שבחרת. הנתונים המקומיים של הכונן הקודם יימחקו מהמחשב (הקבצים שלו נשארים בטלגרם). אי אפשר לבטל את זה.\n\nלהמשיך?",
+                    "This PC switches to the drive you chose. The previous drive's local data is deleted from this PC (its files stay in Telegram). This cannot be undone.\n\nContinue?"),
+                    icon: MessageBoxIcon.Warning, def: MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+                return false;
         }
         else if (rebinding)
         {
@@ -1500,6 +1544,7 @@ sealed class DrivePage : WizardPage
         void ResetIfRebinding()
         {
             if (!rebinding) return;
+            _committed = true;
             Ctx.State.ResetLocalData();
             rebinding = false;
             _wasVanished = false;
@@ -1706,7 +1751,9 @@ sealed class FinishPage : WizardPage
         // the drives queued from the drive page get the same drive type
         for (int i = 0; i < Ctx.Queue.Count; i++)
             if (Ctx.Queue[i] is { Letter: not null, Network: null } q) Ctx.Queue[i] = q with { Network = _network.Checked };
-        if (Ctx.IsNew) try { ShellIntegration.SetAutostart(Ctx.PresetAutostart ?? _autostart.Checked); }
+        // the first drive on this PC starts DriveGram with Windows; later ones leave the user's choice (tray menu) alone
+        if (Ctx.IsNew && !AppState.All().Any(a => a.Dir != Ctx.State.Dir))
+            try { ShellIntegration.SetAutostart(Ctx.PresetAutostart ?? _autostart.Checked); }
         catch (Exception ex) { Log.Warn($"autostart: {ex.Message}"); }
         return Task.FromResult(true);
     }

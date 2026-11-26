@@ -52,6 +52,15 @@ sealed class SetupContext : IDisposable
     public bool AccountOnly { get; init; }
     /// <summary>The user chose another language on the first page: open the wizard again in it.</summary>
     public bool RestartForLanguage { get; set; }
+    /// <summary>The API details were already known, so their page was not shown (the sign-in page offers
+    /// a link to change them instead).</summary>
+    public bool ApiSkipped { get; set; }
+    /// <summary>Sign in with a different account (from "move to another Telegram account"): the sign-in page
+    /// starts signed out instead of showing the current account.</summary>
+    public bool FreshSignIn { get; init; }
+    /// <summary>Someone signed in to Telegram in this run (it is shared at once: closing the window after it
+    /// still counts as signed in).</summary>
+    public bool SignedInHere { get; set; }
     /// <summary>The account this run's drive is on, to add more drives on it without a new sign-in.</summary>
     public AccountInfo? Account => UsesTelegram && !string.IsNullOrEmpty(State.Config.AccountKey)
         ? new AccountInfo(State.Config.AccountKey, State.Config.AccountId, State.Config.AccountName, State.Config.ApiId, State.Config.ApiHash)
@@ -177,6 +186,16 @@ abstract class WizardPage : UserControl
     public virtual Task<bool> NextAsync() => Task.FromResult(true);
     /// <summary>Skip this page entirely right now (e.g. already configured).</summary>
     public virtual bool Skip => false;
+    /// <summary>Known before the page is reached: it will be skipped (not counted in "step N of M").</summary>
+    public virtual bool SkipsAhead => false;
+    /// <summary>False after this page did something that cannot be undone: no "Back" from here.</summary>
+    public virtual bool CanGoBack => true;
+    /// <summary>The page finished its work by itself (e.g. a sign-in): go on as if Next was pressed.</summary>
+    public event Action? NextRequested;
+    protected void RequestNext() => NextRequested?.Invoke();
+    /// <summary>The page asks the wizard to show another page of this run (e.g. "change the API details").</summary>
+    public event Action<Type>? PageRequested;
+    protected void RequestPage(Type page) => PageRequested?.Invoke(page);
     /// <summary>Everything on this page is already decided: go on by itself once (Back still shows it).</summary>
     public virtual bool AutoNext => false;
     /// <summary>False for a page that only finishes what an earlier page chose (not in "step N of M").</summary>
@@ -215,16 +234,19 @@ sealed class SetupWizard : Form
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public string? SnapshotDir { get; init; }
 
+    /// <param name="title">The window's title for this way in (null: by the kind of run).</param>
     public SetupWizard(AppState state, bool isNew, TelegramChannels? originalChannels = null,
-        NextDrive? next = null, List<NextDrive>? queue = null, bool accountOnly = false, bool firstRun = false)
+        NextDrive? next = null, List<NextDrive>? queue = null, bool accountOnly = false, bool firstRun = false,
+        string? title = null, bool freshSignIn = false)
     {
-        _ctx = new SetupContext(state, isNew, originalChannels) { Current = next, Queue = queue ?? [], AccountOnly = accountOnly };
+        _ctx = new SetupContext(state, isNew, originalChannels) { Current = next, Queue = queue ?? [], AccountOnly = accountOnly, FreshSignIn = freshSignIn };
         if (next?.Account is { } sameAccount) _ctx.UseAccount(sameAccount); // the same account: no API details, no sign-in
         int more = next is null ? 0 : _ctx.Queue.Count;
         Text = accountOnly ? L.T("DriveGram – הוספת חשבון טלגרם", "DriveGram – add a Telegram account")
             : next is { CreateNew: true } ? L.T("DriveGram – כונן חדש", "DriveGram – new drive")
             : next is not null ? L.T("DriveGram – כוננים בחשבון ", "DriveGram – drives on ") + (next.Account is { } na ? L.Name(na.Name) : "") + (more > 0 ? L.N(more, " (ועוד אחד אחריו)", " (ועוד {0} אחריו)", " (1 more after it)", " ({0} more after it)") : "")
             : isNew ? L.T("DriveGram – כונן חדש", "DriveGram – new drive") : L.T($"DriveGram – הגדרות הכונן {Ui.DriveTitle(state)}", $"DriveGram – drive settings: {state.DisplayName}");
+        if (title is not null) Text = title;
         RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No;
         RightToLeftLayout = L.Rtl;
         Font = Theme.Body;
@@ -245,9 +267,20 @@ sealed class SetupWizard : Form
             : _ctx.UsesTelegram
             ? [new WelcomePage(_ctx), new ApiPage(_ctx), new LoginPage(_ctx), new DrivePage(_ctx), new FinishPage(_ctx)]
             : [new WelcomePage(_ctx), new DrivePage(_ctx), new FinishPage(_ctx)];
-        if (!isNew && next is null && !accountOnly) pages.RemoveAt(0); // changing a drive's settings: no welcome tour
+        if (!isNew && next is null && !accountOnly)
+        {
+            pages.RemoveAt(0); // an existing drive: no welcome tour,
+            pages.RemoveAll(p => p is FinishPage); // and no last page (its letter, name and type have their own windows)
+        }
         _pages = pages;
-        foreach (var p in _pages) { p.StateChanged += UpdateButtons; p.Busy = SetBusy; }
+        foreach (var p in _pages)
+        {
+            p.StateChanged += UpdateButtons;
+            p.Busy = SetBusy;
+            var page = p;
+            p.NextRequested += async () => { if (_index >= 0 && _pages[_index] == page && !_busy) await GoNextAsync(); };
+            p.PageRequested += async t => { if (!_busy && _pages.FindIndex(x => x.GetType() == t) is >= 0 and var i) await GoAsync(i, 0); };
+        }
 
         // header: logo on the reading-start side, step counter on the other
         var header = _header = new Panel { Dock = DockStyle.Top, Height = 118, BackColor = Color.White, Padding = new Padding(32, 18, 32, 0) };
@@ -282,7 +315,7 @@ sealed class SetupWizard : Form
         Controls.AddRange([_host, header, footer]);
         AcceptButton = _next;
         _next.Click += async (_, _) => await GoNextAsync();
-        _back.Click += async (_, _) => await GoAsync(_index - 1, -1);
+        _back.Click += async (_, _) => { if (_history.Count >= 2) await GoAsync(_history[^2], 0); };
         _cancel.Click += (_, _) => { DialogResult = DialogResult.Cancel; Close(); };
         FormClosing += (_, e) =>
         {
@@ -340,22 +373,31 @@ sealed class SetupWizard : Form
         if (direction != 0 && page.Skip && index + direction >= 0 && index + direction < _pages.Count)
         {
             _skipped.Add(page); // not counted in "step N of M"
+            if (page is ApiPage) _ctx.ApiSkipped = true;
             await GoAsync(index + direction, direction);
         }
         else
         {
+            // the pages shown in this run, in order: Back goes to the one before (a page shown again
+            // drops what came after it, e.g. back on the sign-in page after changing the API details)
+            int at = _history.IndexOf(index);
+            if (at >= 0) _history.RemoveRange(at + 1, _history.Count - at - 1); else _history.Add(index);
             if (_skipped.Remove(page)) UpdateStep();
+            UpdateButtons();
             if (direction > 0 && page.AutoNext) await GoNextAsync();
         }
     }
 
     readonly HashSet<WizardPage> _skipped = [];
+    readonly List<int> _history = [];
 
     /// <summary>"Step N of M", without pages that were skipped (e.g. API details already known).</summary>
     void UpdateStep()
     {
-        int total = _pages.Count(p => !_skipped.Contains(p) && p.Counted);
-        int step = Math.Min(total, _pages.Take(_index + 1).Count(p => !_skipped.Contains(p) && p.Counted));
+        bool Shows(WizardPage p) => p.Counted && !_skipped.Contains(p) && !(p.SkipsAhead && !_history.Contains(_pages.IndexOf(p)));
+        int total = _pages.Count(Shows);
+        int step = Math.Min(total, _pages.Take(_index + 1).Count(Shows));
+        _step.Visible = _progress.Visible = total > 1; // one page: no "step 1 of 1"
         _step.Text = L.T($"שלב {step} מתוך {total}", $"Step {step} of {total}");
         _progressFill.Width = (int)(_progress.Width * (double)step / Math.Max(1, total)); // the line, not the window: it is inset
     }
@@ -424,7 +466,8 @@ sealed class SetupWizard : Form
         FitHeader();
         _next.Text = page.NextText;
         _next.Enabled = page.CanGoNext && !_busy;
-        _back.Enabled = _index > 0 && !_busy;
-        _back.Visible = _index > 0;
+        bool back = _history.Count >= 2 && page.CanGoBack;
+        _back.Enabled = back && !_busy;
+        _back.Visible = back;
     }
 }

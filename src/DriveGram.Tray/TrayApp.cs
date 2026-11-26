@@ -590,7 +590,10 @@ sealed class TrayApp : ApplicationContext, IMainHost
     // ── setup / add / remove ─────────────────────────────────────────────────
     /// <summary>Open the wizard for a drive (or a new one); mount when it finishes. next/queue: more drives
     /// added in the same sitting, on the same account (each run adds one; the queue continues after it).</summary>
-    async Task SetupAsync(DriveController? d, Setup.NextDrive? next = null, List<Setup.NextDrive>? queue = null)
+    /// <param name="chooseOther">"Choose another drive of the account": the list of drives, no sign-in.</param>
+    /// <param name="freshSignIn">"Sign in with another account" (moving a drive): the sign-in starts signed out.</param>
+    async Task SetupAsync(DriveController? d, Setup.NextDrive? next = null, List<Setup.NextDrive>? queue = null,
+        bool chooseOther = false, bool freshSignIn = false)
     {
         if (_wizard is { IsDisposed: false })
         {
@@ -615,9 +618,9 @@ sealed class TrayApp : ApplicationContext, IMainHost
         // the drive this profile's local data belongs to: choosing any other one resets that data (and
         // first checks for files that exist only here) — also when the list is shown because of a mismatch
         var originalChannels = state.Config.Channels;
-        if (d?.MustChooseDrive == true)
+        if (d?.MustChooseDrive == true || chooseOther)
         {
-            state.Config.Channels = null; // its data channel did not match: show the drives to choose from
+            state.Config.Channels = null; // show the drives to choose from (its data channel did not match, or asked)
             state.Config.DriveId = "";
         }
         bool isNew = d is null;
@@ -626,9 +629,17 @@ sealed class TrayApp : ApplicationContext, IMainHost
         string? createdDriveId = null;
         bool restartForLanguage;
         List<Setup.NextDrive> after;
-        using (_wizard = new Setup.SetupWizard(state, isNew, originalChannels, next, queue))
+        // the window says what this run is for (the menu item that opened it)
+        string? title = d is null ? null
+            : chooseOther ? L.T($"DriveGram – בחירת כונן אחר בחשבון ({Ui.DriveTitle(d.State)})", $"DriveGram – choose another drive of the account ({d.State.DisplayName})")
+            : freshSignIn ? L.T($"DriveGram – התחברות לחשבון טלגרם אחר ({Ui.DriveTitle(d.State)})", $"DriveGram – sign in with another Telegram account ({d.State.DisplayName})")
+            : d.MustChooseDrive ? L.T($"DriveGram – בחירת הכונן מחדש ({Ui.DriveTitle(d.State)})", $"DriveGram – choose the drive again ({d.State.DisplayName})")
+            : L.T($"DriveGram – התחברות לטלגרם ({Ui.DriveTitle(d.State)})", $"DriveGram – Telegram sign-in ({d.State.DisplayName})");
+        bool signedInHere;
+        using (_wizard = new Setup.SetupWizard(state, isNew, originalChannels, next, queue, title: title, freshSignIn: freshSignIn))
         {
             result = _wizard.ShowDialog();
+            signedInHere = _wizard.Context.SignedInHere;
             wizardKeys = _wizard.Context.UnlockedKeys;
             createdDriveId = _wizard.Context.CreatedDriveId;
             restartForLanguage = _wizard.Context.RestartForLanguage;
@@ -684,6 +695,14 @@ sealed class TrayApp : ApplicationContext, IMainHost
                 }
                 finally { UpdateIcon(); }
             }
+        }
+        // signed in, then the window was closed: the sign-in is shared already, and this drive's own record did
+        // not change, so it counts as done (the drive connects; others on the account too)
+        if (result != DialogResult.OK && !isNew && signedInHere && !rebound && state.Config.Channels is not null
+            && state.Config.Channels.JournalId == originalChannels?.JournalId)
+        {
+            state.Save();
+            result = DialogResult.OK;
         }
         if (result != DialogResult.OK && !rebound)
         {
@@ -1875,7 +1894,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
         if (d.SwitchAccount is { IsDisposed: false }) { d.SwitchAccount.Activate(); return; }
         var f = new SwitchAccountForm(d.State);
         f.OpenBackup += () => ShowBackup(d);
-        f.SignInAnother += () => { f.Close(); _ = SetupAsync(d); };
+        f.SignInAnother += () => { f.Close(); _ = SetupAsync(d, freshSignIn: true); };
         f.AccountChosen += a => SwitchAccountAsync(d, a);
         d.SwitchAccount = f;
         f.Show();
@@ -2129,7 +2148,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
             list.Add(Item(L.T("העבר לחשבון טלגרם אחר…", "Move to another Telegram account…"), () => ShowSwitchAccount(d), !d.Starting && !d.Stopping));
         }
         if (!d.NeedsSetup) // the full wizard: another drive of the account, or signing in again (rare)
-            list.Add(Item(L.T("התחברות מחדש או בחירת כונן אחר…", "Sign in again, or choose another drive…"), async () => await SetupAsync(d), idle));
+            list.Add(Item(L.T("בחירת כונן אחר בחשבון…", "Choose another drive of the account…"), async () => await SetupAsync(d, chooseOther: true), idle));
         list.Add(new ToolStripSeparator());
         list.Add(Item(L.T("הסר מהמחשב הזה…", "Remove from this PC…"), async () => await RemoveAsync(d), idle));
         // never offered while the drive's pairing is in doubt (it could name another drive's data)

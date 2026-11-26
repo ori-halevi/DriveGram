@@ -9,8 +9,8 @@ using Fsp.Interop;
 namespace DriveGram.Host;
 
 public sealed class DrivePairingException() : Exception(L.T(
-    "ערוץ הקבצים לא שייך לערוץ היומן של הכונן הזה (אולי זה ערוץ של כונן אחר עם אותו שם). בתפריט של הכונן בחר \"התחברות לטלגרם…\" (או \"התחברות מחדש או בחירת כונן אחר…\") ובחר את הכונן מחדש.",
-    "The data channel does not belong to this drive's journal channel (perhaps it is another drive's channel with the same name). In the drive's menu choose \"Telegram sign-in…\" (or \"Sign in again, or choose another drive…\") and choose the drive again."));
+    "ערוץ הקבצים לא שייך לערוץ היומן של הכונן הזה (אולי זה ערוץ של כונן אחר עם אותו שם). בתפריט של הכונן בחר \"התחברות לטלגרם…\" ובחר את הכונן מחדש.",
+    "The data channel does not belong to this drive's journal channel (perhaps it is another drive's channel with the same name). In the drive's menu choose \"Telegram sign-in…\" and choose the drive again."));
 public sealed class WinFspMissingException() : Exception(L.T(
     $"WinFsp לא מותקן, ובלעדיו הכונן לא יכול לעבוד. הפעל שוב את התקנת DriveGram (או התקן אותו מהכתובת {L.Ltr("https://winfsp.dev/rel")}), ואז לחץ \"חבר\" בתפריט של הכונן.",
     "WinFsp is not installed, and the drive cannot work without it. Run the DriveGram installer again (or install it from https://winfsp.dev/rel), then click \"Connect\" in the drive's menu."));
