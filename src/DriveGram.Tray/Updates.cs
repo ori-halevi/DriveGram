@@ -19,8 +19,8 @@ sealed record UpdateInfo(Version Version, string Tag, string Notes, string PageU
 ///
 /// TODO (when DriveGram has many users): sign releases with an offline key. The SHA-256 here only proves the
 /// file is the one published on GitHub; whoever controls the GitHub account could publish another one.
-/// Deferred on purpose by the owner (2026-11-26); the plan and its one-way consequences are in CLAUDE.md,
-/// "Updates and releases".
+/// Deferred on purpose by the owner (2026-11-26), together with turning on GitHub's "Immutable releases";
+/// the plan and its one-way consequences are in CLAUDE.md, "Updates and releases".
 /// </summary>
 sealed class Updates
 {

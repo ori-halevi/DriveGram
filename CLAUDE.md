@@ -50,7 +50,6 @@ WinFsp 2.1 + C# (.NET 10): `src/DriveGram.Core` (engine, index, Telegram), `src/
 - The version that ships is `VERSION` in build-installer.cmd (passed to dotnet and Inno); keep the csproj and
   .iss defaults in step. build-installer.cmd records the commit it built (`dist\*.commit`), and
   publish-release.cmd refuses a mismatch, uncommitted/untracked files, or a commit not yet on GitHub.
-- Suggested to the owner (not code): turn on "Immutable releases" in the repo settings.
 - **Deferred on purpose (2026-11-26): signing releases.** Today the installer is trusted because it comes
   from this repo's release downloads over TLS and matches GitHub's own SHA-256 of it. Whoever controls the
   GitHub account (a stolen login or token) could therefore publish an installer that every copy offers.
@@ -59,6 +58,10 @@ WinFsp 2.1 + C# (.NET 10): `src/DriveGram.Core` (engine, index, Telegram), `src/
   installer, and "Download and install" refusing without a valid one. The public key is permanent once
   shipped (losing the private key breaks one-click updates for every installed copy): raise this with the
   user before the first signed release. Until then, GitHub two-factor sign-in is the protection.
+  Also deferred to the same moment (the owner's decision, 2026-11-26): turning on **"Immutable releases"**
+  in the repo settings (a published release's files can then never be replaced, not even from the owner's
+  account). The owner wants releases editable until the app is public and widely used; publish-release.cmd
+  already works either way.
 - Publishing is public and outward-facing: **only when the user asks** ("תפרסם"). After a build:
   `publish-release.cmd <version> <notes.md>` (appends the SHA-256, runs `gh release create`). Notes in
   Hebrew, short, what changed for the user.
