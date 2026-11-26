@@ -40,5 +40,14 @@ WinFsp 2.1 + C# (.NET 10): `src/DriveGram.Core` (engine, index, Telegram), `src/
   Anything the tray answers per Explorer file must be cheap (indexed queries; the DB has one lock shared
   with the file system).
 
+## Updates and releases
+- Installed copies ask GitHub (`ori-halevi/DriveGram`, releases/latest) once a day whether a newer version
+  is out (`src/DriveGram.Tray/Updates.cs`): a menu line, a bar in the main window, one notice per version,
+  "skip this version". "Download and install" fetches the release's `DriveGram-Setup-*.exe` and checks it
+  against the SHA-256 written in the release notes.
+- Publishing is public and outward-facing: **only when the user asks** ("תפרסם"). After a build:
+  `publish-release.cmd <version> <notes.md>` (appends the SHA-256, runs `gh release create`). Notes in
+  Hebrew, short, what changed for the user.
+
 ## Testing aids
 - `dotnet test` (100+ tests). Check windows by eye with screenshots before asking the user to build.

@@ -68,6 +68,9 @@ sealed class MainForm : Form
         var body = new Panel { Dock = DockStyle.Fill, Padding = new Padding(12, 12, 12, 12) };
         body.Controls.Add(_tabs);
         Controls.Add(body);
+        _updateBar.Dock = DockStyle.Top;
+        _updateBar.Visible = false;
+        Controls.Add(_updateBar);
 
         RefreshAll();
         _transfers.Show();
@@ -95,6 +98,23 @@ sealed class MainForm : Form
     {
         _tabs.SelectedTab = _transfersPage;
         _transfers.ShowPrepared();
+    }
+
+    // a thin bar at the top when a new version is out (the tray decides; clicking opens the update window)
+    readonly LinkLabel _updateBar = new()
+    {
+        AutoSize = false, Height = 30, TextAlign = ContentAlignment.MiddleCenter, Font = Theme.Body,
+        BackColor = Color.FromArgb(0xFF, 0xF4, 0xE5), LinkColor = Color.FromArgb(0xB4, 0x5A, 0x00), LinkBehavior = LinkBehavior.HoverUnderline,
+    };
+    Action? _onUpdate;
+
+    /// <summary>Show (text) or hide (null) the new-version bar.</summary>
+    public void ShowUpdate(string? text, Action? onClick)
+    {
+        _onUpdate = onClick;
+        if (_updateBar.Tag is null) { _updateBar.Tag = true; _updateBar.LinkClicked += (_, _) => _onUpdate?.Invoke(); }
+        _updateBar.Text = text ?? "";
+        _updateBar.Visible = text is not null;
     }
 
     public void RefreshAll()

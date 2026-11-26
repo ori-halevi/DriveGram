@@ -109,6 +109,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
         _drives = AppState.All().Select(s => new DriveController(s)).ToList();
 
         _menu.Opening += (_, e) => { BuildMenu(); e.Cancel = false; };
+        _updates.Changed += () => _ui.Post(_ => OnUpdatesChanged(), null);
         _icon = new NotifyIcon { Icon = _idle, Text = "DriveGram", ContextMenuStrip = _menu, Visible = true };
         _icon.DoubleClick += (_, _) => Activate();
         _timer.Tick += (_, _) => UpdateIcon();
@@ -1487,6 +1488,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
         if (_main is not { IsDisposed: false })
         {
             _main = new DriveGram.Tray.MainForm(this);
+            if (_updates.Offered is { } u) _main.ShowUpdate("⬆  " + UpdateText(u), ShowUpdate);
             _main.Show();
         }
         else
@@ -1944,10 +1946,44 @@ sealed class TrayApp : ApplicationContext, IMainHost
         ? L.T("אין עדיין כוננים", "no drives yet")
         : string.Join("\n", _drives.Select(d => _drives.Count > 1 ? $"{L.Ltr(d.Letter)} {StatusOf(d)}" : $"{d.Name}: {StatusOf(d)}"));
 
+    // ── a new version on GitHub: a line in the menu, a bar in the main window, one notice per version ──
+    readonly Updates _updates = new();
+    UpdateForm? _updateForm;
+
+    string UpdateText(UpdateInfo u) => L.T($"גרסה חדשה של DriveGram: {L.Ltr(u.Version.ToString())}…", $"A new version of DriveGram: {u.Version}…");
+
+    void OnUpdatesChanged()
+    {
+        var u = _updates.Offered;
+        if (_main is { IsDisposed: false } m) m.ShowUpdate(u is null ? null : "⬆  " + UpdateText(u), ShowUpdate);
+        if (u is not null && _updates.FirstTimeFor(u))
+            Balloon(L.T("יש גרסה חדשה של DriveGram", "A new version of DriveGram"),
+                L.T($"גרסה {L.Ltr(u.Version.ToString())} זמינה (שלך: {L.Ltr(Updates.Current.ToString())}). לחץ כאן כדי לראות מה חדש. אפשר גם אחר כך, מהתפריט של האייקון.",
+                    $"Version {u.Version} is available (yours: {Updates.Current}). Click here to see what's new. Or later, from the icon's menu."),
+                onClick: ShowUpdate);
+    }
+
+    void ShowUpdate()
+    {
+        if (_updates.Offered is not { } u) return;
+        if (_updateForm is { IsDisposed: false }) { _updateForm.Activate(); return; }
+        _updateForm = new UpdateForm(u);
+        _updateForm.FormClosed += (_, _) => { if (_updateForm?.Skipped == true) _updates.Skip(u); _updateForm = null; };
+        _updateForm.Show();
+    }
+
     void BuildMenu()
     {
         _menu.RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No;
         _menu.Items.Clear();
+        if (_updates.Offered is { } update)
+        {
+            var item = Item(UpdateText(update), ShowUpdate, bold: true);
+            item.Image = Glyphs.Make('\uE896' /* download arrow */, Color.FromArgb(0xE0, 0x7A, 0x00), 16);
+            item.ForeColor = Color.FromArgb(0xB4, 0x5A, 0x00);
+            _menu.Items.Add(item);
+            _menu.Items.Add(new ToolStripSeparator());
+        }
         var open = Item(L.T("פתח את DriveGram", "Open DriveGram"), () => ShowMain(), bold: true);
         open.Image = _idleBitmap;
         _menu.Items.Add(open);
@@ -2086,6 +2122,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
         foreach (var d in _drives) TrackShellIcons(d);
         RedrawLateAnswers();
         TrackLowDisk();
+        _updates.Tick();
         TrackDaily();
         bool busy = _drives.Any(d => d.Busy || d.Starting || d.Stopping || d.FreeingOffline);
         _icon.Icon = busy ? _busy : _idle;
