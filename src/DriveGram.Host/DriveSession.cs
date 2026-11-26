@@ -475,6 +475,9 @@ public sealed class DriveSession : IAsyncDisposable
         return @"\" + string.Join('\\', parts);
     }
 
+    /// <summary>Where a file is, or null when it is gone or in the trash (nothing in Explorer to redraw).</summary>
+    public string? LivePathOf(string id) => IsLive(id) ? FullPathOf(id) : null;
+
     /// <summary>Is the node reachable from the root without passing through trashed folders?</summary>
     bool IsLive(string id)
     {

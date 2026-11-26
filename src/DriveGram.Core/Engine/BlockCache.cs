@@ -96,6 +96,12 @@ public sealed class BlockCache
         lock (_gate) return _map.ContainsKey(WKey(msg, win));
     }
 
+    /// <summary>The window is kept as a preview window.</summary>
+    public bool HasPreviewWindow(int msg, int win)
+    {
+        lock (_gate) return _map.ContainsKey(VKey(msg, win));
+    }
+
     /// <summary>The window is on this PC at all (cached, or a preview window).</summary>
     public bool HasAnyWindow(int msg, int win)
     {

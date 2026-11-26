@@ -77,16 +77,22 @@ sealed class TransfersForm : Form
 
     readonly ToolTip _legendTip = new() { AutoPopDelay = 20000, InitialDelay = 300 };
 
-    /// <summary>What the marks on files in Explorer mean (the real icons), one short line each; the full
-    /// meaning when the mouse rests on one.</summary>
+    /// <summary>What the marks on files in Explorer mean (the real icons), one short line each in two groups
+    /// (uploading / on this PC); the full meaning when the mouse rests on one.</summary>
     Control Legend()
     {
-        var row = new FlowLayoutPanel
+        var box = new FlowLayoutPanel
         {
             Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            FlowDirection = FlowDirection.LeftToRight, WrapContents = true, Padding = new Padding(8, 6, 8, 0),
+            FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(8, 6, 8, 0),
         };
-        row.Controls.Add(new Label { Text = L.T("הסימנים בסייר הקבצים:", "The marks in Explorer:"), Font = Theme.Small, ForeColor = Theme.Text, AutoSize = true, Margin = new Padding(0, 3, 10, 4) });
+        FlowLayoutPanel row = null!;
+        void Group(string title)
+        {
+            row = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, WrapContents = true, AutoSize = true, Margin = new Padding(0), MaximumSize = new Size(900, 0) };
+            row.Controls.Add(new Label { Text = title, Font = Theme.Small, ForeColor = Theme.Text, AutoSize = true, Margin = new Padding(0, 3, 10, 4) });
+            box.Controls.Add(row);
+        }
         void Item(string? icon, string text, string tip)
         {
             var item = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, WrapContents = false, AutoSize = true, Margin = new Padding(0, 0, 14, 4) };
@@ -102,25 +108,27 @@ sealed class TransfersForm : Form
             _legendTip.SetToolTip(item, tip);
             row.Controls.Add(item);
         }
+        Group(L.T("בסייר הקבצים, העלאה:", "In Explorer, uploading:"));
         Item("upload", L.T("עוד לא בטלגרם", "Not in Telegram yet"),
-            L.T("מחכה להעלאה, או עולה עכשיו. הקובץ נמצא רק במחשב הזה: לא לכבות ולא לנתק את הכונן עד שהסימן מתחלף.",
-                "Waiting to upload, or uploading now. The file is only on this PC: do not shut down or disconnect the drive until the mark changes."));
+            L.T("מחכה להעלאה או עולה עכשיו (או שינוי בקובץ שעוד לא עלה). בינתיים הוא שמור רק במחשב הזה, גם אחרי כיבוי, ויעלה לטלגרם כשהכונן מחובר.",
+                "Waiting to upload or uploading now (or a change to the file not uploaded yet). Meanwhile it is kept only on this PC, also after a shutdown, and goes up to Telegram while the drive is connected."));
         Item("paused", L.T("מושהה, עוד לא בטלגרם", "Paused, not in Telegram yet"),
-            L.T("ההעלאה של הקובץ מושהית. הוא נמצא רק במחשב הזה, ויעלה כשתמשיך את ההעלאה.",
-                "The file's upload is paused. It is only on this PC, and goes up when you resume the upload."));
-        Item("here", L.T("בטלגרם, וכולו גם כאן", "In Telegram, all of it here too"),
-            L.T("שמור בטלגרם, וכל הקובץ נמצא גם במחשב הזה, אז הוא נפתח מיד. כשצריך מקום, העותק הזה עשוי להתפנות, ואז הקובץ יורד שוב כשפותחים אותו.",
-                "Saved in Telegram, and all of it is on this PC too, so it opens at once. When room is needed this copy may be freed; then it downloads again when opened."));
-        Item("kept", L.T("בטלגרם, ומוכן כאן", "In Telegram, prepared here"),
-            L.T("שמור בטלגרם, והכנת אותו במחשב הזה: הוא נשאר כאן עד שתפנה אותו, ונפתח מיד, גם בלי אינטרנט.",
-                "Saved in Telegram, and you prepared it on this PC: it stays here until you free it, and opens at once, even offline."));
+            L.T("ההעלאה של הקובץ מושהית. בינתיים הוא שמור רק במחשב הזה, ויעלה כשתמשיך את ההעלאה.",
+                "The file's upload is paused. Meanwhile it is kept only on this PC, and goes up when you resume the upload."));
+        Group(L.T("בסייר הקבצים, במחשב הזה:", "In Explorer, on this PC:"));
+        Item("kept", L.T("בטלגרם, ונשמר כאן", "In Telegram, kept here"),
+            L.T("שמור בטלגרם, והכנת אותו במחשב הזה (\"הכן\"): הוא נשאר כאן עד שתפנה אותו, ונפתח מיד, גם בלי אינטרנט.",
+                "Saved in Telegram, and you prepared it on this PC (\"Prepare\"): it stays here until you free it, and opens at once, even offline."));
+        Item("local", L.T("בטלגרם, וכולו כאן (זמני)", "In Telegram, all here (temporary)"),
+            L.T("שמור בטלגרם, וכל הקובץ נמצא גם במחשב הזה, אז הוא נפתח מיד. DriveGram עשוי למחוק את העותק הזה לבד כשצריך מקום. כדי שיישאר, בחר \"הכן\".",
+                "Saved in Telegram, and all of it is on this PC too, so it opens at once. DriveGram may delete this copy by itself when room is needed. To keep it, choose \"Prepare\"."));
         Item("partial", L.T("בטלגרם, וחלק ממנו כאן", "In Telegram, part of it here"),
             L.T("שמור בטלגרם. רק החלקים שכבר נפתחו נמצאים במחשב הזה, והשאר יורד כשצריך אותו.",
                 "Saved in Telegram. Only the parts already opened are on this PC; the rest downloads when needed."));
         Item(null, L.T("בלי סימן: רק בטלגרם", "No mark: only in Telegram"),
-            L.T("שמור בטלגרם, ושום חלק ממנו לא במחשב הזה. הוא יורד כשפותחים אותו (צריך אינטרנט).",
-                "Saved in Telegram, and none of it is on this PC. It downloads when opened (needs internet)."));
-        return row;
+            L.T("שמור בטלגרם, והקובץ עצמו לא במחשב הזה: הוא יורד כשפותחים אותו (צריך אינטרנט). התמונה הממוזערת שלו נשארת.",
+                "Saved in Telegram, and the file itself is not on this PC: it downloads when opened (needs internet). Its thumbnail stays."));
+        return box;
     }
 
     /// <summary>The mark itself, cut out of the overlay icon the Explorer extension uses (its corner of a
@@ -137,7 +145,7 @@ sealed class TransfersForm : Form
                     {
                         using var icon = new Icon(p, 32, 32);
                         using var full = icon.ToBitmap();
-                        return full.Clone(new Rectangle(0, 12, 20, 20), full.PixelFormat);
+                        return full.Clone(new Rectangle(0, 8, 24, 24), full.PixelFormat); // the mark's corner, whole
                     }
                 dir = Path.GetDirectoryName(dir.TrimEnd('\\', '/'));
             }
@@ -452,7 +460,7 @@ sealed class TransfersForm : Form
 
     static string UploadTip(UploadState st, string state) => state + ": " + (st switch
     {
-        UploadState.Paused => L.T("ההעלאה של הקובץ הזה עצורה. הוא שמור במחשב הזה עד שתמשיך אותה.", "This file's upload is stopped. It is kept on this PC until you resume it."),
+        UploadState.Paused => L.T("ההעלאה של הקובץ הזה מושהית. הוא שמור במחשב הזה עד שתמשיך אותה.", "This file's upload is paused. It is kept on this PC until you resume it."),
         UploadState.Uploading => L.T("הקובץ עולה עכשיו לטלגרם, מוצפן. אפשר להמשיך לעבוד כרגיל.", "The file is uploading to Telegram now, encrypted. You can keep working as usual."),
         UploadState.Writing => L.T("תוכנה עדיין כותבת את הקובץ לכונן. הוא יעלה כשהכתיבה תסתיים.", "A program is still writing the file into the drive. It uploads when the writing ends."),
         _ => L.T("הקובץ מחכה לתורו. הוא כבר שמור במחשב הזה ויעלה מיד אחרי הקבצים שלפניו.", "The file waits its turn. It is already kept on this PC and uploads right after the files before it."),

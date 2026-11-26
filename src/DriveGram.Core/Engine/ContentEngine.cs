@@ -123,7 +123,7 @@ public sealed class ContentEngine : IAsyncDisposable
         Directory.CreateDirectory(_staging);
         _cache = new BlockCache(Path.Combine(stateDir, "cache"), _o.CacheQuota, waitForKept: true) // Start → LoadKept
         {
-            PreviewQuota = Math.Clamp(_o.CacheQuota / 8, 64L << 20, 1L << 30), // thumbnails' windows: 1 GB at most
+            PreviewQuota = PreviewQuota,
         };
         _reader = new ChunkReader(remote, _cache, keys);
         _uploadSlots = new SemaphoreSlim(Math.Max(1, _o.UploadConcurrency));
@@ -1245,8 +1245,11 @@ public sealed class ContentEngine : IAsyncDisposable
     void FitCacheToDisk(long needed)
     {
         // the quota covers the temporary entries only (prepared files are never evicted)
-        long room = _cache.Bytes - _cache.KeptBytes + FreeDisk() - _o.MinFreeDisk - needed;
-        _cache.SetQuota(Math.Clamp(room, Math.Min(128L << 20, _o.CacheQuota), _o.CacheQuota));
+        // (preview windows count too: they shrink with the rest when the disk is short)
+        long room = _cache.Bytes - _cache.KeptBytes + _cache.PreviewBytes + FreeDisk() - _o.MinFreeDisk - needed;
+        long preview = Math.Clamp(room / 8, 0, PreviewQuota);
+        _cache.PreviewQuota = preview;
+        _cache.SetQuota(Math.Clamp(room - preview, Math.Min(128L << 20, _o.CacheQuota), _o.CacheQuota));
         Interlocked.Exchange(ref _freeAt, 0); // re-measure right away
     }
 
@@ -1716,11 +1719,30 @@ public sealed class ContentEngine : IAsyncDisposable
     }
 
     /// <summary>Pending files that are not paused (what "wait for the uploads" waits for).</summary>
+    /// <summary>What Explorer read for thumbnails and details, kept apart (see BlockCache): 1 GB at most,
+    /// less when the disk is short (FitCacheToDisk).</summary>
+    long PreviewQuota => Math.Clamp(_o.CacheQuota / 8, 64L << 20, 1L << 30);
+
     public int PendingNotPaused() => _db.PendingNodes().Count(id => !IsPaused(id));
-    /// <summary>Every file not in Telegram yet, and whether its upload is paused (Explorer's icons follow this).</summary>
-    public List<(string Id, bool Paused)> PendingStates() => _db.PendingNodes().Select(id => (id, IsPaused(id))).ToList();
-    /// <summary>The file is not in Telegram yet: waiting to upload, or uploading.</summary>
-    public bool IsWaitingToUpload(string id) => _db.IsPending(id);
+    /// <summary>Everything not (all) in Telegram yet, and whether its upload is paused (Explorer's icons follow
+    /// this): files waiting to upload, and items whose change is not in the journal yet.</summary>
+    public Dictionary<string, bool> PendingStates()
+    {
+        var res = new Dictionary<string, bool>();
+        foreach (var id in _db.PendingNodes()) res[id] = IsPaused(id);
+        foreach (var id in _db.OutboxNodes()) res.TryAdd(id, false);
+        return res;
+    }
+
+    /// <summary>The file (or its last change) is not in Telegram yet: waiting to upload, uploading, or its
+    /// journal entry not sent yet (offline, or another PC holds the drive). Until then, losing this PC loses it.</summary>
+    public bool IsWaitingToUpload(string id) => _db.IsPending(id) || _db.HasOutboxOp(id);
+
+    /// <summary>An earlier version of the file is in Telegram (a change of it is what waits).</summary>
+    public bool HasSavedVersion(string id) => _db.CommittedChunks(id).Count > 0;
+
+    /// <summary>Bytes downloaded from Telegram so far (this session).</summary>
+    public long BytesDownloaded => Interlocked.Read(ref _reader.BytesDownloaded);
 
     /// <summary>Wait until every pending file is committed (used before unmount / handing over).</summary>
     /// <param name="stall">give up when nothing moved for this long (offline / signed out): the files

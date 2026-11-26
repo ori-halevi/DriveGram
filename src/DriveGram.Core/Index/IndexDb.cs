@@ -727,6 +727,14 @@ public sealed class IndexDb : IDisposable
 
     public List<string> PendingNodes() => Query("SELECT node FROM pending ORDER BY since", r => r.GetString(0));
 
+    /// <summary>Items with a change not sent to the journal yet (their pieces may be uploaded: without the
+    /// journal entry, Telegram does not know them).</summary>
+    public List<string> OutboxNodes() =>
+        Query("SELECT DISTINCT json_extract(op, '$.id') FROM outbox WHERE json_extract(op, '$.id') IS NOT NULL", r => r.GetString(0));
+
+    public bool HasOutboxOp(string node) =>
+        Scalar("SELECT 1 FROM outbox WHERE json_extract(op, '$.id') = @n LIMIT 1", ("@n", node)) is not null;
+
     /// <summary>Per pending file, oldest first: its name and size, and the bytes of its parts in total and
     /// already uploaded. One query (asked every second by the transfers window, also with thousands waiting).</summary>
     /// <summary>Pending files with their progress; Saved: a version of the file is already in Telegram (a change made here).</summary>

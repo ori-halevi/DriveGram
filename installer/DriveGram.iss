@@ -6,7 +6,7 @@
 
 #define AppName "DriveGram"
 #ifndef AppVersion
-  #define AppVersion "1.4.0"
+  #define AppVersion "1.4.1"
 #endif
 #define WinFspMsi "winfsp-2.1.25156.msi"
 
@@ -60,8 +60,8 @@ hebrew.CleanupLocalOnly=⚠ יש במחשב הזה קבצים שעוד לא על
 english.CleanupLocalOnly=⚠ This PC has files not yet uploaded to Telegram, or changes not yet sent. Deleting now loses them for good.%n%nDelete anyway?
 hebrew.WinFspFailed=התקנת WinFsp לא הושלמה. הכונן לא יעבוד בלעדיו. אפשר להתקין אותו ידנית מהכתובת https://winfsp.dev/rel
 english.Desktop=Create a desktop shortcut
-english.ShellIcons=Next, Windows asks permission for "Windows Command Processor". That is DriveGram: it adds icons on files in Explorer (is the file saved in Telegram yet, and how much of it is on this PC).%n%nYou may also decline: then only the icons are missing, everything else works. The icons appear after you next sign in to Windows.
-hebrew.ShellIcons=מיד ווינדוס יבקש אישור עבור "מעבד הפקודות של Windows". זה DriveGram: הוא מוסיף סימנים על קבצים בסייר הקבצים (האם הקובץ כבר שמור בטלגרם, וכמה ממנו נמצא במחשב).%n%nאפשר גם לסרב: אז רק הסימנים לא יופיעו, וכל השאר עובד. הסימנים יופיעו אחרי הכניסה הבאה לווינדוס.
+english.ShellIcons=Next, Windows asks permission for "Windows Command Processor". That is DriveGram: it adds icons on files in Explorer (is the file saved in Telegram yet, and how much of it is on this PC).%n%nYou may also decline: then only the icons are missing, everything else works. The icons appear after you next sign in to Windows (until then, the previous icons may show).
+hebrew.ShellIcons=מיד ווינדוס יבקש אישור עבור "מעבד הפקודות של Windows". זה DriveGram: הוא מוסיף סימנים על קבצים בסייר הקבצים (האם הקובץ כבר שמור בטלגרם, וכמה ממנו נמצא במחשב).%n%nאפשר גם לסרב: אז רק הסימנים לא יופיעו, וכל השאר עובד. הסימנים יופיעו אחרי הכניסה הבאה לווינדוס (עד אז ייתכן שיופיעו הסימנים הקודמים).
 english.UnShellIcons=Next, Windows asks permission for "Windows Command Processor": that is DriveGram, removing the icons it added on files. You may also decline.
 hebrew.UnShellIcons=מיד ווינדוס יבקש אישור עבור "מעבד הפקודות של Windows": זה DriveGram, שמסיר את הסימנים שהוסיף על קבצים. אפשר גם לסרב.
 english.Launch=Start DriveGram now
@@ -78,10 +78,6 @@ Source: "..\publish\*"; DestDir: "{app}"; Excludes: "DriveGramShell-*.dll"; Flag
 ; has to replace a file in use (the registration below points at the new one)
 Source: "..\publish\DriveGramShell-{#AppVersion}.dll"; DestDir: "{app}"; Flags: onlyifdoesntexist
 Source: "redist\{#WinFspMsi}"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: NeedsWinFsp
-
-[InstallDelete]
-; older versions of the shell extension (one still loaded by Explorer simply stays until the next time)
-Type: files; Name: "{app}\DriveGramShell-*.dll"
 
 [Registry]
 ; the shell extension, for this Windows user only (no admin; programs running as admin ignore it)
@@ -126,17 +122,25 @@ Type: files; Name: "{app}\DriveGramShell-*.dll"
 const
   OverlayKey = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers\';
   OverlayCount = 5;
+  OldOverlayCount = 2;
 
-{ leading spaces: Explorer uses only the first 15 overlays, by name }
+{ leading spaces: Explorer uses only the first 15 overlays, by name. "Not in Telegram yet" (1, 2) sorts
+  first: if other programs take the rest, that mark is the one that must stay }
 function OverlayName(I: Integer): String;
 begin
   case I of
     0: Result := '   DriveGramFull';
     1: Result := '   DriveGramPartial';
     2: Result := '   DriveGramKept';
-    3: Result := '   DriveGramUpload';
-  else Result := '   DriveGramPaused';
+    3: Result := '   DriveGram1Upload';
+  else Result := '   DriveGram2Paused';
   end;
+end;
+
+{ the names 1.3.1 - 1.4.0 used for those two (they sorted last): removed }
+function OldOverlayName(I: Integer): String;
+begin
+  if I = 0 then Result := '   DriveGramUpload' else Result := '   DriveGramPaused';
 end;
 
 function OverlayClsid(I: Integer): String;
@@ -156,6 +160,8 @@ begin
   Result := False;
   for I := 0 to OverlayCount - 1 do
     if not RegKeyExists(HKLM64, OverlayKey + OverlayName(I)) then Result := True;
+  for I := 0 to OldOverlayCount - 1 do
+    if RegKeyExists(HKLM64, OverlayKey + OldOverlayName(I)) then Result := True;
 end;
 
 function HasOverlayNames: Boolean;
@@ -164,6 +170,8 @@ begin
   Result := False;
   for I := 0 to OverlayCount - 1 do
     if RegKeyExists(HKLM64, OverlayKey + OverlayName(I)) then Result := True;
+  for I := 0 to OldOverlayCount - 1 do
+    if RegKeyExists(HKLM64, OverlayKey + OldOverlayName(I)) then Result := True;
 end;
 
 { The overlay icons need their names machine-wide (Explorer reads them only there): one Windows
@@ -176,6 +184,9 @@ var Reg, Params: String;
 begin
   Reg := ExpandConstant('{sys}\reg.exe');
   Params := '/d /c ';
+  { the old names first, each on its own ("&": one that is not there stops nothing) }
+  for I := 0 to OldOverlayCount - 1 do
+    Params := Params + Reg + ' delete "HKLM\' + OverlayKey + OldOverlayName(I) + '" /f /reg:64 & ';
   for I := 0 to OverlayCount - 1 do
   begin
     if I > 0 then
@@ -286,7 +297,7 @@ end;
 
 { Explorer keeps the shell extension loaded until the user signs out: a loaded file cannot be deleted, but it
   can be moved, so it goes to the temp folder and the install folder empties }
-procedure MoveShellExtensionAside;
+procedure MoveShellExtensionAside(Keep: String);
 var F: TFindRec;
     Dir: String;
 begin
@@ -294,6 +305,7 @@ begin
   if FindFirst(Dir + '\DriveGramShell-*.dll', F) then
   try
     repeat
+      if CompareText(F.Name, Keep) = 0 then continue;
       if not DeleteFile(Dir + '\' + F.Name) then
         RenameFile(Dir + '\' + F.Name, ExpandConstant('{%TEMP}') + '\' + F.Name + '.' + IntToStr(Random(1000000)) + '.old');
     until not FindNext(F);
@@ -319,7 +331,7 @@ begin
       Exec('taskkill.exe', '/F /IM drivegram-tray.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
     end
     else AskToCleanUp;
-    MoveShellExtensionAside;
+    MoveShellExtensionAside('');
   end;
   { "Start with Windows" is set by the app, so the uninstaller removes it explicitly }
   if CurUninstallStep = usPostUninstall then
@@ -337,8 +349,10 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var Marker: String;
 begin
-  if CurStep = ssInstall then
-    MoveShellExtensionAside; { the old version's, still loaded by Explorer until the user signs out }
+  { the old versions' (one may still be loaded by Explorer until the user signs out): only once the new one
+    is in place and registered, so an install that fails half-way leaves the old one working }
+  if CurStep = ssPostInstall then
+    MoveShellExtensionAside('DriveGramShell-{#AppVersion}.dll');
   if (CurStep = ssPostInstall) and NeedsOverlayNames and not WizardSilent then
   begin
     MsgBox(CustomMessage('ShellIcons'), mbInformation, MB_OK); { said before the prompt, in full (the status line is one line) }

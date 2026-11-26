@@ -97,7 +97,9 @@ sealed class ShellBridge : IDisposable
         switch (request[0])
         {
             case 'S': return paths.Length == 1 ? State(paths[0]).ToString() : "-";
-            case 'L': return paths.Length == 1 ? Percent(paths[0]).ToString() : "-1";
+            // the 1.3.0 extension (loaded until the next sign-in) shows a green check for 100%: never for a
+            // file that is not in Telegram yet
+            case 'L': return paths.Length == 1 ? (WaitingToUpload(paths[0]) ? "-1" : Percent(paths[0]).ToString()) : "-1";
             case 'M': return Menu(paths);
             case 'P': Prepare(paths); Forget(paths); return "ok";
             case 'F': Free(paths); Forget(paths); return "ok";
@@ -140,6 +142,12 @@ sealed class ShellBridge : IDisposable
         return state;
     }
 
+    bool WaitingToUpload(string path)
+    {
+        try { return Resolve(path) is { } f && f.Session.Engine.IsWaitingToUpload(f.Id); }
+        catch { return true; } // unknown: never "saved"
+    }
+
     /// <summary>Percent of the file on this PC; asked for every file Explorer shows, so kept for a moment.</summary>
     int Percent(string path)
     {
@@ -173,16 +181,25 @@ sealed class ShellBridge : IDisposable
         {
             var (s, id) = all[0];
             int p = Percent(paths[0]);
-            info = s.Engine.IsWaitingToUpload(id)
-                    ? s.Engine.IsPaused(id) ? L.T("DriveGram: ההעלאה מושהית, עוד לא שמור בטלגרם", "DriveGram: upload paused, not in Telegram yet")
-                        : L.T("DriveGram: מחכה להעלאה, עוד לא שמור בטלגרם", "DriveGram: waiting to upload, not in Telegram yet")
+            var e = s.Engine;
+            info = e.IsWaitingToUpload(id)
+                    ? e.HasSavedVersion(id)
+                        ? e.IsPaused(id) ? L.T("DriveGram: השינוי מושהה ועוד לא עלה (הגרסה הקודמת שמורה בטלגרם)", "DriveGram: the change is paused, not uploaded yet (the earlier version is in Telegram)")
+                            : L.T("DriveGram: השינוי עוד לא עלה לטלגרם (הגרסה הקודמת שמורה בו)", "DriveGram: the change is not in Telegram yet (the earlier version is)")
+                        : e.IsPaused(id) ? L.T("DriveGram: ההעלאה מושהית, עוד לא שמור בטלגרם", "DriveGram: upload paused, not in Telegram yet")
+                            : L.T("DriveGram: עוד לא שמור בטלגרם (מחכה להעלאה או עולה עכשיו)", "DriveGram: not in Telegram yet (waiting to upload, or uploading)")
                 : IsPreparing(s, id) ? L.T("DriveGram: מוריד למחשב הזה…", "DriveGram: downloading to this PC…")
-                : s.Engine.IsPrepared(id) && p >= 100 ? L.T("DriveGram: שמור בטלגרם, ומוכן במחשב הזה ✓", "DriveGram: saved in Telegram, and ready on this PC ✓")
-                : L.T($"DriveGram: שמור בטלגרם, {p}% ממנו במחשב הזה", $"DriveGram: saved in Telegram, {p}% of it on this PC");
+                : e.IsPrepared(id) && p >= 100 ? L.T("DriveGram: שמור בטלגרם, ונשמר במחשב הזה עד שתפנה אותו ✓", "DriveGram: saved in Telegram, and kept on this PC until you free it ✓")
+                : e.IsPrepared(id) ? L.T($"DriveGram: ההכנה לא הושלמה ({p}%). בחר \"הכן\" שוב", $"DriveGram: preparing did not finish ({p}%). Choose \"Prepare\" again")
+                : p >= 100 ? L.T("DriveGram: שמור בטלגרם, וכולו גם במחשב הזה (זמני)", "DriveGram: saved in Telegram, all of it on this PC too (temporary)")
+                : p > 0 ? L.T($"DriveGram: שמור בטלגרם, {p}% ממנו במחשב הזה", $"DriveGram: saved in Telegram, {p}% of it on this PC")
+                : L.T("DriveGram: שמור בטלגרם בלבד (לא במחשב הזה)", "DriveGram: only in Telegram (not on this PC)");
         }
         else info = L.T($"DriveGram: {all.Count} קבצים", $"DriveGram: {all.Count} files");
-        bool anyToPrepare = all.Any(f => !f.Session.Engine.IsPrepared(f.Id) || f.Session.Engine.LocalFraction(f.Id) < 0.999);
-        bool anyToFree = all.Any(f => f.Session.Engine.IsPrepared(f.Id) || f.Session.Engine.LocalFraction(f.Id) > 0.001);
+        // a file not in Telegram yet is only here: nothing to prepare, and nothing that may be freed
+        var saved = all.Where(f => !f.Session.Engine.IsWaitingToUpload(f.Id)).ToList();
+        bool anyToPrepare = saved.Any(f => !f.Session.Engine.IsPrepared(f.Id) || f.Session.Engine.LocalFraction(f.Id) < 0.999);
+        bool anyToFree = saved.Any(f => f.Session.Engine.IsPrepared(f.Id) || f.Session.Engine.LocalFraction(f.Id) > 0.001);
         var prepare = anyToPrepare ? L.T("הכן במחשב הזה (הורד את כולו)", "Prepare on this PC (download all of it)") : "";
         var free = anyToFree ? L.T("פנה מהמחשב הזה", "Free from this PC") : "";
         return string.Join('\x1f', info, prepare, free);

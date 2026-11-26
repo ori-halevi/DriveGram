@@ -45,7 +45,17 @@ public sealed class ChunkReader
     /// it is fetched again, a bounded number of times — so one bad read cannot poison the cache and
     /// leave a file permanently broken. (GCM would still reject the bytes; this keeps it healable.)
     /// </summary>
-    Task<byte[]> Window(ChunkLoc c, int win, CancellationToken ct, bool preview = false)
+    async Task<byte[]> Window(ChunkLoc c, int win, CancellationToken ct, bool preview = false)
+    {
+        var data = await SharedWindow(c, win, ct, preview);
+        // a download is shared by everyone who needs the window at once, and stored the way its first asker
+        // wanted: a program (or "prepare") joining Explorer's thumbnail read still gets it as part of the file
+        if (preview ? !_cache.HasPreviewWindow(c.Msg, win) : !_cache.HasWindow(c.Msg, win))
+            _cache.PutWindow(c.Msg, win, data, preview);
+        return data;
+    }
+
+    Task<byte[]> SharedWindow(ChunkLoc c, int win, CancellationToken ct, bool preview)
     {
         int expected = ExpectedWindowLength(c, win);
         var cached = _cache.TryGetWindow(c.Msg, win, preview);

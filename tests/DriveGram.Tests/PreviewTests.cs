@@ -75,6 +75,52 @@ public class PreviewTests
     }
 
     [Fact]
+    public async Task PreparingAfterAPreviewKeepsTheWholeFile()
+    {
+        var (kit, b, id, data) = await TwoPcsAsync();
+        await using var _ = kit;
+        PreviewRead(b, id, 0, 4096);
+        PreviewRead(b, id, data.Length - 4096, 4096);
+        await b.Engine.PrepareAsync(id, null, default);
+        Assert.Equal(1, b.Engine.LocalFraction(id), 3);
+        Assert.True(b.Engine.IsFullyLocal(id));
+    }
+
+    [Fact]
+    public async Task AReadJoiningAPreviewDownloadStillCachesItAsPartOfTheFile()
+    {
+        var (kit, b, id, data) = await TwoPcsAsync();
+        await using var _ = kit;
+        kit.Remote.Latency = 300; // both reads meet on the same download
+        var preview = Task.Run(() => PreviewRead(b, id, 0, 4096));
+        await Task.Delay(50);
+        var buf = new byte[4096];
+        await Task.Run(() => b.Engine.Read(id, 0, buf));
+        await preview;
+        kit.Remote.Latency = 0;
+        Assert.Equal(data[..4096], buf);
+        Assert.True(b.Engine.LocalFraction(id) > 0); // the program's read counts as here
+    }
+
+    [Fact]
+    public async Task AFileIsNotSavedUntilItsJournalEntryIsSent()
+    {
+        await using var kit = await TestKit.CreateAsync();
+        var a = kit.Pc("a"); // its journal sender is not started: the change stays in the outbox
+        var id = a.NewFile("new.txt");
+        a.WriteFile(id, TestKit.RandomBytes(5000, 43));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        await a.Engine.DrainAsync(null, cts.Token); // uploaded and committed
+        Assert.True(a.Engine.IsWaitingToUpload(id));
+        Assert.True(a.Engine.PendingStates().ContainsKey(id));
+
+        await a.Sync.StartAsync(false, default);
+        await a.SettleAsync();
+        Assert.False(a.Engine.IsWaitingToUpload(id));
+        Assert.False(a.Engine.PendingStates().ContainsKey(id));
+    }
+
+    [Fact]
     public async Task ThePreviewHasItsOwnQuota()
     {
         var dir = Path.Combine(Path.GetTempPath(), "dg-preview-" + Guid.NewGuid().ToString("N"));

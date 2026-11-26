@@ -210,9 +210,11 @@ static wchar_t State(const wchar_t* path)
     }
     wchar_t state = L'-';
     std::wstring answer;
-    if (Ask(L"S\t" + key, answer, 150) && answer.size() == 1) state = answer[0];
+    bool answered = Ask(L"S\t" + key, answer, 150) && answer.size() == 1;
+    if (answered) state = answer[0];
     std::lock_guard<std::mutex> lock(g_gate);
-    g_state[key] = { state, now };
+    // no answer in time (the tray busy with a big copy): asked again soon, not kept for the full 2 s
+    g_state[key] = { state, answered ? now : now - 1700 };
     return state;
 }
 
@@ -258,7 +260,7 @@ public:
     {
         // new file names in 1.3.1 (the "all here" look changed): Explorer's icon cache never shows the old one
         const wchar_t* name = _state == L'P' ? L"\\overlay-paused.ico" : _state == L'U' ? L"\\overlay-upload.ico"
-            : _state == L'K' ? L"\\overlay-kept.ico" : _state == L'F' ? L"\\overlay-here.ico" : L"\\overlay-partial.ico";
+            : _state == L'K' ? L"\\overlay-kept.ico" : _state == L'F' ? L"\\overlay-local.ico" : L"\\overlay-partial.ico";
         std::wstring file = ModuleDir() + name;
         if ((int)file.size() + 1 > cch) return E_FAIL;
         wcscpy_s(iconFile, cch, file.c_str());

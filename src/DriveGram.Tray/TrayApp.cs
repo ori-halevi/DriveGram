@@ -39,6 +39,7 @@ sealed class DriveController
     public int MostFiles;             // the most files waiting at once (for "N files uploaded")
     public Dictionary<string, bool>? ShellSeen; // files not in Telegram yet (paused?) as Explorer's icons last showed them
     public DriveSession? ShellSeenFor;
+    public volatile bool ShellBusy;      // a look is running (in the background)
     public bool ToldUploadStart;      // the "uploading, wait for the message" balloon was shown
     public DateTime DiskShortQuietUntil;
     public SwitchAccountForm? SwitchAccount;
@@ -1562,28 +1563,58 @@ sealed class TrayApp : ApplicationContext, IMainHost
     /// the old state has passed.</summary>
     void TrackShellIcons(DriveController d)
     {
-        if (_bridge is null) return;
+        if (_bridge is not { } bridge) return;
         if (d.Session is not { } s || d.Stopping) { d.ShellSeen = null; d.ShellSeenFor = null; return; }
-        Dictionary<string, bool> now;
-        try { now = s.Engine.PendingStates().GroupBy(x => x.Id).ToDictionary(g => g.Key, g => g.First().Paused); }
-        catch (Exception ex) { Log.Debug($"shell icons: {ex.Message}"); return; }
+        if (d.ShellBusy) return;
+        d.ShellBusy = true;
         var before = d.ShellSeenFor == s ? d.ShellSeen : null;
-        d.ShellSeen = now;
-        d.ShellSeenFor = s;
-        if (before is null) return; // the first look: Explorer asks by itself as it shows the files
-        var changed = now.Where(x => !before.TryGetValue(x.Key, out var p) || p != x.Value).Select(x => x.Key)
-            .Concat(before.Keys.Where(id => !now.ContainsKey(id)))
-            .Take(500).ToList();
-        if (changed.Count == 0) return;
-        var paths = new List<string>();
-        foreach (var id in changed)
-            try { paths.Add(s.FullPathOf(id)); } catch { } // deleted meanwhile: no icon to redraw
-        _bridge.Forget(paths);
-        _ = Task.Delay(2500).ContinueWith(_ =>
+        // the database work in the background: during a big copy it waits behind the writes, and the tray's
+        // menu and windows must not
+        _ = Task.Run(() =>
         {
-            _bridge?.Forget(paths);
-            foreach (var p in paths) ShellChanged(p);
-        }, TaskScheduler.Default);
+            try
+            {
+                var now = s.Engine.PendingStates();
+                var seen = now;
+                List<string> paths = [];
+                if (before is not null) // the first look: Explorer asks by itself as it shows the files
+                {
+                    // finished first (they may now say "saved"), then new ones and paused / resumed ones
+                    var changed = before.Keys.Where(id => !now.ContainsKey(id))
+                        .Concat(now.Where(x => !before.TryGetValue(x.Key, out var p) || p != x.Value).Select(x => x.Key))
+                        .ToList();
+                    const int perLook = 2000;
+                    if (changed.Count > perLook)
+                    {
+                        // the rest is kept as it was: the next look (2 s) tells Explorer about them
+                        seen = new Dictionary<string, bool>(now);
+                        foreach (var id in changed.Skip(perLook))
+                            if (before.TryGetValue(id, out var p)) seen[id] = p; else seen.Remove(id);
+                    }
+                    foreach (var id in changed.Take(perLook))
+                        if (s.LivePathOf(id) is { } path) paths.Add(path); // gone or in the trash: nothing to redraw
+                }
+                _ui.Post(_ => { if (d.Session == s && !d.Stopping) { d.ShellSeen = seen; d.ShellSeenFor = s; } }, null);
+                if (paths.Count == 0) return;
+                bridge.Forget(paths);
+                _ = Task.Delay(2500).ContinueWith(_ =>
+                {
+                    bridge.Forget(paths);
+                    if (paths.Count <= 200) foreach (var p in paths) ShellChanged(p);
+                    else // many at once (pause all, a big copy): each folder once, not thousands of files
+                        foreach (var dir in paths.Select(Path.GetDirectoryName).Where(x => x is not null).Distinct(StringComparer.OrdinalIgnoreCase))
+                            ShellFolderChanged(dir!);
+                }, TaskScheduler.Default);
+            }
+            catch (Exception ex) { Log.Debug($"shell icons: {ex.Message}"); }
+            finally { d.ShellBusy = false; }
+        });
+    }
+
+    /// <summary>Explorer redraws a whole folder (its files' overlay icons included).</summary>
+    static void ShellFolderChanged(string dir)
+    {
+        try { SHChangeNotify(0x00001000 /* SHCNE_UPDATEDIR */, 0x0005 /* SHCNF_PATHW */, dir, IntPtr.Zero); } catch { }
     }
 
     /// <summary>Explorer redraws the file's overlay icon (how much of it is on this PC).</summary>

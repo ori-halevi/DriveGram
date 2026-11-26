@@ -26,10 +26,13 @@ public sealed class DriveFileSystem : FileSystemBase
         public bool CanWrite { get; } = canWrite;
         /// <summary>The sorted listing of a directory being enumerated through this handle.</summary>
         public List<(string Name, FileInfo Info)>? Listing;
-        /// <summary>Opened by Explorer (or its thumbnail maker): what it reads, up to a few MB, is kept as
-        /// the file's preview (see BlockCache).</summary>
-        public bool Preview { get; init; }
-        public long PreviewBytes;
+        /// <summary>Opened by Explorer (or its thumbnail maker): what it reads, a few 1 MiB windows at most,
+        /// is kept as the file's preview (see BlockCache). A big read (Explorer copying the file out) ends it.</summary>
+        public bool Preview { get; set; }
+        public HashSet<long>? PreviewWindows;
+        /// <summary>The program that opened it (for the log line when reading it downloads).</summary>
+        public string? Program { get; init; }
+        public bool ToldDownload;
     }
 
     /// <summary>The first change through a handle opened for writing makes it a writer (holds the commit
@@ -193,9 +196,11 @@ public sealed class DriveFileSystem : FileSystemBase
     // in. What they read of a file is kept apart as its preview: freeing the file leaves it, so browsing the
     // folder again downloads nothing, and the thumbnail still shows.
     static readonly HashSet<string> Previewers = new(StringComparer.OrdinalIgnoreCase) { "explorer", "dllhost" };
-    /// <summary>At most this much of one opening is kept as preview (a thumbnail needs a few MB; a copy
-    /// made in Explorer reads the whole file, and the rest of it is cached as usual).</summary>
-    const long PreviewBudget = 8L << 20;
+    /// <summary>At most this many 1 MiB windows of one opening are kept as preview (a thumbnail and the
+    /// details need a few: the start, the index at the end, one picture); beyond that it is a real read.</summary>
+    const int PreviewWindowsPerOpen = 8;
+    /// <summary>A read this big is a copy (Explorer copying the file out), not a thumbnail.</summary>
+    const uint CopyReadSize = 256 * 1024;
 
     enum Requester { App, Scanner, Previewer }
     static readonly System.Collections.Concurrent.ConcurrentDictionary<uint, (Requester Kind, string Name, long At)> ProcessKinds = new();
@@ -219,24 +224,7 @@ public sealed class DriveFileSystem : FileSystemBase
         return (kind, name);
     }
 
-    // which programs open files that are not (all) on this PC: once per program and file in 30 minutes,
-    // so the log shows who downloads, without a line for every read
-    readonly System.Collections.Concurrent.ConcurrentDictionary<(string, string), long> _noted = new();
 
-    void NoteOpen(string program, Requester kind, Node n)
-    {
-        long now = Environment.TickCount64;
-        var key = (program, n.Id);
-        if (_noted.TryGetValue(key, out var at) && now - at < 30 * 60_000) return;
-        if (_noted.Count > 20_000) _noted.Clear();
-        _noted[key] = now;
-        try
-        {
-            if (_engine.IsFullyLocal(n.Id)) return;
-            Log.Info($"opened by {program}{(kind == Requester.Previewer ? " (preview)" : kind == Requester.Scanner ? " (scanner: only what is here)" : "")}: {n.Name}");
-        }
-        catch { }
-    }
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
     static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
@@ -350,11 +338,10 @@ public sealed class DriveFileSystem : FileSystemBase
         var n = _db.Resolve(fileName);
         if (n is null) return STATUS_OBJECT_NAME_NOT_FOUND;
         var (who, program) = n.Dir || n.Size == 0 ? (Requester.App, "") : WhoAsks();
-        if (!n.Dir && n.Size > 0) NoteOpen(program, who, n);
         if (who == Requester.Scanner && !_engine.IsFullyLocal(n.Id)) return StatusFileIsOffline;
         if (ReadOnly && !n.Dir && (grantedAccess & WriteAccess) != 0) return STATUS_ACCESS_DENIED;
         bool canWrite = !n.Dir && !ReadOnly && (grantedAccess & WriteAccess) != 0;
-        fileNode = new Handle(n.Id, n.Dir, false, canWrite) { Preview = who == Requester.Previewer }; // a writer only once it changes something
+        fileNode = new Handle(n.Id, n.Dir, false, canWrite) { Preview = who == Requester.Previewer, Program = program }; // a writer only once it changes something
         fileInfo = Info(n);
         normalizedName = FullPath(n);
         return STATUS_SUCCESS;
@@ -423,8 +410,27 @@ public sealed class DriveFileSystem : FileSystemBase
         var n = _db.Get(h.Id) ?? throw new FileNotFoundException();
         if (offset >= (ulong)n.Size) return STATUS_END_OF_FILE;
         var span = new Span<byte>((void*)buffer, (int)length);
-        bool preview = h.Preview && Interlocked.Add(ref h.PreviewBytes, length) <= PreviewBudget;
+        bool preview = false;
+        if (h.Preview)
+            lock (h)
+            {
+                if (length >= CopyReadSize) h.Preview = false; // copying it: the rest is cached as usual
+                else
+                {
+                    h.PreviewWindows ??= [];
+                    for (long w = (long)(offset >> 20); w <= (long)((offset + length - 1) >> 20); w++) h.PreviewWindows.Add(w);
+                    preview = h.PreviewWindows.Count <= PreviewWindowsPerOpen;
+                    if (!preview) h.Preview = false;
+                }
+            }
+        long before = h.ToldDownload ? 0 : _engine.BytesDownloaded;
         bytesTransferred = (uint)_engine.Read(h.Id, (long)offset, span, allowRemote: true, preview);
+        // the log names who makes DriveGram download (once per opening): Explorer's previews, a player, ...
+        if (!h.ToldDownload && _engine.BytesDownloaded > before)
+        {
+            h.ToldDownload = true;
+            Log.Info($"downloading for {h.Program}{(preview ? " (preview)" : "")}: {n.Name}");
+        }
         return STATUS_SUCCESS;
     }
 
