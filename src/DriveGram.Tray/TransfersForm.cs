@@ -75,6 +75,77 @@ sealed class TransfersForm : Form
     readonly ImageList _icons = new() { ImageSize = new Size(18, 18), ColorDepth = ColorDepth.Depth32Bit };
     readonly System.Windows.Forms.Timer _timer = new() { Interval = 1000 };
 
+    readonly ToolTip _legendTip = new() { AutoPopDelay = 20000, InitialDelay = 300 };
+
+    /// <summary>What the marks on files in Explorer mean (the real icons), one short line each; the full
+    /// meaning when the mouse rests on one.</summary>
+    Control Legend()
+    {
+        var row = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.LeftToRight, WrapContents = true, Padding = new Padding(8, 6, 8, 0),
+        };
+        row.Controls.Add(new Label { Text = L.T("הסימנים בסייר הקבצים:", "The marks in Explorer:"), Font = Theme.Small, ForeColor = Theme.Text, AutoSize = true, Margin = new Padding(0, 3, 10, 4) });
+        void Item(string? icon, string text, string tip)
+        {
+            var item = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, WrapContents = false, AutoSize = true, Margin = new Padding(0, 0, 14, 4) };
+            if (icon is not null && OverlayMark(icon) is { } img)
+            {
+                var pic = new PictureBox { Image = img, Size = img.Size, SizeMode = PictureBoxSizeMode.CenterImage, Margin = new Padding(0, 0, 3, 0) };
+                _legendTip.SetToolTip(pic, tip);
+                item.Controls.Add(pic);
+            }
+            var label = new Label { Text = text, Font = Theme.Small, ForeColor = Theme.Muted, AutoSize = true, Margin = new Padding(0, 3, 0, 0) };
+            _legendTip.SetToolTip(label, tip);
+            item.Controls.Add(label);
+            _legendTip.SetToolTip(item, tip);
+            row.Controls.Add(item);
+        }
+        Item("upload", L.T("עוד לא בטלגרם", "Not in Telegram yet"),
+            L.T("מחכה להעלאה, או עולה עכשיו. הקובץ נמצא רק במחשב הזה: לא לכבות ולא לנתק את הכונן עד שהסימן מתחלף.",
+                "Waiting to upload, or uploading now. The file is only on this PC: do not shut down or disconnect the drive until the mark changes."));
+        Item("paused", L.T("מושהה, עוד לא בטלגרם", "Paused, not in Telegram yet"),
+            L.T("ההעלאה של הקובץ מושהית. הוא נמצא רק במחשב הזה, ויעלה כשתמשיך את ההעלאה.",
+                "The file's upload is paused. It is only on this PC, and goes up when you resume the upload."));
+        Item("here", L.T("בטלגרם, וכולו גם כאן", "In Telegram, all of it here too"),
+            L.T("שמור בטלגרם, וכל הקובץ נמצא גם במחשב הזה, אז הוא נפתח מיד. כשצריך מקום, העותק הזה עשוי להתפנות, ואז הקובץ יורד שוב כשפותחים אותו.",
+                "Saved in Telegram, and all of it is on this PC too, so it opens at once. When room is needed this copy may be freed; then it downloads again when opened."));
+        Item("kept", L.T("בטלגרם, ומוכן כאן", "In Telegram, prepared here"),
+            L.T("שמור בטלגרם, והכנת אותו במחשב הזה: הוא נשאר כאן עד שתפנה אותו, ונפתח מיד, גם בלי אינטרנט.",
+                "Saved in Telegram, and you prepared it on this PC: it stays here until you free it, and opens at once, even offline."));
+        Item("partial", L.T("בטלגרם, וחלק ממנו כאן", "In Telegram, part of it here"),
+            L.T("שמור בטלגרם. רק החלקים שכבר נפתחו נמצאים במחשב הזה, והשאר יורד כשצריך אותו.",
+                "Saved in Telegram. Only the parts already opened are on this PC; the rest downloads when needed."));
+        Item(null, L.T("בלי סימן: רק בטלגרם", "No mark: only in Telegram"),
+            L.T("שמור בטלגרם, ושום חלק ממנו לא במחשב הזה. הוא יורד כשפותחים אותו (צריך אינטרנט).",
+                "Saved in Telegram, and none of it is on this PC. It downloads when opened (needs internet)."));
+        return row;
+    }
+
+    /// <summary>The mark itself, cut out of the overlay icon the Explorer extension uses (its corner of a
+    /// 32 px icon); null when the icon file is not there.</summary>
+    static Image? OverlayMark(string name)
+    {
+        try
+        {
+            var dir = AppContext.BaseDirectory;
+            for (int i = 0; i < 8 && dir is not null; i++) // next to the program; while developing, the repo's assets
+            {
+                foreach (var p in new[] { Path.Combine(dir, $"overlay-{name}.ico"), Path.Combine(dir, "assets", $"overlay-{name}.ico") })
+                    if (File.Exists(p))
+                    {
+                        using var icon = new Icon(p, 32, 32);
+                        using var full = icon.ToBitmap();
+                        return full.Clone(new Rectangle(0, 12, 20, 20), full.PixelFormat);
+                    }
+                dir = Path.GetDirectoryName(dir.TrimEnd('\\', '/'));
+            }
+        }
+        catch (Exception ex) { Log.Debug($"legend icon {name}: {ex.Message}"); }
+        return null;
+    }
+
     sealed record LocalRow(DriveController Drive, DriveSession Session, string Id, string Name, string Path, long Size, double Fraction, bool Prepared);
 
     public TransfersForm(ITransfersHost host)
@@ -143,7 +214,7 @@ sealed class TransfersForm : Form
         _upEmpty.Dock = DockStyle.Top;
         _upEmpty.Padding = new Padding(10, 14, 10, 0);
         _upEmpty.Visible = false;
-        upTab.Controls.AddRange([_up, _upEmpty, upNote, upBar]);
+        upTab.Controls.AddRange([_up, _upEmpty, upNote, Legend(), upBar]);
 
         // ── tab 2: on this PC ──
         var localTab = new TabPage(L.T("קבצים במחשב הזה", "Files on this PC")) { BackColor = Color.White, ImageKey = "part" };
@@ -170,7 +241,7 @@ sealed class TransfersForm : Form
         localNote.Padding = new Padding(8, 6, 8, 2);
         _localState.Dock = DockStyle.Bottom;
         _localState.Padding = new Padding(8, 2, 8, 6);
-        localTab.Controls.AddRange([_local, localNote, _localState, localBar]);
+        localTab.Controls.AddRange([_local, localNote, _localState, Legend(), localBar]);
 
         _tabs.ImageList = _icons;
         _tabs.TabPages.AddRange([upTab, localTab]);

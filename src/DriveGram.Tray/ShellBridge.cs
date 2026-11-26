@@ -7,9 +7,14 @@ namespace DriveGram.Tray;
 
 /// <summary>
 /// The line between Explorer and DriveGram: the small shell extension (overlay icons and the right-click
-/// menu) asks here how much of a file is on this PC, and asks to prepare or free files. A named pipe of
-/// this Windows session, open to the current user only. One request per connection, UTF-8 text:
-///   L \t path                 → percent on this PC (0-100), or -1 (not a DriveGram file)
+/// menu) asks here what state a file is in (saved in Telegram yet? how much of it is on this PC?), and asks
+/// to prepare or free files. A named pipe of this Windows session, open to the current user only. One
+/// request per connection, UTF-8 text:
+///   S \t path                 → one letter: P paused upload, U waiting to upload / uploading (not in
+///                               Telegram yet); K prepared, F all here, H partly here, 0 not here (saved
+///                               in Telegram); - not a DriveGram file
+///   L \t path                 → percent on this PC (0-100), or -1 (the 1.3.0 extension, still loaded by
+///                               Explorer until the next sign-in)
 ///   M \t path \x1f path ...   → the menu lines: info \x1f prepare \x1f free (an empty line: no such item)
 ///   P \t paths  /  F \t paths → prepare / free those files; the answer is "ok"
 /// </summary>
@@ -34,6 +39,7 @@ sealed class ShellBridge : IDisposable
 
     readonly CancellationTokenSource _cts = new();
     readonly Dictionary<string, (int Percent, long At)> _recent = new(StringComparer.OrdinalIgnoreCase);
+    readonly Dictionary<string, (char State, long At)> _states = new(StringComparer.OrdinalIgnoreCase);
 
     public void Start()
     {
@@ -90,6 +96,7 @@ sealed class ShellBridge : IDisposable
         var paths = request[2..].Split('\x1f', StringSplitOptions.RemoveEmptyEntries).Take(MaxPaths).ToArray();
         switch (request[0])
         {
+            case 'S': return paths.Length == 1 ? State(paths[0]).ToString() : "-";
             case 'L': return paths.Length == 1 ? Percent(paths[0]).ToString() : "-1";
             case 'M': return Menu(paths);
             case 'P': Prepare(paths); Forget(paths); return "ok";
@@ -98,9 +105,39 @@ sealed class ShellBridge : IDisposable
         }
     }
 
-    void Forget(IEnumerable<string> paths)
+    /// <summary>These files' answers are asked again (they changed state).</summary>
+    public void Forget(IEnumerable<string> paths)
     {
-        lock (_recent) foreach (var p in paths) _recent.Remove(p);
+        lock (_recent) foreach (var p in paths) { _recent.Remove(p); _states.Remove(p); }
+    }
+
+    /// <summary>The file's state for Explorer's icons (one icon per state); asked for every file shown,
+    /// so kept for a moment.</summary>
+    char State(string path)
+    {
+        long now = Environment.TickCount64;
+        lock (_recent)
+        {
+            if (_states.TryGetValue(path, out var r) && now - r.At < 1500) return r.State;
+            if (_states.Count > 5000) _states.Clear();
+        }
+        char state = '-';
+        try
+        {
+            if (Resolve(path) is { } f)
+            {
+                var e = f.Session.Engine;
+                if (e.IsWaitingToUpload(f.Id)) state = e.IsPaused(f.Id) ? 'P' : 'U';
+                else
+                {
+                    int p = Percent(path);
+                    state = p >= 100 ? (e.IsPrepared(f.Id) ? 'K' : 'F') : p > 0 ? 'H' : '0';
+                }
+            }
+        }
+        catch (Exception ex) { Log.Debug($"shell bridge: {path}: {ex.Message}"); }
+        lock (_recent) _states[path] = (state, now);
+        return state;
     }
 
     /// <summary>Percent of the file on this PC; asked for every file Explorer shows, so kept for a moment.</summary>
@@ -136,9 +173,12 @@ sealed class ShellBridge : IDisposable
         {
             var (s, id) = all[0];
             int p = Percent(paths[0]);
-            info = IsPreparing(s, id) ? L.T("DriveGram: מוריד למחשב הזה…", "DriveGram: downloading to this PC…")
-                : s.Engine.IsPrepared(id) && p >= 100 ? L.T("DriveGram: מוכן במחשב הזה ✓", "DriveGram: ready on this PC ✓")
-                : L.T($"DriveGram: {p}% במחשב הזה", $"DriveGram: {p}% on this PC");
+            info = s.Engine.IsWaitingToUpload(id)
+                    ? s.Engine.IsPaused(id) ? L.T("DriveGram: ההעלאה מושהית, עוד לא שמור בטלגרם", "DriveGram: upload paused, not in Telegram yet")
+                        : L.T("DriveGram: מחכה להעלאה, עוד לא שמור בטלגרם", "DriveGram: waiting to upload, not in Telegram yet")
+                : IsPreparing(s, id) ? L.T("DriveGram: מוריד למחשב הזה…", "DriveGram: downloading to this PC…")
+                : s.Engine.IsPrepared(id) && p >= 100 ? L.T("DriveGram: שמור בטלגרם, ומוכן במחשב הזה ✓", "DriveGram: saved in Telegram, and ready on this PC ✓")
+                : L.T($"DriveGram: שמור בטלגרם, {p}% ממנו במחשב הזה", $"DriveGram: saved in Telegram, {p}% of it on this PC");
         }
         else info = L.T($"DriveGram: {all.Count} קבצים", $"DriveGram: {all.Count} files");
         bool anyToPrepare = all.Any(f => !f.Session.Engine.IsPrepared(f.Id) || f.Session.Engine.LocalFraction(f.Id) < 0.999);

@@ -1,10 +1,11 @@
-// DriveGram shell extension: Explorer overlay icons (how much of a file is on this PC) and the
+// DriveGram shell extension: Explorer overlay icons (is the file saved in Telegram yet, how much of it is on
+// this PC) and the
 // right-click menu ("prepare on this PC" / "free up from this PC") for files on DriveGram drives.
 //
 // It knows nothing by itself: it asks the DriveGram tray app over a named pipe of this Windows session
 // (DriveGram.Shell.<session>), with a short timeout, and does nothing at all when the tray app is not
 // running or the file is not on a DriveGram drive. Protocol (UTF-8, one request per call):
-//   L \t path                → percent on this PC (0-100) or -1
+//   S \t path                → the file's state, one letter (see State below) or "-" (not ours)
 //   M \t path \x1f path ...  → info \x1f prepare \x1f free   (an empty item: not offered)
 //   P|F \t path \x1f ...     → prepare / free; answer "ok"
 //
@@ -21,16 +22,19 @@
 #include <mutex>
 #include <unordered_map>
 
-// {3A8D5C75-0A14-4F04-AC1B-82799D1FF05A}  overlay: all of the file is on this PC
+// {3A8D5C75-0A14-4F04-AC1B-82799D1FF05A}  overlay: saved in Telegram, all of it on this PC (may be freed)
 static const CLSID CLSID_OverlayFull = { 0x3a8d5c75, 0x0a14, 0x4f04, { 0xac, 0x1b, 0x82, 0x79, 0x9d, 0x1f, 0xf0, 0x5a } };
-// {006DEF2B-A011-41AA-8849-4968A8C56AD6}  overlay: part of the file is on this PC
+// {006DEF2B-A011-41AA-8849-4968A8C56AD6}  overlay: saved in Telegram, part of it on this PC
 static const CLSID CLSID_OverlayPart = { 0x006def2b, 0xa011, 0x41aa, { 0x88, 0x49, 0x49, 0x68, 0xa8, 0xc5, 0x6a, 0xd6 } };
+// {7A6202B0-1496-4AA2-93F9-32ADD9D26985}  overlay: saved in Telegram, prepared on this PC (kept until freed)
+static const CLSID CLSID_OverlayKept = { 0x7a6202b0, 0x1496, 0x4aa2, { 0x93, 0xf9, 0x32, 0xad, 0xd9, 0xd2, 0x69, 0x85 } };
+// {54A010A3-BBFE-429A-B67E-1625D8BCC7F0}  overlay: not in Telegram yet (waiting to upload, or uploading)
+static const CLSID CLSID_OverlayUpload = { 0x54a010a3, 0xbbfe, 0x429a, { 0xb6, 0x7e, 0x16, 0x25, 0xd8, 0xbc, 0xc7, 0xf0 } };
+// {DF25C5D1-CE6A-4208-82B8-711293B1114D}  overlay: not in Telegram yet, its upload is paused
+static const CLSID CLSID_OverlayPaused = { 0xdf25c5d1, 0xce6a, 0x4208, { 0x82, 0xb8, 0x71, 0x12, 0x93, 0xb1, 0x11, 0x4d } };
 // {3A0A7ED8-925A-4D76-AE2A-A88E6D8D83B8}  right-click menu
 static const CLSID CLSID_Menu = { 0x3a0a7ed8, 0x925a, 0x4d76, { 0xae, 0x2a, 0xa8, 0x8e, 0x6d, 0x8d, 0x83, 0xb8 } };
 
-static const wchar_t* kFullName = L"   DriveGramFull";    // leading spaces: Explorer shows only the first 15
-static const wchar_t* kPartName = L"   DriveGramPartial"; // overlays, sorted by name
-static const wchar_t* kMenuName = L"DriveGram";
 
 static HINSTANCE g_inst = nullptr;
 static long g_locks = 0, g_objects = 0;
@@ -153,7 +157,7 @@ static bool Ask(const std::wstring& request, std::wstring& answer, DWORD timeout
 // ── is this a file on a DriveGram drive? (asked a lot: cached) ───────────────
 static std::mutex g_gate;
 static std::unordered_map<wchar_t, std::pair<bool, ULONGLONG>> g_volumes;           // drive letter → DriveGram?
-static std::unordered_map<std::wstring, std::pair<int, ULONGLONG>> g_percent;        // path → percent
+static std::unordered_map<std::wstring, std::pair<wchar_t, ULONGLONG>> g_state;      // path → state
 
 static bool OnDriveGramVolume(const wchar_t* path)
 {
@@ -187,29 +191,35 @@ static bool OnDriveGramVolume(const wchar_t* path)
     return yes;
 }
 
-static int PercentHere(const wchar_t* path)
+// A file's state, one letter (the tray app decides; one overlay each, so they never compete):
+//   P  not in Telegram yet, its upload is paused      U  not in Telegram yet (waiting, or uploading)
+//   K  saved, prepared on this PC (kept)               F  saved, all of it on this PC (may be freed)
+//   H  saved, part of it on this PC                    0  saved, none of it here      -  not ours
+// Asked once for all five overlays of a file (each one asks): kept for 2 s. The tray app tells Explorer
+// to look again when a file changes state, a little after the change, so this never hides it for long.
+static wchar_t State(const wchar_t* path)
 {
-    if (!OnDriveGramVolume(path)) return -1;
+    if (!OnDriveGramVolume(path)) return L'-';
     ULONGLONG now = GetTickCount64();
     std::wstring key(path);
     {
         std::lock_guard<std::mutex> lock(g_gate);
-        auto it = g_percent.find(key);
-        if (it != g_percent.end() && now - it->second.second < 4000) return it->second.first;
-        if (g_percent.size() > 4000) g_percent.clear();
+        auto it = g_state.find(key);
+        if (it != g_state.end() && now - it->second.second < 2000) return it->second.first;
+        if (g_state.size() > 4000) g_state.clear();
     }
-    int percent = -1;
+    wchar_t state = L'-';
     std::wstring answer;
-    if (Ask(L"L\t" + key, answer, 150)) percent = _wtoi(answer.c_str());
+    if (Ask(L"S\t" + key, answer, 150) && answer.size() == 1) state = answer[0];
     std::lock_guard<std::mutex> lock(g_gate);
-    g_percent[key] = { percent, now };
-    return percent;
+    g_state[key] = { state, now };
+    return state;
 }
 
 static void Forget()
 {
     std::lock_guard<std::mutex> lock(g_gate);
-    g_percent.clear();
+    g_state.clear();
 }
 
 static std::wstring ModuleDir()
@@ -224,9 +234,9 @@ static std::wstring ModuleDir()
 class Overlay : public IShellIconOverlayIdentifier
 {
     long _refs = 1;
-    bool _full;
+    wchar_t _state; // the State() letter this overlay stands for
 public:
-    explicit Overlay(bool full) : _full(full) { InterlockedIncrement(&g_objects); }
+    explicit Overlay(wchar_t state) : _state(state) { InterlockedIncrement(&g_objects); }
     ~Overlay() { InterlockedDecrement(&g_objects); }
 
     IFACEMETHODIMP QueryInterface(REFIID riid, void** ppv) override
@@ -242,20 +252,22 @@ public:
     IFACEMETHODIMP IsMemberOf(LPCWSTR path, DWORD attrib) override
     {
         if (attrib & FILE_ATTRIBUTE_DIRECTORY) return S_FALSE;
-        int p = PercentHere(path);
-        if (_full) return p >= 100 ? S_OK : S_FALSE;
-        return p > 0 && p < 100 ? S_OK : S_FALSE;
+        return State(path) == _state ? S_OK : S_FALSE;
     }
     IFACEMETHODIMP GetOverlayInfo(LPWSTR iconFile, int cch, int* index, DWORD* flags) override
     {
-        std::wstring file = ModuleDir() + (_full ? L"\\overlay-full.ico" : L"\\overlay-partial.ico");
+        // new file names in 1.3.1 (the "all here" look changed): Explorer's icon cache never shows the old one
+        const wchar_t* name = _state == L'P' ? L"\\overlay-paused.ico" : _state == L'U' ? L"\\overlay-upload.ico"
+            : _state == L'K' ? L"\\overlay-kept.ico" : _state == L'F' ? L"\\overlay-here.ico" : L"\\overlay-partial.ico";
+        std::wstring file = ModuleDir() + name;
         if ((int)file.size() + 1 > cch) return E_FAIL;
         wcscpy_s(iconFile, cch, file.c_str());
         *index = 0;
         *flags = ISIOI_ICONFILE;
         return S_OK;
     }
-    IFACEMETHODIMP GetPriority(int* priority) override { *priority = 50; return S_OK; }
+    // "not in Telegram yet" first, should two ever match (they do not: one state per file)
+    IFACEMETHODIMP GetPriority(int* priority) override { *priority = _state == L'P' ? 0 : _state == L'U' ? 10 : 50; return S_OK; }
 };
 
 // ── right-click menu ─────────────────────────────────────────────────────────
@@ -352,6 +364,12 @@ public:
 };
 
 // ── class factory and DLL exports ────────────────────────────────────────────
+static wchar_t OverlayState(REFCLSID clsid)
+{
+    return clsid == CLSID_OverlayPaused ? L'P' : clsid == CLSID_OverlayUpload ? L'U' : clsid == CLSID_OverlayKept ? L'K'
+        : clsid == CLSID_OverlayFull ? L'F' : clsid == CLSID_OverlayPart ? L'H' : 0;
+}
+
 class Factory : public IClassFactory
 {
     long _refs = 1;
@@ -374,8 +392,7 @@ public:
         *ppv = nullptr;
         if (outer) return CLASS_E_NOAGGREGATION;
         IUnknown* obj = nullptr;
-        if (_clsid == CLSID_OverlayFull) obj = static_cast<IShellIconOverlayIdentifier*>(new (std::nothrow) Overlay(true));
-        else if (_clsid == CLSID_OverlayPart) obj = static_cast<IShellIconOverlayIdentifier*>(new (std::nothrow) Overlay(false));
+        if (wchar_t state = OverlayState(_clsid)) obj = static_cast<IShellIconOverlayIdentifier*>(new (std::nothrow) Overlay(state));
         else if (_clsid == CLSID_Menu) obj = static_cast<IShellExtInit*>(new (std::nothrow) Menu());
         if (!obj) return E_OUTOFMEMORY;
         HRESULT hr = obj->QueryInterface(riid, ppv);
@@ -406,7 +423,7 @@ STDAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void** ppv)
 {
     if (!ppv) return E_POINTER;
     *ppv = nullptr;
-    if (clsid != CLSID_OverlayFull && clsid != CLSID_OverlayPart && clsid != CLSID_Menu) return CLASS_E_CLASSNOTAVAILABLE;
+    if (!OverlayState(clsid) && clsid != CLSID_Menu) return CLASS_E_CLASSNOTAVAILABLE;
     if (Elevated()) return CLASS_E_CLASSNOTAVAILABLE; // never inside a program running as admin
     auto f = new (std::nothrow) Factory(clsid);
     if (!f) return E_OUTOFMEMORY;
@@ -419,7 +436,7 @@ STDAPI DllCanUnloadNow() { return g_locks == 0 && g_objects == 0 ? S_OK : S_FALS
 
 // ── registration ─────────────────────────────────────────────────────────────
 // Done by the installer, not by this DLL: the COM classes and the right-click menu PER USER (HKCU, no
-// admin), and the two overlay NAMES machine-wide (Explorer reads them from HKLM only) with Windows' own
+// admin), and the five overlay NAMES machine-wide (Explorer reads them from HKLM only) with Windows' own
 // reg.exe. An elevated program of this user CAN load this DLL (with UAC on, elevated processes still read
 // the user's own COM registrations): DllGetClassObject refuses there (Elevated()), and DllMain does
 // nothing, so no code of this file runs inside a program that runs as admin.

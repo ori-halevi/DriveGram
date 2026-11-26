@@ -6,7 +6,7 @@
 
 #define AppName "DriveGram"
 #ifndef AppVersion
-  #define AppVersion "1.3.0"
+  #define AppVersion "1.3.1"
 #endif
 #define WinFspMsi "winfsp-2.1.25156.msi"
 
@@ -56,8 +56,8 @@ hebrew.CleanupLocalOnly=⚠ יש במחשב הזה קבצים שעוד לא על
 english.CleanupLocalOnly=⚠ This PC has files not yet uploaded to Telegram, or changes not yet sent. Deleting now loses them for good.%n%nDelete anyway?
 hebrew.WinFspFailed=התקנת WinFsp לא הושלמה. הכונן לא יעבוד בלעדיו. אפשר להתקין אותו ידנית מהכתובת https://winfsp.dev/rel
 english.Desktop=Create a desktop shortcut
-english.ShellIcons=Next, Windows asks permission for "Windows Command Processor". That is DriveGram: it adds icons on files in Explorer (how much of each file is on this PC).%n%nYou may also decline: then only the icons are missing, everything else works. The icons appear after you next sign in to Windows.
-hebrew.ShellIcons=מיד ווינדוס יבקש אישור עבור "מעבד הפקודות של Windows". זה DriveGram: הוא מוסיף סימנים על קבצים בסייר הקבצים (כמה מכל קובץ נמצא במחשב).%n%nאפשר גם לסרב: אז רק הסימנים לא יופיעו, וכל השאר עובד. הסימנים יופיעו אחרי הכניסה הבאה לווינדוס.
+english.ShellIcons=Next, Windows asks permission for "Windows Command Processor". That is DriveGram: it adds icons on files in Explorer (is the file saved in Telegram yet, and how much of it is on this PC).%n%nYou may also decline: then only the icons are missing, everything else works. The icons appear after you next sign in to Windows.
+hebrew.ShellIcons=מיד ווינדוס יבקש אישור עבור "מעבד הפקודות של Windows". זה DriveGram: הוא מוסיף סימנים על קבצים בסייר הקבצים (האם הקובץ כבר שמור בטלגרם, וכמה ממנו נמצא במחשב).%n%nאפשר גם לסרב: אז רק הסימנים לא יופיעו, וכל השאר עובד. הסימנים יופיעו אחרי הכניסה הבאה לווינדוס.
 english.UnShellIcons=Next, Windows asks permission for "Windows Command Processor": that is DriveGram, removing the icons it added on files. You may also decline.
 hebrew.UnShellIcons=מיד ווינדוס יבקש אישור עבור "מעבד הפקודות של Windows": זה DriveGram, שמסיר את הסימנים שהוסיף על קבצים. אפשר גם לסרב.
 english.Launch=Start DriveGram now
@@ -87,6 +87,15 @@ Root: HKCU; Subkey: "Software\Classes\CLSID\{{3A8D5C75-0A14-4F04-AC1B-82799D1FF0
 Root: HKCU; Subkey: "Software\Classes\CLSID\{{006DEF2B-A011-41AA-8849-4968A8C56AD6}"; ValueType: string; ValueData: "DriveGram overlay (partly on this PC)"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\CLSID\{{006DEF2B-A011-41AA-8849-4968A8C56AD6}\InprocServer32"; ValueType: string; ValueData: "{app}\DriveGramShell-{#AppVersion}.dll"
 Root: HKCU; Subkey: "Software\Classes\CLSID\{{006DEF2B-A011-41AA-8849-4968A8C56AD6}\InprocServer32"; ValueType: string; ValueName: "ThreadingModel"; ValueData: "Apartment"
+Root: HKCU; Subkey: "Software\Classes\CLSID\{{7A6202B0-1496-4AA2-93F9-32ADD9D26985}"; ValueType: string; ValueData: "DriveGram overlay (prepared on this PC)"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\CLSID\{{7A6202B0-1496-4AA2-93F9-32ADD9D26985}\InprocServer32"; ValueType: string; ValueData: "{app}\DriveGramShell-{#AppVersion}.dll"
+Root: HKCU; Subkey: "Software\Classes\CLSID\{{7A6202B0-1496-4AA2-93F9-32ADD9D26985}\InprocServer32"; ValueType: string; ValueName: "ThreadingModel"; ValueData: "Apartment"
+Root: HKCU; Subkey: "Software\Classes\CLSID\{{54A010A3-BBFE-429A-B67E-1625D8BCC7F0}"; ValueType: string; ValueData: "DriveGram overlay (not in Telegram yet)"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\CLSID\{{54A010A3-BBFE-429A-B67E-1625D8BCC7F0}\InprocServer32"; ValueType: string; ValueData: "{app}\DriveGramShell-{#AppVersion}.dll"
+Root: HKCU; Subkey: "Software\Classes\CLSID\{{54A010A3-BBFE-429A-B67E-1625D8BCC7F0}\InprocServer32"; ValueType: string; ValueName: "ThreadingModel"; ValueData: "Apartment"
+Root: HKCU; Subkey: "Software\Classes\CLSID\{{DF25C5D1-CE6A-4208-82B8-711293B1114D}"; ValueType: string; ValueData: "DriveGram overlay (upload paused)"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\CLSID\{{DF25C5D1-CE6A-4208-82B8-711293B1114D}\InprocServer32"; ValueType: string; ValueData: "{app}\DriveGramShell-{#AppVersion}.dll"
+Root: HKCU; Subkey: "Software\Classes\CLSID\{{DF25C5D1-CE6A-4208-82B8-711293B1114D}\InprocServer32"; ValueType: string; ValueName: "ThreadingModel"; ValueData: "Apartment"
 Root: HKCU; Subkey: "Software\Classes\CLSID\{{3A0A7ED8-925A-4D76-AE2A-A88E6D8D83B8}"; ValueType: string; ValueData: "DriveGram menu"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\CLSID\{{3A0A7ED8-925A-4D76-AE2A-A88E6D8D83B8}\InprocServer32"; ValueType: string; ValueData: "{app}\DriveGramShell-{#AppVersion}.dll"
 Root: HKCU; Subkey: "Software\Classes\CLSID\{{3A0A7ED8-925A-4D76-AE2A-A88E6D8D83B8}\InprocServer32"; ValueType: string; ValueName: "ThreadingModel"; ValueData: "Apartment"
@@ -112,34 +121,66 @@ Type: files; Name: "{app}\DriveGramShell-*.dll"
 [Code]
 const
   OverlayKey = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers\';
-  FullName = '   DriveGramFull';     { leading spaces: Explorer uses only the first 15 overlays, by name }
-  PartName = '   DriveGramPartial';
+  OverlayCount = 5;
+
+{ leading spaces: Explorer uses only the first 15 overlays, by name }
+function OverlayName(I: Integer): String;
+begin
+  case I of
+    0: Result := '   DriveGramFull';
+    1: Result := '   DriveGramPartial';
+    2: Result := '   DriveGramKept';
+    3: Result := '   DriveGramUpload';
+  else Result := '   DriveGramPaused';
+  end;
+end;
+
+function OverlayClsid(I: Integer): String;
+begin
+  case I of
+    0: Result := '{3A8D5C75-0A14-4F04-AC1B-82799D1FF05A}';
+    1: Result := '{006DEF2B-A011-41AA-8849-4968A8C56AD6}';
+    2: Result := '{7A6202B0-1496-4AA2-93F9-32ADD9D26985}';
+    3: Result := '{54A010A3-BBFE-429A-B67E-1625D8BCC7F0}';
+  else Result := '{DF25C5D1-CE6A-4208-82B8-711293B1114D}';
+  end;
+end;
 
 function NeedsOverlayNames: Boolean;
+var I: Integer;
 begin
-  Result := not RegKeyExists(HKLM64, OverlayKey + FullName) or not RegKeyExists(HKLM64, OverlayKey + PartName);
+  Result := False;
+  for I := 0 to OverlayCount - 1 do
+    if not RegKeyExists(HKLM64, OverlayKey + OverlayName(I)) then Result := True;
 end;
 
 function HasOverlayNames: Boolean;
+var I: Integer;
 begin
-  Result := RegKeyExists(HKLM64, OverlayKey + FullName) or RegKeyExists(HKLM64, OverlayKey + PartName);
+  Result := False;
+  for I := 0 to OverlayCount - 1 do
+    if RegKeyExists(HKLM64, OverlayKey + OverlayName(I)) then Result := True;
 end;
 
-{ The two overlay icons need their names machine-wide (Explorer reads them only there): one Windows
+{ The overlay icons need their names machine-wide (Explorer reads them only there): one Windows
   permission prompt. Windows' own reg.exe writes them (no admin process ever loads the DLL: its folder is
   the user's); cmd /d: no AutoRun command of the user's runs with the admin rights. Declined (or failed):
   nothing is said, there are just no icons on files; everything else works. }
 procedure SetOverlayNames(Add: Boolean);
 var Reg, Params: String;
-    Code: Integer;
+    Code, I: Integer;
 begin
   Reg := ExpandConstant('{sys}\reg.exe');
-  if Add then
-    Params := '/d /c ' + Reg + ' add "HKLM\' + OverlayKey + FullName + '" /ve /d "{3A8D5C75-0A14-4F04-AC1B-82799D1FF05A}" /f /reg:64 && '
-      + Reg + ' add "HKLM\' + OverlayKey + PartName + '" /ve /d "{006DEF2B-A011-41AA-8849-4968A8C56AD6}" /f /reg:64'
-  else
-    Params := '/d /c ' + Reg + ' delete "HKLM\' + OverlayKey + FullName + '" /f /reg:64 & '
-      + Reg + ' delete "HKLM\' + OverlayKey + PartName + '" /f /reg:64';
+  Params := '/d /c ';
+  for I := 0 to OverlayCount - 1 do
+  begin
+    if I > 0 then
+      if Add then Params := Params + ' && ' else Params := Params + ' & '; { delete: each one, even if one is gone }
+    if Add then
+      Params := Params + Reg + ' add "HKLM\' + OverlayKey + OverlayName(I) + '" /ve /d "' + OverlayClsid(I) + '" /f /reg:64'
+    else
+      Params := Params + Reg + ' delete "HKLM\' + OverlayKey + OverlayName(I) + '" /f /reg:64';
+  end;
   ShellExec('runas', ExpandConstant('{sys}\cmd.exe'), Params, '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 

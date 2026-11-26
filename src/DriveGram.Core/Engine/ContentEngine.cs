@@ -1713,6 +1713,10 @@ public sealed class ContentEngine : IAsyncDisposable
 
     /// <summary>Pending files that are not paused (what "wait for the uploads" waits for).</summary>
     public int PendingNotPaused() => _db.PendingNodes().Count(id => !IsPaused(id));
+    /// <summary>Every file not in Telegram yet, and whether its upload is paused (Explorer's icons follow this).</summary>
+    public List<(string Id, bool Paused)> PendingStates() => _db.PendingNodes().Select(id => (id, IsPaused(id))).ToList();
+    /// <summary>The file is not in Telegram yet: waiting to upload, or uploading.</summary>
+    public bool IsWaitingToUpload(string id) => _db.IsPending(id);
 
     /// <summary>Wait until every pending file is committed (used before unmount / handing over).</summary>
     /// <param name="stall">give up when nothing moved for this long (offline / signed out): the files

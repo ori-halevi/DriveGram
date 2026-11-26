@@ -37,6 +37,8 @@ sealed class DriveController
     public DateTime UploadSince;      // when it started
     public long UploadedAtStart;      // the engine's byte counter then
     public int MostFiles;             // the most files waiting at once (for "N files uploaded")
+    public Dictionary<string, bool>? ShellSeen; // files not in Telegram yet (paused?) as Explorer's icons last showed them
+    public DriveSession? ShellSeenFor;
     public bool ToldUploadStart;      // the "uploading, wait for the message" balloon was shown
     public DateTime DiskShortQuietUntil;
     public SwitchAccountForm? SwitchAccount;
@@ -1555,6 +1557,35 @@ sealed class TrayApp : ApplicationContext, IMainHost
     [System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
     static extern void SHChangeNotify(int eventId, uint flags, string item1, IntPtr item2);
 
+    /// <summary>A file started or finished its upload, or was paused or resumed: Explorer is told to redraw
+    /// its icon (it does not ask by itself). Told a moment later, once the extension's own short memory of
+    /// the old state has passed.</summary>
+    void TrackShellIcons(DriveController d)
+    {
+        if (_bridge is null) return;
+        if (d.Session is not { } s || d.Stopping) { d.ShellSeen = null; d.ShellSeenFor = null; return; }
+        Dictionary<string, bool> now;
+        try { now = s.Engine.PendingStates().GroupBy(x => x.Id).ToDictionary(g => g.Key, g => g.First().Paused); }
+        catch (Exception ex) { Log.Debug($"shell icons: {ex.Message}"); return; }
+        var before = d.ShellSeenFor == s ? d.ShellSeen : null;
+        d.ShellSeen = now;
+        d.ShellSeenFor = s;
+        if (before is null) return; // the first look: Explorer asks by itself as it shows the files
+        var changed = now.Where(x => !before.TryGetValue(x.Key, out var p) || p != x.Value).Select(x => x.Key)
+            .Concat(before.Keys.Where(id => !now.ContainsKey(id)))
+            .Take(500).ToList();
+        if (changed.Count == 0) return;
+        var paths = new List<string>();
+        foreach (var id in changed)
+            try { paths.Add(s.FullPathOf(id)); } catch { } // deleted meanwhile: no icon to redraw
+        _bridge.Forget(paths);
+        _ = Task.Delay(2500).ContinueWith(_ =>
+        {
+            _bridge?.Forget(paths);
+            foreach (var p in paths) ShellChanged(p);
+        }, TaskScheduler.Default);
+    }
+
     /// <summary>Explorer redraws the file's overlay icon (how much of it is on this PC).</summary>
     static void ShellChanged(string path)
     {
@@ -1805,6 +1836,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
     {
         if (_quitting) { TrackDaily(); return; } // "wait, then exit": what still goes up counts for today
         foreach (var d in _drives) TrackUploads(d);
+        foreach (var d in _drives) TrackShellIcons(d);
         TrackDaily();
         bool busy = _drives.Any(d => d.Busy || d.Starting || d.Stopping);
         _icon.Icon = busy ? _busy : _idle;
