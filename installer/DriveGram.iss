@@ -6,7 +6,7 @@
 
 #define AppName "DriveGram"
 #ifndef AppVersion
-  #define AppVersion "1.3.1"
+  #define AppVersion "1.3.2"
 #endif
 #define WinFspMsi "winfsp-2.1.25156.msi"
 
@@ -31,6 +31,10 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 ShowLanguageDialog=auto
+; only DriveGram's own programs are closed (PrepareToInstall already stops them): Explorer holds the shell
+; extension DLL of the version before, and closing Explorer for it hung the install (1.3.1). That DLL needs no
+; closing: every version's has its own name, and the old one is moved aside (see CurStepChanged)
+CloseApplicationsFilter=*.exe
 
 [Languages]
 Name: "hebrew"; MessagesFile: "compiler:Languages\Hebrew.isl"
@@ -333,6 +337,8 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var Marker: String;
 begin
+  if CurStep = ssInstall then
+    MoveShellExtensionAside; { the old version's, still loaded by Explorer until the user signs out }
   if (CurStep = ssPostInstall) and NeedsOverlayNames and not WizardSilent then
   begin
     MsgBox(CustomMessage('ShellIcons'), mbInformation, MB_OK); { said before the prompt, in full (the status line is one line) }
