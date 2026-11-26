@@ -1137,11 +1137,12 @@ sealed class TrayApp : ApplicationContext, IMainHost
         if (d.Starting || d.Stopping || d.FreeingOffline) return;
         long size;
         try { size = await Task.Run(() => OfflineCache.TemporaryBytes(d.State)); }
-        catch (Exception ex) { Log.Warn($"free up space (offline): {ex.Message}"); Ui.Error(L.T("לא הצלחתי לבדוק כמה מקום אפשר לפנות.", "Could not check how much space can be freed.")); return; }
+        catch (OfflineCache.DriveInUseException) { Ui.Info(OpenElsewhere); return; }
+        catch (Exception ex) { Log.Warn($"free up space (offline): {ex.Message}"); Ui.Error(L.T("לא הצלחתי לבדוק כמה מקום אפשר לפנות. לא נמחק כלום.", "Could not check how much space can be freed. Nothing was deleted.")); return; }
         if (size < 1 << 20) { Ui.Info(L.T("אין כרגע עותקים זמניים שאפשר לפנות.", "There are no temporary copies to free right now.")); return; }
         if (Ui.Ask(L.T(
                 $"יימחקו מהמחשב הזה עותקים זמניים של קבצים מ־{d.Name}, בגודל {Ui.Size(size)}.\n\n" +
-                "הקבצים עצמם שמורים בטלגרם ולא נפגעים: כשתפתח אותם הם יורדו שוב. קבצים שהכנת והתמונות הממוזערות נשארים במחשב.\n\nלפנות?",
+                "הקבצים עצמם שמורים בטלגרם ולא נפגעים: כשתפתח אותם הם יורדו שוב. קבצים שהכנת ותמונות ממוזערות לא נמחקים.\n\nלפנות?",
                 $"Temporary copies of files from {d.Name} will be deleted from this PC ({Ui.Size(size)}).\n\n" +
                 "The files themselves are stored in Telegram and are not affected: they download again when you open them. Files you prepared and the thumbnails stay on this PC.\n\nFree up the space?"),
                 icon: MessageBoxIcon.Question) != DialogResult.Yes) return;
@@ -1152,14 +1153,18 @@ sealed class TrayApp : ApplicationContext, IMainHost
             long freed = await Task.Run(() => OfflineCache.FreeTemporary(d.State));
             Balloon(L.T("התפנה מקום ✓", "Space freed ✓"), L.T($"פונו {Ui.Size(freed)} במחשב הזה.", $"{Ui.Size(freed)} freed on this PC."));
         }
+        catch (OfflineCache.DriveInUseException) { Ui.Info(OpenElsewhere); }
         catch (Exception ex)
         {
             Log.Warn($"free up space (offline): {ex.Message}");
-            Ui.Error(L.T("לא הצלחתי לפנות את כל המקום. נסה שוב בעוד רגע.", "Could not free all of the space. Try again in a moment."));
+            Ui.Error(L.T("לא הצלחתי לפנות את המקום (לא נמחק כלום שהכנת). נסה שוב בעוד רגע.", "Could not free the space (nothing you prepared was deleted). Try again in a moment."));
         }
-        finally { d.FreeingOffline = false; }
+        finally { d.FreeingOffline = false; UpdateIcon(); }
         UpdateIcon();
     }
+
+    static string OpenElsewhere => L.T("הכונן פתוח כרגע בחלון אחר של DriveGram, ולכן אי אפשר לפנות עכשיו. סגור את החלון ההוא ונסה שוב.",
+        "The drive is open in another DriveGram window right now, so nothing can be freed now. Close that window and try again.");
 
     async Task ConfirmRecordAsync(DriveController d, DriveSession s)
     {
@@ -1217,7 +1222,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
     {
         if (d.LetterName is { IsDisposed: false }) { d.LetterName.Activate(); return; }
         string letter, label;
-        using (var form = new LetterNameForm(d.State, d.Session is not null))
+        using (var form = new LetterNameForm(d.State, d.Session is not null, d.Session?.MountPoint, _preparer.Running.Any(j => j.Session == d.Session)))
         {
             d.LetterName = form;
             var ok = form.ShowDialog();
@@ -1227,9 +1232,23 @@ sealed class TrayApp : ApplicationContext, IMainHost
             label = form.Label;
         }
         var cfg = d.State.Config;
-        if (string.Equals(letter, cfg.MountPoint, StringComparison.OrdinalIgnoreCase) && label == cfg.VolumeLabel) return;
+        var nowOn = d.Session?.MountPoint ?? cfg.MountPoint; // a busy usual letter: this run is on another one
+        if (string.Equals(letter, cfg.MountPoint, StringComparison.OrdinalIgnoreCase) && string.Equals(letter, nowOn, StringComparison.OrdinalIgnoreCase)
+            && label == cfg.VolumeLabel) return;
         if (!_drives.Contains(d)) return; // removed while the window was open
+        while (d.Starting || d.Stopping) await Task.Delay(200); // an automatic reconnect: decide after it
+        if (!_drives.Contains(d)) return;
         bool wasMounted = d.Session is not null;
+        if (!wasMounted && DriveOpenElsewhere(d))
+        {
+            Ui.Info(L.T("הכונן פתוח כרגע בחלון אחר של DriveGram. סגור אותו ונסה שוב.", "The drive is open in another DriveGram window right now. Close it and try again."));
+            return;
+        }
+        // it should be connected after the change: it was, or it was trying to (e.g. its letter was refused)
+        bool connect = wasMounted || d.LastMountRefused || d.RetryTimer is not null;
+        // files being prepared stop with the drive: started again after it reconnects
+        var preparing = d.Session is { } before ? _preparer.Running.Where(j => j.Session == before).Select(j => j.Id).ToList() : [];
+        StopRetrying(d);
         if (wasMounted && !await StopAsync(d, waitForUploads: false)) return;
         var (oldLetter, oldLabel) = (cfg.MountPoint, cfg.VolumeLabel);
         cfg.MountPoint = letter;
@@ -1237,9 +1256,11 @@ sealed class TrayApp : ApplicationContext, IMainHost
         d.State.Save();
         Log.Info($"tray: {oldLetter} {oldLabel} is now {letter} {label}");
         UpdateIcon();
-        if (!wasMounted) return;
-        await MountAsync(d);
-        if (d.Session is null && !d.Starting && d.LastMountRefused)
+        if (!connect) return;
+        d.QuietRefusal = true; // a refusal of the new letter is said once, below
+        try { await MountAsync(d); }
+        finally { d.QuietRefusal = false; }
+        if (d.Session is null && !d.Starting && d.LastMountRefused && !string.Equals(oldLetter, letter, StringComparison.OrdinalIgnoreCase))
         {
             // Windows refused the new letter: back to how it was, and say so
             cfg.MountPoint = oldLetter;
@@ -1248,6 +1269,20 @@ sealed class TrayApp : ApplicationContext, IMainHost
             Ui.Error(L.T($"הכונן לא הצליח להתחבר באות {L.Ltr(letter)}, ולכן הוחזר ל־{L.Ltr(oldLetter)}.", $"The drive could not connect as {letter}, so it was set back to {oldLetter}."));
             await MountAsync(d);
         }
+        if (d.Session is { } s && preparing.Count > 0) PrepareFiles(preparing.Select(id => (s, id)));
+    }
+
+    /// <summary>The drive is mounted by another DriveGram window (the command line): its files are in use.</summary>
+    static bool DriveOpenElsewhere(DriveController d)
+    {
+        try
+        {
+            using var instance = new Semaphore(1, 1, DriveSession.InstanceName(d.State.Dir));
+            if (!instance.WaitOne(0)) return true;
+            instance.Release();
+            return false;
+        }
+        catch { return false; }
     }
 
     async Task ChangeDriveTypeAsync(DriveController d)
@@ -1423,15 +1458,21 @@ sealed class TrayApp : ApplicationContext, IMainHost
         if (_toldLowDiskOn == DateTime.Today) return;
         try
         {
-            var root = Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData))!;
+            var root = Path.GetPathRoot(Path.GetFullPath(AppState.Root))!;
             long free = new DriveInfo(root).AvailableFreeSpace;
             if (free >= 5L << 30) return;
             long prepared = 0;
-            foreach (var d in _drives) if (d.Session is { } s) try { prepared += s.Engine.PreparedBytes; } catch { }
+            foreach (var d in _drives)
+                try
+                {
+                    if (d.Session is { } s) prepared += s.Engine.PreparedBytes;
+                    else if (!d.Starting && !d.Stopping) prepared += OfflineCache.Prepared(d.State).Sum(p => (long)(p.Size * p.Fraction));
+                }
+                catch { }
             if (prepared < 1L << 30) return;
             _toldLowDiskOn = DateTime.Today;
             Balloon(L.T($"נשאר מעט מקום ב־{L.Ltr(root.TrimEnd('\\'))}", $"Little space left on {root.TrimEnd('\\')}"),
-                L.T($"נשארו {Ui.Size(free)} פנויים. קבצים שהכנת תופסים {Ui.Size(prepared)}, ו־DriveGram לא מוחק אותם לבד. לחץ כאן כדי לראות אותם ולפנות את מה שכבר לא צריך.",
+                L.T($"נשארו {Ui.Size(free)} פנויים. קבצים שהכנת תופסים {Ui.Size(prepared)} ולא נמחקים לבד. לחץ כאן כדי לבחור מה לפנות.",
                     $"{Ui.Size(free)} free. Files you prepared take {Ui.Size(prepared)}, and DriveGram never deletes them by itself. Click here to see them and free what you no longer need."),
                 ToolTipIcon.Warning, ShowPrepared);
         }
@@ -1571,10 +1612,18 @@ sealed class TrayApp : ApplicationContext, IMainHost
         foreach (var d in _drives) ApplyPause(d);
     }
 
-    public void EditLimits(IWin32Window owner)
+    LimitsForm? _limits;
+
+    public void EditLimits(IWin32Window? owner)
     {
+        if (_limits is { IsDisposed: false }) { _limits.Activate(); return; }
         using var f = new LimitsForm(_daily.AlertGb, _daily.CapGb, _daily.TodayBytes);
-        if (f.ShowDialog(owner) != DialogResult.OK) return;
+        if (owner is null) { f.ShowInTaskbar = true; f.StartPosition = FormStartPosition.CenterScreen; f.TopMost = true; } // from the tray menu
+        _limits = f;
+        DialogResult result;
+        try { result = f.ShowDialog(owner); }
+        finally { _limits = null; }
+        if (result != DialogResult.OK) return;
         _daily.SetLimits(f.AlertGb, f.CapGb);
         foreach (var d in _drives) ApplyPause(d);
     }
@@ -1920,7 +1969,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
         transfers.Image = Glyphs.Make(Glyphs.Upload, Setup.Theme.AccentDark, 16);
         _menu.Items.Add(transfers);
         _menu.Items.Add(Item(L.T("קבצים שהכנתי…", "Files I prepared…"), ShowPrepared));
-        _menu.Items.Add(Item(L.T("תקרת העלאה יומית…", "Daily upload cap…"), () => EditLimits(null!)));
+        _menu.Items.Add(Item(L.T("תקרת העלאה יומית…", "Daily upload cap…"), () => EditLimits(null)));
         _menu.Items.Add(Item(L.T("חשבונות טלגרם והוספת כונן…", "Telegram accounts and adding a drive…"), () => ShowMain(DriveGram.Tray.MainForm.Tab.Accounts)));
 
         var autostart = new ToolStripMenuItem(L.T("הפעל עם וינדוס", "Start with Windows")) { Checked = ShellIntegration.AutostartEnabled };
@@ -1958,16 +2007,16 @@ sealed class TrayApp : ApplicationContext, IMainHost
         list.Add(new ToolStripSeparator());
         if (d.Session is null)
             list.Add(Item(L.T("חבר", "Connect"), async () => { if (d.NeedsSetup) await SetupAsync(d); else await MountAsync(d); },
-                !d.Starting));
+                !d.Starting && !d.FreeingOffline));
         else list.Add(Item(L.T("נתק", "Disconnect"), async () => await StopAsync(d), !d.Stopping));
         if (d.Session is { Sync.ControlTrusted: false } tampered)
             list.Add(Item(L.T("אשר את רשומת הכונן…", "Confirm the drive's record…"), async () => await ConfirmRecordAsync(d, tampered), !d.Stopping, bold: true));
         if (d.Session is { Writable: false, Sync: { LeaseHolder: { } holder, NeedsUpdate: false } })
             list.Add(Item(L.T($"בקש את הכונן מ־{L.Ltr(holder)}…", $"Ask {holder} for the drive…"), () => AskForDrive(d), !d.Stopping, bold: true));
         // "Settings and sign-in" was one wizard for three different things: split by what is wanted
+        bool idle = !d.Starting && !d.Stopping && !d.FreeingOffline;
         if (d.NeedsSetup)
-            list.Add(Item(L.T("התחברות לטלגרם והשלמת ההגדרה…", "Telegram sign-in and finishing setup…"), async () => await SetupAsync(d), !d.Starting && !d.Stopping, bold: true));
-        list.Add(Item(L.T("אות ושם הכונן…", "Drive letter and name…"), async () => await ChangeLetterAndNameAsync(d), !d.Starting && !d.Stopping));
+            list.Add(Item(L.T("התחברות לטלגרם…", "Telegram sign-in…"), async () => await SetupAsync(d), idle, bold: true));
         list.Add(Item(L.T("סיסמה ומפתח שחזור…", "Password and recovery key…"), () => ShowSecurity(d), on));
         // on: forget it (the password is asked each time the drive connects); off: remember it again,
         // from the key of the connected drive (disconnected, it is offered when the password is asked)
@@ -1977,17 +2026,18 @@ sealed class TrayApp : ApplicationContext, IMainHost
             () => ToggleRemember(d), remembered || on);
         remember.Checked = remembered;
         list.Add(remember);
+        list.Add(Item(L.T("אות ושם הכונן…", "Drive letter and name…"), async () => await ChangeLetterAndNameAsync(d), idle));
         list.Add(Item(d.State.Config.NetworkDrive ? L.T("סוג הכונן: כונן רשת…", "Drive type: network drive…") : L.T("סוג הכונן: דיסק רגיל…", "Drive type: regular disk…"),
-            async () => await ChangeDriveTypeAsync(d), !d.Starting && !d.Stopping));
+            async () => await ChangeDriveTypeAsync(d), idle));
         if (d.State.Folder is null && d.State.Config.Channels is not null)
         {
             list.Add(Item(L.T("גיבוי בחשבון נוסף…", "Backup on another account…"), () => ShowBackup(d)));
             list.Add(Item(L.T("העבר לחשבון טלגרם אחר…", "Move to another Telegram account…"), () => ShowSwitchAccount(d), !d.Starting && !d.Stopping));
         }
         if (!d.NeedsSetup) // the full wizard: another drive of the account, or signing in again (rare)
-            list.Add(Item(L.T("בחירת כונן אחר בחשבון או התחברות מחדש…", "Another drive of the account, or signing in again…"), async () => await SetupAsync(d), !d.Starting && !d.Stopping));
+            list.Add(Item(L.T("התחברות מחדש או בחירת כונן אחר…", "Sign in again, or choose another drive…"), async () => await SetupAsync(d), idle));
         list.Add(new ToolStripSeparator());
-        list.Add(Item(L.T("הסר מהמחשב הזה…", "Remove from this PC…"), async () => await RemoveAsync(d), !d.Starting && !d.Stopping));
+        list.Add(Item(L.T("הסר מהמחשב הזה…", "Remove from this PC…"), async () => await RemoveAsync(d), idle));
         // never offered while the drive's pairing is in doubt (it could name another drive's data)
         var delete = Item(L.T("מחק את הכונן לצמיתות…", "Delete the drive permanently…"), async () => await DeleteForeverAsync(d),
             !d.Starting && !d.Stopping && !d.MustChooseDrive);
@@ -2037,7 +2087,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
         RedrawLateAnswers();
         TrackLowDisk();
         TrackDaily();
-        bool busy = _drives.Any(d => d.Busy || d.Starting || d.Stopping);
+        bool busy = _drives.Any(d => d.Busy || d.Starting || d.Stopping || d.FreeingOffline);
         _icon.Icon = busy ? _busy : _idle;
         if (_drives.Any(d => d.Stopping)) return; // the stop progress owns the tooltip
         SetTooltip(_drives.Count == 1 ? $"{_drives[0].Letter} {StatusOf(_drives[0])}" : Summary().Replace("\n", " | "));
