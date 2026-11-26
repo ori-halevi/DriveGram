@@ -23,6 +23,9 @@ public sealed class ChunkReader
     readonly SemaphoreSlim _prefetchSlots = new(4);
 
     public int ReadAheadWindows { get; set; } = 8;
+
+    /// <summary>Set by a reader (the file system's Read) to learn whether its read started a download.</summary>
+    public static readonly AsyncLocal<System.Runtime.CompilerServices.StrongBox<bool>?> Downloaded = new();
     public long BytesDownloaded;
 
     public ChunkReader(IRemote remote, BlockCache cache, Keys keys)
@@ -60,6 +63,7 @@ public sealed class ChunkReader
         int expected = ExpectedWindowLength(c, win);
         var cached = _cache.TryGetWindow(c.Msg, win, preview);
         if (cached is not null && cached.Length == expected) return Task.FromResult(cached);
+        if (Downloaded.Value is { } told) told.Value = true; // started now, or joined one already on its way
         var lazy = _inflight.GetOrAdd((c.Msg, win), key => new Lazy<Task<byte[]>>(async () =>
         {
             try

@@ -1576,39 +1576,87 @@ sealed class TrayApp : ApplicationContext, IMainHost
             {
                 var now = s.Engine.PendingStates();
                 var seen = now;
-                List<string> paths = [];
+                var paths = new List<string>();
                 if (before is not null) // the first look: Explorer asks by itself as it shows the files
                 {
                     // finished first (they may now say "saved"), then new ones and paused / resumed ones
                     var changed = before.Keys.Where(id => !now.ContainsKey(id))
                         .Concat(now.Where(x => !before.TryGetValue(x.Key, out var p) || p != x.Value).Select(x => x.Key))
                         .ToList();
-                    const int perLook = 2000;
-                    if (changed.Count > perLook)
+                    var told = new List<string>();
+                    var heldBack = new List<string>();
+                    var byPath = new List<(string Id, string Path)>();
+                    foreach (var id in changed.Take(2000))
+                        if (s.LivePathOf(id) is { } path) byPath.Add((id, path)); // gone or in the trash: nothing to redraw
+                    heldBack.AddRange(changed.Skip(2000));
+                    if (byPath.Count <= 200) { told.AddRange(byPath.Select(x => x.Id)); paths.AddRange(byPath.Select(x => x.Path)); }
+                    else
                     {
-                        // the rest is kept as it was: the next look (2 s) tells Explorer about them
+                        // many at once (pause all, a big copy): whole folders, each at most every 10 s, 100 a look;
+                        // the files of the others are told on a later look
+                        long t = Environment.TickCount64;
+                        int dirs = 0;
+                        foreach (var g in byPath.GroupBy(x => Path.GetDirectoryName(x.Path) ?? "", StringComparer.OrdinalIgnoreCase))
+                        {
+                            bool recent = _dirToldAt.TryGetValue(g.Key, out var at) && t - at < 10_000;
+                            if (g.Key.Length > 0 && !recent && dirs < 100)
+                            {
+                                dirs++;
+                                _dirToldAt[g.Key] = t;
+                                _dirsToTell.Enqueue(g.Key);
+                                told.AddRange(g.Select(x => x.Id));
+                            }
+                            else heldBack.AddRange(g.Select(x => x.Id));
+                        }
+                        if (_dirToldAt.Count > 10_000) _dirToldAt.Clear();
+                    }
+                    if (heldBack.Count > 0)
+                    {
+                        // kept as they were: the next look sees them as changed again
                         seen = new Dictionary<string, bool>(now);
-                        foreach (var id in changed.Skip(perLook))
+                        foreach (var id in heldBack)
                             if (before.TryGetValue(id, out var p)) seen[id] = p; else seen.Remove(id);
                     }
-                    foreach (var id in changed.Take(perLook))
-                        if (s.LivePathOf(id) is { } path) paths.Add(path); // gone or in the trash: nothing to redraw
                 }
+                // files shown as "not in Telegram yet" that are in it now (a rename sent between two looks)
+                paths.AddRange(bridge.TakeNoLongerWaiting(s));
                 _ui.Post(_ => { if (d.Session == s && !d.Stopping) { d.ShellSeen = seen; d.ShellSeenFor = s; } }, null);
-                if (paths.Count == 0) return;
+                var dirsNow = new List<string>();
+                while (_dirsToTell.TryDequeue(out var dir)) dirsNow.Add(dir);
+                if (paths.Count == 0 && dirsNow.Count == 0) return;
                 bridge.Forget(paths);
                 _ = Task.Delay(2500).ContinueWith(_ =>
                 {
                     bridge.Forget(paths);
-                    if (paths.Count <= 200) foreach (var p in paths) ShellChanged(p);
-                    else // many at once (pause all, a big copy): each folder once, not thousands of files
-                        foreach (var dir in paths.Select(Path.GetDirectoryName).Where(x => x is not null).Distinct(StringComparer.OrdinalIgnoreCase))
-                            ShellFolderChanged(dir!);
+                    foreach (var p in paths) ShellChanged(p);
+                    foreach (var dir in dirsNow) ShellFolderChanged(dir);
                 }, TaskScheduler.Default);
             }
             catch (Exception ex) { Log.Debug($"shell icons: {ex.Message}"); }
             finally { d.ShellBusy = false; }
         });
+    }
+
+    readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _dirToldAt = new(StringComparer.OrdinalIgnoreCase);
+    readonly System.Collections.Concurrent.ConcurrentQueue<string> _dirsToTell = new();
+    readonly Dictionary<string, long> _lateToldAt = new(StringComparer.OrdinalIgnoreCase); // UI thread only
+
+    /// <summary>Files whose answer reached Explorer too late (no mark shown): redrawn, a moment later.</summary>
+    void RedrawLateAnswers()
+    {
+        if (_bridge is not { } bridge) return;
+        // each file at most every 20 s, 200 a look: redrawing makes Explorer ask again, and a tray still busy
+        // must not be asked ever more
+        long t = Environment.TickCount64;
+        var late = bridge.TakeLate().Where(p => !(_lateToldAt.TryGetValue(p, out var at) && t - at < 20_000)).Take(200).ToList();
+        if (late.Count == 0) return;
+        foreach (var p in late) _lateToldAt[p] = t;
+        if (_lateToldAt.Count > 10_000) _lateToldAt.Clear();
+        _ = Task.Delay(1500).ContinueWith(_ =>
+        {
+            bridge.Forget(late);
+            foreach (var p in late) ShellChanged(p);
+        }, TaskScheduler.Default);
     }
 
     /// <summary>Explorer redraws a whole folder (its files' overlay icons included).</summary>
@@ -1868,6 +1916,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
         if (_quitting) { TrackDaily(); return; } // "wait, then exit": what still goes up counts for today
         foreach (var d in _drives) TrackUploads(d);
         foreach (var d in _drives) TrackShellIcons(d);
+        RedrawLateAnswers();
         TrackDaily();
         bool busy = _drives.Any(d => d.Busy || d.Starting || d.Stopping);
         _icon.Icon = busy ? _busy : _idle;
@@ -1914,8 +1963,8 @@ sealed class TrayApp : ApplicationContext, IMainHost
                 d.ToldUploadStart = true;
                 _lastStartBalloon = now;
                 Balloon(L.T($"מעלה לטלגרם ({L.Ltr(d.Letter)})", $"Uploading to Telegram ({d.Letter})"),
-                    L.T("אפשר להמשיך לעבוד כרגיל. לפני שמנתקים את הכונן או מכבים את המחשב, חכה להודעה \"הכל שמור בטלגרם\". לחץ כאן כדי לראות את ההעלאות.",
-                        "You can keep working as usual. Before disconnecting the drive or shutting down, wait for the \"everything is saved in Telegram\" message. Click here to see the uploads."),
+                    L.T("אפשר להמשיך לעבוד כרגיל. מה שעוד לא עלה שמור במחשב הזה, גם אם תכבה אותו, ויעלה כשהכונן יתחבר שוב. כדי שהקבצים יהיו בטלגרם (ובמחשבים אחרים), חכה להודעה \"הכל שמור בטלגרם\". לחץ כאן כדי לראות את ההעלאות.",
+                        "You can keep working as usual. What is not uploaded yet stays on this PC, even if you shut it down, and goes up when the drive connects again. For the files to be in Telegram (and on other PCs), wait for the \"everything is saved in Telegram\" message. Click here to see the uploads."),
                     onClick: () => ShowTransfers());
             }
             return;
@@ -1928,7 +1977,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
         Balloon(L.T("הכל שמור בטלגרם ✓", "Everything is saved in Telegram ✓"),
             L.N(Math.Max(1, d.MostFiles), $"הקובץ עלה ({Ui.Size(sent)}). ", $"{{0}} קבצים עלו ({Ui.Size(sent)}). ",
                     $"The file was uploaded ({Ui.Size(sent)}). ", $"{{0}} files were uploaded ({Ui.Size(sent)}). ")
-            + L.T("עכשיו אפשר לנתק את הכונן או לכבות את המחשב.", "You can now disconnect the drive or shut down the PC."),
+            + L.T("עכשיו הקבצים זמינים גם ממחשבים אחרים.", "The files are now available from other PCs too."),
             onClick: () => OpenDrive(d));
     }
 

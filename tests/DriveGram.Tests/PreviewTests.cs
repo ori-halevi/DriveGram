@@ -92,13 +92,16 @@ public class PreviewTests
         var (kit, b, id, data) = await TwoPcsAsync();
         await using var _ = kit;
         kit.Remote.Latency = 300; // both reads meet on the same download
-        var preview = Task.Run(() => PreviewRead(b, id, 0, 4096));
+        long start = b.Engine.Status.BytesDownloaded;
+        var preview = Task.Run(() => PreviewRead(b, id, 100, 4096)); // not at 0: no read-ahead
         await Task.Delay(50);
         var buf = new byte[4096];
-        await Task.Run(() => b.Engine.Read(id, 0, buf));
+        await Task.Run(() => b.Engine.Read(id, 100, buf));
         await preview;
         kit.Remote.Latency = 0;
-        Assert.Equal(data[..4096], buf);
+        Assert.Equal(data[100..4196], buf);
+        // one download, shared (two would be more than one window)
+        Assert.InRange(b.Engine.Status.BytesDownloaded - start, 1, (1 << 20) + 64 * 1024);
         Assert.True(b.Engine.LocalFraction(id) > 0); // the program's read counts as here
     }
 

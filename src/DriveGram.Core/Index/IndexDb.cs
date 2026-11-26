@@ -79,6 +79,9 @@ public sealed class IndexDb : IDisposable
             CREATE TABLE IF NOT EXISTS own_appends(msg INTEGER PRIMARY KEY);
             CREATE INDEX IF NOT EXISTS ix_dirty_kind ON dirty(kind, staged);
             CREATE TABLE IF NOT EXISTS seen_entries(nonce TEXT PRIMARY KEY);
+            -- "is this item's change sent to the journal yet?" is asked for every file Explorer shows: by
+            -- index, not by reading every waiting change (a big file's change is ~100 KB of JSON)
+            CREATE INDEX IF NOT EXISTS ix_outbox_id ON outbox(json_extract(op, '$.id'));
             """);
         // migration (0.5 → 0.6): which chunk rows this PC uploaded itself
         if (Scalar("SELECT 1 FROM pragma_table_info('chunks') WHERE name='local'") is null)
@@ -734,6 +737,10 @@ public sealed class IndexDb : IDisposable
 
     public bool HasOutboxOp(string node) =>
         Scalar("SELECT 1 FROM outbox WHERE json_extract(op, '$.id') = @n LIMIT 1", ("@n", node)) is not null;
+
+    /// <summary>A change of the file's CONTENT is not in the journal yet (a rename or a move does not count).</summary>
+    public bool HasOutboxContent(string node) =>
+        Scalar("SELECT 1 FROM outbox WHERE json_extract(op, '$.id') = @n AND json_extract(op, '$.t') = 'ct' LIMIT 1", ("@n", node)) is not null;
 
     /// <summary>Per pending file, oldest first: its name and size, and the bytes of its parts in total and
     /// already uploaded. One query (asked every second by the transfers window, also with thousands waiting).</summary>

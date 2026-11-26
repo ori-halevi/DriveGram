@@ -1738,6 +1738,16 @@ public sealed class ContentEngine : IAsyncDisposable
     /// journal entry not sent yet (offline, or another PC holds the drive). Until then, losing this PC loses it.</summary>
     public bool IsWaitingToUpload(string id) => _db.IsPending(id) || _db.HasOutboxOp(id);
 
+    /// <summary>The file's pieces are still waiting to upload (not just its journal entry).</summary>
+    public bool IsUploadPending(string id) => _db.IsPending(id);
+
+    /// <summary>The file's content is in Telegram (a rename or move of it may still wait): freeing or
+    /// preparing it is safe.</summary>
+    public bool IsContentInTelegram(string id) => !_db.IsPending(id) && !_db.HasOutboxContent(id);
+
+    /// <summary>What Explorer's previews hold on this PC (thumbnails and details).</summary>
+    public long PreviewBytes => _cache.PreviewBytes;
+
     /// <summary>An earlier version of the file is in Telegram (a change of it is what waits).</summary>
     public bool HasSavedVersion(string id) => _db.CommittedChunks(id).Count > 0;
 

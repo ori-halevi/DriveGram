@@ -6,7 +6,7 @@
 
 #define AppName "DriveGram"
 #ifndef AppVersion
-  #define AppVersion "1.4.1"
+  #define AppVersion "1.4.2"
 #endif
 #define WinFspMsi "winfsp-2.1.25156.msi"
 
@@ -61,7 +61,7 @@ english.CleanupLocalOnly=⚠ This PC has files not yet uploaded to Telegram, or 
 hebrew.WinFspFailed=התקנת WinFsp לא הושלמה. הכונן לא יעבוד בלעדיו. אפשר להתקין אותו ידנית מהכתובת https://winfsp.dev/rel
 english.Desktop=Create a desktop shortcut
 english.ShellIcons=Next, Windows asks permission for "Windows Command Processor". That is DriveGram: it adds icons on files in Explorer (is the file saved in Telegram yet, and how much of it is on this PC).%n%nYou may also decline: then only the icons are missing, everything else works. The icons appear after you next sign in to Windows (until then, the previous icons may show).
-hebrew.ShellIcons=מיד ווינדוס יבקש אישור עבור "מעבד הפקודות של Windows". זה DriveGram: הוא מוסיף סימנים על קבצים בסייר הקבצים (האם הקובץ כבר שמור בטלגרם, וכמה ממנו נמצא במחשב).%n%nאפשר גם לסרב: אז רק הסימנים לא יופיעו, וכל השאר עובד. הסימנים יופיעו אחרי הכניסה הבאה לווינדוס (עד אז ייתכן שיופיעו הסימנים הקודמים).
+hebrew.ShellIcons=מיד ווינדוס יבקש אישור עבור "מעבד הפקודות של Windows". זה DriveGram: הוא מוסיף סימנים על קבצים בסייר הקבצים (האם הקובץ כבר שמור בטלגרם, וכמה ממנו נמצא במחשב הזה).%n%nאפשר גם לסרב: אז רק הסימנים לא יופיעו, וכל השאר עובד. הסימנים יופיעו אחרי הכניסה הבאה לווינדוס (עד אז ייתכן שיופיעו הסימנים הקודמים).
 english.UnShellIcons=Next, Windows asks permission for "Windows Command Processor": that is DriveGram, removing the icons it added on files. You may also decline.
 hebrew.UnShellIcons=מיד ווינדוס יבקש אישור עבור "מעבד הפקודות של Windows": זה DriveGram, שמסיר את הסימנים שהוסיף על קבצים. אפשר גם לסרב.
 english.Launch=Start DriveGram now
@@ -307,7 +307,7 @@ begin
     repeat
       if CompareText(F.Name, Keep) = 0 then continue;
       if not DeleteFile(Dir + '\' + F.Name) then
-        RenameFile(Dir + '\' + F.Name, ExpandConstant('{%TEMP}') + '\' + F.Name + '.' + IntToStr(Random(1000000)) + '.old');
+        RenameFile(Dir + '\' + F.Name, ExpandConstant('{%TEMP}') + '\' + F.Name + '.' + GetDateTimeString('yyyymmddhhnnss', #0, #0) + IntToStr(Random(1000000)) + '.old');
     until not FindNext(F);
   finally
     FindClose(F);

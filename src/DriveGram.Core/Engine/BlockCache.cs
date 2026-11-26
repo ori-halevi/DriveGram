@@ -156,6 +156,7 @@ public sealed class BlockCache
     /// <param name="preview">Read by Explorer for a thumbnail or details: kept as a preview window.</param>
     public void PutWindow(int msg, int win, byte[] data, bool preview)
     {
+        if (preview && data.Length > PreviewQuota) return; // no room for previews now (the disk is short)
         var key = preview ? VKey(msg, win) : WKey(msg, win);
         var path = Path.Combine(preview ? _vDir : _wDir, $"{msg}_{win}");
         try

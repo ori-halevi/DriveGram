@@ -108,15 +108,22 @@ sealed class TransfersForm : Form
             _legendTip.SetToolTip(item, tip);
             row.Controls.Add(item);
         }
-        Group(L.T("בסייר הקבצים, העלאה:", "In Explorer, uploading:"));
+        if (!OverlayNamesInstalled())
+        {
+            var missing = Theme.Label(L.T("הסימנים בסייר הקבצים לא הותקנו במלואם (לא אושרה בקשת ווינדוס בהתקנה). כדי להוסיף אותם, התקן את DriveGram שוב ואשר את הבקשה.",
+                "The marks in Explorer are not fully installed (Windows' request at install was not approved). To add them, install DriveGram again and approve the request."), Theme.Small, Theme.Error, 900);
+            missing.Margin = new Padding(0, 0, 0, 4);
+            box.Controls.Add(missing);
+        }
+        Group(L.T("סימנים בסייר הקבצים – העלאה:", "Marks in Explorer – uploading:"));
         Item("upload", L.T("עוד לא בטלגרם", "Not in Telegram yet"),
-            L.T("מחכה להעלאה או עולה עכשיו (או שינוי בקובץ שעוד לא עלה). בינתיים הוא שמור רק במחשב הזה, גם אחרי כיבוי, ויעלה לטלגרם כשהכונן מחובר.",
-                "Waiting to upload or uploading now (or a change to the file not uploaded yet). Meanwhile it is kept only on this PC, also after a shutdown, and goes up to Telegram while the drive is connected."));
-        Item("paused", L.T("מושהה, עוד לא בטלגרם", "Paused, not in Telegram yet"),
+            L.T("הקובץ (או שינוי בו) מחכה להעלאה או עולה עכשיו. בינתיים הוא שמור רק במחשב הזה, גם אחרי כיבוי, ויעלה לטלגרם כשהכונן יתחבר.",
+                "The file (or a change to it) is waiting to upload or uploading now. Meanwhile it is kept only on this PC, also after a shutdown, and goes up to Telegram while the drive is connected."));
+        Item("paused", L.T("ההעלאה מושהית, עוד לא בטלגרם", "Upload paused, not in Telegram yet"),
             L.T("ההעלאה של הקובץ מושהית. בינתיים הוא שמור רק במחשב הזה, ויעלה כשתמשיך את ההעלאה.",
                 "The file's upload is paused. Meanwhile it is kept only on this PC, and goes up when you resume the upload."));
-        Group(L.T("בסייר הקבצים, במחשב הזה:", "In Explorer, on this PC:"));
-        Item("kept", L.T("בטלגרם, ונשמר כאן", "In Telegram, kept here"),
+        Group(L.T("סימנים בסייר הקבצים – במחשב הזה:", "Marks in Explorer – on this PC:"));
+        Item("kept", L.T("בטלגרם, ומוכן כאן", "In Telegram, prepared here"),
             L.T("שמור בטלגרם, והכנת אותו במחשב הזה (\"הכן\"): הוא נשאר כאן עד שתפנה אותו, ונפתח מיד, גם בלי אינטרנט.",
                 "Saved in Telegram, and you prepared it on this PC (\"Prepare\"): it stays here until you free it, and opens at once, even offline."));
         Item("local", L.T("בטלגרם, וכולו כאן (זמני)", "In Telegram, all here (temporary)"),
@@ -125,10 +132,26 @@ sealed class TransfersForm : Form
         Item("partial", L.T("בטלגרם, וחלק ממנו כאן", "In Telegram, part of it here"),
             L.T("שמור בטלגרם. רק החלקים שכבר נפתחו נמצאים במחשב הזה, והשאר יורד כשצריך אותו.",
                 "Saved in Telegram. Only the parts already opened are on this PC; the rest downloads when needed."));
-        Item(null, L.T("בלי סימן: רק בטלגרם", "No mark: only in Telegram"),
-            L.T("שמור בטלגרם, והקובץ עצמו לא במחשב הזה: הוא יורד כשפותחים אותו (צריך אינטרנט). התמונה הממוזערת שלו נשארת.",
-                "Saved in Telegram, and the file itself is not on this PC: it downloads when opened (needs internet). Its thumbnail stays."));
+        Group(L.T("בלי סימן: הקובץ רק בטלגרם (התמונה הממוזערת נשארת)", "No mark: the file is only in Telegram (its thumbnail stays)"));
+        _legendTip.SetToolTip(row.Controls[0], L.T("שמור בטלגרם, והקובץ עצמו לא במחשב הזה: הוא יורד כשפותחים אותו (צריך אינטרנט). התמונה הממוזערת והפרטים שלו נשארים, כדי שהתיקייה תיפתח בלי הורדות.",
+            "Saved in Telegram, and the file itself is not on this PC: it downloads when opened (needs internet). Its thumbnail and details stay, so the folder opens without downloads."));
         return box;
+    }
+
+    /// <summary>Are all of Explorer's mark names in place (machine-wide, written at install with Windows'
+    /// permission)? Declined: some marks never show, and the legend says so.</summary>
+    static bool OverlayNamesInstalled()
+    {
+        try
+        {
+            using var k = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry64)
+                .OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers");
+            if (k is null) return true; // cannot tell: say nothing
+            var names = k.GetSubKeyNames();
+            return new[] { "   DriveGramFull", "   DriveGramPartial", "   DriveGramKept", "   DriveGram1Upload", "   DriveGram2Paused" }
+                .All(n => names.Contains(n, StringComparer.OrdinalIgnoreCase));
+        }
+        catch { return true; }
     }
 
     /// <summary>The mark itself, cut out of the overlay icon the Explorer extension uses (its corner of a
@@ -173,6 +196,7 @@ sealed class TransfersForm : Form
         _icons.Images.Add("ready", Glyphs.Make(Glyphs.Pin, Theme.Success, 18));
         _icons.Images.Add("down", Glyphs.Make(Glyphs.Download, Theme.Accent, 18));
         _icons.Images.Add("part", Glyphs.Make(Glyphs.Computer, Theme.Muted, 18));
+        _icons.Images.Add("full", Glyphs.Make(Glyphs.Computer, Theme.Accent, 18)); // all here (temporary)
         _up.SmallImageList = _icons;
         _local.SmallImageList = _icons;
 
@@ -242,8 +266,8 @@ sealed class TransfersForm : Form
         _local.KeyDown += (_, e) => Keys(e, _local, cancel: FreeSelected, open: () => OpenFiles(SelectedLocal().Select(r => r.Path)));
         _local.ItemActivate += (_, _) => { if (!DemoSays()) OpenFiles(SelectedLocal().Select(r => r.Path)); };
         var localNote = Theme.Label(L.T(
-            "\"הכן\" מוריד את כל הקובץ עכשיו ושומר אותו במחשב עד שתפנה אותו, למשל סרט לערב: הוא ייפתח מיד, גם בלי אינטרנט. גם בסייר הקבצים: לחיצה ימנית על קובץ בכונן ← \"הצג אפשרויות נוספות\" ← \"הכן במחשב הזה (הורד את כולו)\".",
-            "\"Prepare\" downloads the whole file now and keeps it on this PC until you free it, e.g. a movie for tonight: it opens at once, even offline. In Explorer too: right-click a file in the drive → \"Show more options\" → \"Prepare on this PC (download all of it)\"."),
+            "\"הכן\" מוריד את כל הקובץ עכשיו ושומר אותו במחשב עד שתפנה אותו, למשל סרט לערב: הוא ייפתח מיד, גם בלי אינטרנט. גם בסייר הקבצים: לחיצה ימנית על קובץ בכונן ← \"הצג אפשרויות נוספות\" ← \"הכן במחשב הזה (הורד את כולו)\". אחרי \"פנה\" נשארות רק התמונה הממוזערת והפרטים (כמו אורך סרטון), כדי שהתיקייה תיפתח בלי הורדות.",
+            "\"Prepare\" downloads the whole file now and keeps it on this PC until you free it, e.g. a movie for tonight: it opens at once, even offline. In Explorer too: right-click a file in the drive → \"Show more options\" → \"Prepare on this PC (download all of it)\". After \"Free\", only the thumbnail and the details (like a video's length) stay, so the folder opens without downloads."),
             Theme.Small, Theme.Muted, 740);
         localNote.Dock = DockStyle.Bottom;
         localNote.Padding = new Padding(8, 6, 8, 2);
@@ -318,7 +342,7 @@ sealed class TransfersForm : Form
             (new LocalRow(null!, null!, "a", "הסרט של הערב.mkv", @"T:\Movies\x.mkv", 3 * G, 1, true), "ready", L.T("מוכן, נשמר עד שתפנה", "Ready, kept until you free it")),
             (new LocalRow(null!, null!, "b", "Loki.S02E05.1080p.mkv", @"T:\x.mkv", (long)(2.3 * G), 0.42, true), "down", L.T("מוריד למחשב הזה…", "Downloading to this PC…")),
             (new LocalRow(null!, null!, "c", "עונה 1 פרק 3.mp4", @"T:\x.mp4", 400 * M, 0.55, false), "part", L.T("חלקו כאן (זמני)", "Partly here (temporary)")),
-            (new LocalRow(null!, null!, "d", "מצגת.pptx", @"T:\x.pptx", 12 * M, 1, false), "part", L.T("כולו כאן (זמני)", "All here (temporary)")),
+            (new LocalRow(null!, null!, "d", "מצגת.pptx", @"T:\x.pptx", 12 * M, 1, false), "full", L.T("כולו כאן (זמני)", "All here (temporary)")),
         };
         foreach (var (r, icon, state) in locals)
         {
@@ -741,7 +765,7 @@ sealed class TransfersForm : Form
         var drives = _host.Drives.Where(d => d.Session is not null && !d.Stopping).ToList();
         var preparing = _host.Preparer.Running.Select(j => (j.Session, j.Id)).ToHashSet();
         List<LocalRow> rows = [];
-        long kept = 0, cache = 0;
+        long kept = 0, cache = 0, previews = 0;
         try
         {
             rows = await Task.Run(() =>
@@ -752,6 +776,7 @@ sealed class TransfersForm : Form
                     var s = d.Session!;
                     kept += s.Engine.PreparedBytes;
                     cache += s.Status.CacheBytes;
+                    previews += s.Engine.PreviewBytes;
                     var stack = new Stack<string>();
                     stack.Push(DriveGram.Index.IndexDb.RootId);
                     int seen = 0;
@@ -790,8 +815,8 @@ sealed class TransfersForm : Form
             ? (drives.Count == 0 ? L.T("אין כונן מחובר כרגע, ולכן אין מה להציג כאן.", "No drive is connected right now, so there is nothing to show here.")
               : L.T("אין כרגע קבצים מהכוננים המחוברים במחשב הזה. קבצים שפותחים נשמרים כאן לזמן מה, וקובץ ש\"מכינים\" נשמר עד שמפנים אותו.",
                   "No files of the connected drives are on this PC right now. Files you open are kept here for a while, and a file you \"prepare\" stays until you free it."))
-            : L.T($"קבצים שהוכנו תופסים {Ui.Size(kept)}. עותקים זמניים של קבצים שנפתחו: {Ui.Size(Math.Max(0, cache - kept))} (נמחקים לבד כשצריך מקום).",
-                  $"Prepared files take {Ui.Size(kept)}. Temporary copies of files you opened: {Ui.Size(Math.Max(0, cache - kept))} (removed by themselves when space is needed).");
+            : L.T($"קבצים שהוכנו תופסים {Ui.Size(kept)}. עותקים זמניים של קבצים שנפתחו: {Ui.Size(Math.Max(0, cache - kept))} (נמחקים לבד כשצריך מקום). תמונות ממוזערות ופרטים: {Ui.Size(previews)}.",
+                  $"Prepared files take {Ui.Size(kept)}. Temporary copies of files you opened: {Ui.Size(Math.Max(0, cache - kept))} (removed by themselves when space is needed). Thumbnails and details: {Ui.Size(previews)}.");
         UpdateButtons();
     }
 
@@ -811,7 +836,7 @@ sealed class TransfersForm : Form
             (item.ImageKey, item.SubItems[4].Text) = running is not null ? ("down", L.T("מוריד למחשב הזה…", "Downloading to this PC…"))
                 : prepared && r.Fraction >= 0.999 ? ("ready", L.T("מוכן, נשמר עד שתפנה", "Ready, kept until you free it"))
                 : prepared ? ("down", L.T("הוכן חלקית (נסה שוב)", "Partly prepared (try again)"))
-                : r.Fraction >= 0.999 ? ("part", L.T("כולו כאן (זמני)", "All here (temporary)"))
+                : r.Fraction >= 0.999 ? ("full", L.T("כולו כאן (זמני)", "All here (temporary)"))
                 : ("part", L.T("חלקו כאן (זמני)", "Partly here (temporary)"));
             item.ToolTipText = r.Path + "\n" + LocalTip(item.SubItems[4].Text, r.Fraction, prepared, running is not null);
         }

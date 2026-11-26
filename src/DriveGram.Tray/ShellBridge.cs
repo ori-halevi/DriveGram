@@ -43,7 +43,7 @@ sealed class ShellBridge : IDisposable
 
     public void Start()
     {
-        for (int i = 0; i < 4; i++) _ = Task.Run(ServeAsync);
+        for (int i = 0; i < 8; i++) _ = Task.Run(ServeAsync); // Explorer asks for many files at once
     }
 
     const int MaxRequest = 1 << 20, MaxPaths = 200; // Explorer sends at most 200 paths (the menu's own limit)
@@ -74,6 +74,7 @@ sealed class ShellBridge : IDisposable
                 try { pipe.WaitForPipeDrain(); } catch (IOException) { }
             }
             catch (OperationCanceledException) { return; }
+            catch (IOException) { } // Explorer stopped waiting (it asks again): back to listening at once
             catch (UnauthorizedAccessException ex)
             {
                 // the name is held by a pipe of another Windows user: the Explorer extension refuses to talk to it
@@ -98,8 +99,10 @@ sealed class ShellBridge : IDisposable
         {
             case 'S': return paths.Length == 1 ? State(paths[0]).ToString() : "-";
             // the 1.3.0 extension (loaded until the next sign-in) shows a green check for 100%: never for a
-            // file that is not in Telegram yet
-            case 'L': return paths.Length == 1 ? (WaitingToUpload(paths[0]) ? "-1" : Percent(paths[0]).ToString()) : "-1";
+            // file that is not in Telegram yet (answered from the same short memory as 'S')
+            case 'L':
+                if (paths.Length != 1) return "-1";
+                return State(paths[0]) switch { 'K' or 'F' => "100", 'H' => Percent(paths[0]).ToString(), '0' => "0", _ => "-1" };
             case 'M': return Menu(paths);
             case 'P': Prepare(paths); Forget(paths); return "ok";
             case 'F': Free(paths); Forget(paths); return "ok";
@@ -111,6 +114,34 @@ sealed class ShellBridge : IDisposable
     public void Forget(IEnumerable<string> paths)
     {
         lock (_recent) foreach (var p in paths) { _recent.Remove(p); _states.Remove(p); }
+    }
+
+    // files Explorer was told are "not in Telegram yet": redrawn once they are (a rename is sent within a
+    // second or two, often between two of the tray's looks, which would never notice it)
+    readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DriveSession Session, string Id)> _shownWaiting = new(StringComparer.OrdinalIgnoreCase);
+    // answers that took so long Explorer had given up (no mark shown): redrawn soon, when it is quiet again
+    readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _late = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Paths shown as waiting that are in Telegram now (they need a redraw); off the UI thread.</summary>
+    public List<string> TakeNoLongerWaiting(DriveSession s)
+    {
+        var done = new List<string>();
+        foreach (var (path, f) in _shownWaiting)
+        {
+            if (f.Session != s) continue;
+            bool waiting;
+            try { waiting = s.Engine.IsWaitingToUpload(f.Id); } catch { waiting = false; }
+            if (!waiting && _shownWaiting.TryRemove(path, out _)) done.Add(path);
+        }
+        return done;
+    }
+
+    /// <summary>Paths whose answer came too late for Explorer.</summary>
+    public List<string> TakeLate()
+    {
+        var late = _late.Keys.ToList();
+        foreach (var p in late) _late.TryRemove(p, out _);
+        return late;
     }
 
     /// <summary>The file's state for Explorer's icons (one icon per state); asked for every file shown,
@@ -129,7 +160,12 @@ sealed class ShellBridge : IDisposable
             if (Resolve(path) is { } f)
             {
                 var e = f.Session.Engine;
-                if (e.IsWaitingToUpload(f.Id)) state = e.IsPaused(f.Id) ? 'P' : 'U';
+                if (e.IsWaitingToUpload(f.Id))
+                {
+                    // orange only for pieces held by a pause (a rename or a journal entry is not paused)
+                    state = e.IsUploadPending(f.Id) && e.IsPaused(f.Id) ? 'P' : 'U';
+                    if (_shownWaiting.Count < 20_000) _shownWaiting[path] = (f.Session, f.Id);
+                }
                 else
                 {
                     int p = Percent(path);
@@ -139,6 +175,7 @@ sealed class ShellBridge : IDisposable
         }
         catch (Exception ex) { Log.Debug($"shell bridge: {path}: {ex.Message}"); }
         lock (_recent) _states[path] = (state, now);
+        if (Environment.TickCount64 - now > 140 && _late.Count < 5000) _late[path] = 0; // Explorer gave up waiting
         return state;
     }
 
@@ -182,22 +219,26 @@ sealed class ShellBridge : IDisposable
             var (s, id) = all[0];
             int p = Percent(paths[0]);
             var e = s.Engine;
-            info = e.IsWaitingToUpload(id)
+            bool contentSaved = e.IsContentInTelegram(id), pending = e.IsUploadPending(id);
+            bool paused = pending && e.IsPaused(id);
+            info = !contentSaved
                     ? e.HasSavedVersion(id)
-                        ? e.IsPaused(id) ? L.T("DriveGram: השינוי מושהה ועוד לא עלה (הגרסה הקודמת שמורה בטלגרם)", "DriveGram: the change is paused, not uploaded yet (the earlier version is in Telegram)")
+                        ? paused ? L.T("DriveGram: השינוי מושהה ועוד לא עלה (הגרסה הקודמת שמורה בטלגרם)", "DriveGram: the change is paused, not uploaded yet (the earlier version is in Telegram)")
                             : L.T("DriveGram: השינוי עוד לא עלה לטלגרם (הגרסה הקודמת שמורה בו)", "DriveGram: the change is not in Telegram yet (the earlier version is)")
-                        : e.IsPaused(id) ? L.T("DriveGram: ההעלאה מושהית, עוד לא שמור בטלגרם", "DriveGram: upload paused, not in Telegram yet")
+                        : paused ? L.T("DriveGram: ההעלאה מושהית, עוד לא שמור בטלגרם", "DriveGram: upload paused, not in Telegram yet")
                             : L.T("DriveGram: עוד לא שמור בטלגרם (מחכה להעלאה או עולה עכשיו)", "DriveGram: not in Telegram yet (waiting to upload, or uploading)")
+                : e.IsWaitingToUpload(id) ? L.T("DriveGram: התוכן שמור בטלגרם; השם או המיקום החדש עוד לא נשלחו", "DriveGram: the content is in Telegram; the new name or place is not sent yet")
                 : IsPreparing(s, id) ? L.T("DriveGram: מוריד למחשב הזה…", "DriveGram: downloading to this PC…")
-                : e.IsPrepared(id) && p >= 100 ? L.T("DriveGram: שמור בטלגרם, ונשמר במחשב הזה עד שתפנה אותו ✓", "DriveGram: saved in Telegram, and kept on this PC until you free it ✓")
-                : e.IsPrepared(id) ? L.T($"DriveGram: ההכנה לא הושלמה ({p}%). בחר \"הכן\" שוב", $"DriveGram: preparing did not finish ({p}%). Choose \"Prepare\" again")
+                : e.IsPrepared(id) && p >= 100 ? L.T("DriveGram: שמור בטלגרם ✓ ומוכן במחשב הזה (נשאר עד שתפנה אותו)", "DriveGram: saved in Telegram ✓ and prepared on this PC (stays until you free it)")
+                : e.IsPrepared(id) ? L.T($"DriveGram: ההכנה לא הושלמה ({p}%). בחר \"הכן במחשב הזה\" שוב", $"DriveGram: preparing did not finish ({p}%). Choose \"Prepare on this PC\" again")
                 : p >= 100 ? L.T("DriveGram: שמור בטלגרם, וכולו גם במחשב הזה (זמני)", "DriveGram: saved in Telegram, all of it on this PC too (temporary)")
-                : p > 0 ? L.T($"DriveGram: שמור בטלגרם, {p}% ממנו במחשב הזה", $"DriveGram: saved in Telegram, {p}% of it on this PC")
+                : p > 0 ? L.T($"DriveGram: שמור בטלגרם, {p}% ממנו במחשב הזה (זמני)", $"DriveGram: saved in Telegram, {p}% of it on this PC (temporary)")
                 : L.T("DriveGram: שמור בטלגרם בלבד (לא במחשב הזה)", "DriveGram: only in Telegram (not on this PC)");
         }
         else info = L.T($"DriveGram: {all.Count} קבצים", $"DriveGram: {all.Count} files");
-        // a file not in Telegram yet is only here: nothing to prepare, and nothing that may be freed
-        var saved = all.Where(f => !f.Session.Engine.IsWaitingToUpload(f.Id)).ToList();
+        // a file whose content is not in Telegram yet is only here: nothing to prepare, nothing that may be freed
+        // (a rename still on its way does not matter: the content is safe)
+        var saved = all.Where(f => f.Session.Engine.IsContentInTelegram(f.Id)).ToList();
         bool anyToPrepare = saved.Any(f => !f.Session.Engine.IsPrepared(f.Id) || f.Session.Engine.LocalFraction(f.Id) < 0.999);
         bool anyToFree = saved.Any(f => f.Session.Engine.IsPrepared(f.Id) || f.Session.Engine.LocalFraction(f.Id) > 0.001);
         var prepare = anyToPrepare ? L.T("הכן במחשב הזה (הורד את כולו)", "Prepare on this PC (download all of it)") : "";
