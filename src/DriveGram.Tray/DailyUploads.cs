@@ -20,7 +20,12 @@ sealed class DailyUploads
         public string AboutToDay { get; set; } = "";
         public string CapToldDay { get; set; } = "";
         public string CapLiftedDay { get; set; } = "";
+        /// <summary>The default notice was set once (a user who turns it off later keeps it off).</summary>
+        public bool AlertDefaultSet { get; set; }
     }
+
+    /// <summary>The daily notice is on by default, at this much.</summary>
+    public const double DefaultAlertGb = 20;
 
     static string FilePath => Path.Combine(AppState.Root, "upload-limits.json");
     Saved _s = new();
@@ -32,6 +37,13 @@ sealed class DailyUploads
     {
         try { if (File.Exists(FilePath)) _s = JsonSerializer.Deserialize<Saved>(File.ReadAllText(FilePath)) ?? new(); }
         catch (Exception ex) { Log.Warn($"upload limits: {ex.Message}"); }
+        if (!_s.AlertDefaultSet)
+        {
+            // on by default; a user who had already chosen a number keeps it
+            if (_s.AlertGb <= 0) _s.AlertGb = DefaultAlertGb;
+            _s.AlertDefaultSet = true;
+            _dirty = true;
+        }
         NewDayIfNeeded();
     }
 
