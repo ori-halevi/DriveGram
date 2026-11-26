@@ -199,7 +199,10 @@ public sealed class DriveSession : IAsyncDisposable
         mountPoint = mountPoint.TrimEnd('\\');
         if (!mountPoint.EndsWith(':')) mountPoint += ":";
         Semaphore? instance = new Semaphore(1, 1, InstanceName(state));
-        if (!instance.WaitOne(0)) { instance.Dispose(); throw new AlreadyMountedException(); }
+        // a few seconds' grace: freeing this drive's copies while it is disconnected holds the same lock briefly
+        bool got = instance.WaitOne(0);
+        for (int i = 0; !got && i < 25; i++) { await Task.Delay(200, ct); got = instance.WaitOne(0); }
+        if (!got) { instance.Dispose(); throw new AlreadyMountedException(); }
 
         string? letterNote = null;
         try

@@ -42,7 +42,8 @@ public static class OfflineCache
     public static List<PreparedFile> Prepared(AppState s) => Prepared(s.Dir, s.Config.MountPoint);
 
     /// <param name="dir">The drive's folder on this PC (its index, cache and lists).</param>
-    public static List<PreparedFile> Prepared(string dir, string mountPoint) => Locked(dir, () =>
+    /// (Reading only: no lock, so it never keeps the drive from connecting meanwhile.)
+    public static List<PreparedFile> Prepared(string dir, string mountPoint)
     {
         var ids = PreparedIds(dir);
         var res = new List<PreparedFile>();
@@ -53,7 +54,7 @@ public static class OfflineCache
             if (db.Get(id) is { Dir: false } n && PathOf(db, n) is { } path) // gone, or in the recycle bin: not listed
                 res.Add(new PreparedFile(id, n.Name, mountPoint + path, n.Size, Fraction(dir, db, n, frame)));
         return res;
-    });
+    }
 
     static int FrameSize(IndexDb db) =>
         db.GetMeta("layout") is { } l && l.Split('/') is [_, var f] && int.TryParse(f, out var v) ? v : Keys.DefaultFrameSize;

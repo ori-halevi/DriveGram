@@ -25,6 +25,7 @@ sealed class DriveController
     public SecurityForm? Security;
     public LetterNameForm? LetterName;
     public volatile bool FreeingOffline; // temporary copies being deleted while disconnected: no connecting meanwhile
+    public bool ChangingLetter;           // the letter / name window, through to the reconnect
     /// <summary>The saved channels did not match: the next setup shows the list of drives.</summary>
     public bool MustChooseDrive;
     public ExportForm? ExportWindow;
@@ -1222,6 +1223,14 @@ sealed class TrayApp : ApplicationContext, IMainHost
     async Task ChangeLetterAndNameAsync(DriveController d)
     {
         if (d.LetterName is { IsDisposed: false }) { d.LetterName.Activate(); return; }
+        if (d.ChangingLetter) return;
+        d.ChangingLetter = true;
+        try { await ChangeLetterAndNameCoreAsync(d); }
+        finally { d.ChangingLetter = false; }
+    }
+
+    async Task ChangeLetterAndNameCoreAsync(DriveController d)
+    {
         string letter, label;
         using (var form = new LetterNameForm(d.State, d.Session is not null, d.Session?.MountPoint, _preparer.Running.Any(j => j.Session == d.Session)))
         {
@@ -1258,10 +1267,11 @@ sealed class TrayApp : ApplicationContext, IMainHost
         Log.Info($"tray: {oldLetter} {oldLabel} is now {letter} {label}");
         UpdateIcon();
         if (!connect) return;
-        d.QuietRefusal = true; // a refusal of the new letter is said once, below
+        bool letterChanged = !string.Equals(oldLetter, letter, StringComparison.OrdinalIgnoreCase);
+        d.QuietRefusal = letterChanged; // a refusal of a NEW letter is said once, below; otherwise the usual way
         try { await MountAsync(d); }
         finally { d.QuietRefusal = false; }
-        if (d.Session is null && !d.Starting && d.LastMountRefused && !string.Equals(oldLetter, letter, StringComparison.OrdinalIgnoreCase))
+        if (d.Session is null && !d.Starting && d.LastMountRefused && letterChanged)
         {
             // Windows refused the new letter: back to how it was, and say so
             cfg.MountPoint = oldLetter;
@@ -1278,12 +1288,13 @@ sealed class TrayApp : ApplicationContext, IMainHost
     {
         try
         {
+            if (d.FreeingOffline) return false; // our own short hold, not another window
             using var instance = new Semaphore(1, 1, DriveSession.InstanceName(d.State.Dir));
-            if (!instance.WaitOne(0)) return true;
+            if (!instance.WaitOne(2000)) return true;
             instance.Release();
             return false;
         }
-        catch { return false; }
+        catch { return true; } // cannot tell (e.g. a command line run as administrator): do not change it under it
     }
 
     async Task ChangeDriveTypeAsync(DriveController d)
@@ -1457,6 +1468,12 @@ sealed class TrayApp : ApplicationContext, IMainHost
         if (now - _diskCheckedAt < 5 * 60_000) return;
         _diskCheckedAt = now;
         if (_toldLowDiskOn == DateTime.Today) return;
+        var drives = _drives.ToList();
+        _ = Task.Run(() => CheckLowDisk(drives)); // reading disconnected drives' indexes: not on the UI thread
+    }
+
+    void CheckLowDisk(List<DriveController> _drives)
+    {
         try
         {
             var root = Path.GetPathRoot(Path.GetFullPath(AppState.Root))!;
@@ -1471,13 +1488,21 @@ sealed class TrayApp : ApplicationContext, IMainHost
                 }
                 catch { }
             if (prepared < 1L << 30) return;
+            _ui.Post(_ => LowDiskNotice(root, free, prepared), null);
+        }
+        catch (Exception ex) { Log.Debug($"low disk: {ex.Message}"); }
+    }
+
+    void LowDiskNotice(string root, long free, long prepared)
+    {
+        if (_toldLowDiskOn == DateTime.Today) return;
+        {
             _toldLowDiskOn = DateTime.Today;
             Balloon(L.T($"נשאר מעט מקום ב־{L.Ltr(root.TrimEnd('\\'))}", $"Little space left on {root.TrimEnd('\\')}"),
                 L.T($"נשארו {Ui.Size(free)} פנויים. קבצים שהכנת תופסים {Ui.Size(prepared)} ולא נמחקים לבד. לחץ כאן כדי לבחור מה לפנות.",
                     $"{Ui.Size(free)} free. Files you prepared take {Ui.Size(prepared)}, and DriveGram never deletes them by itself. Click here to see them and free what you no longer need."),
                 ToolTipIcon.Warning, ShowPrepared);
         }
-        catch (Exception ex) { Log.Debug($"low disk check: {ex.Message}"); }
     }
 
     DriveGram.Tray.MainForm? _main;
@@ -1488,7 +1513,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
         if (_main is not { IsDisposed: false })
         {
             _main = new DriveGram.Tray.MainForm(this);
-            if (_updates.Offered is { } u) _main.ShowUpdate("⬆  " + UpdateText(u), ShowUpdate);
+            if (_updates.Offered is { } u) _main.ShowUpdate(UpdateBar(u), ShowUpdate);
             _main.Show();
         }
         else
@@ -1950,16 +1975,25 @@ sealed class TrayApp : ApplicationContext, IMainHost
     readonly Updates _updates = new();
     UpdateForm? _updateForm;
 
-    string UpdateText(UpdateInfo u) => L.T($"גרסה חדשה של DriveGram: {L.Ltr(u.Version.ToString())}…", $"A new version of DriveGram: {u.Version}…");
+    string UpdateText(UpdateInfo u) => L.T($"גרסה חדשה זמינה ({L.Ltr(u.Version.ToString())})…", $"A new version is available ({u.Version})…");
+    static string UpdateBar(UpdateInfo u) => L.T($"יש גרסה חדשה של DriveGram: {L.Ltr(u.Version.ToString())} – לחץ כאן לפרטים", $"A new version of DriveGram: {u.Version} – click here for details");
+
+    async Task CheckForUpdateNowAsync()
+    {
+        bool ok = await _updates.CheckNowAsync();
+        if (_updates.Offered is not null) { ShowUpdate(); return; }
+        Ui.Info(ok ? L.T($"יש לך את הגרסה האחרונה של DriveGram ({L.Ltr(Updates.Current.ToString())}).", $"You have the latest version of DriveGram ({Updates.Current}).")
+                   : L.T("לא הצלחתי לבדוק עכשיו (אין חיבור ל־GitHub). DriveGram ינסה שוב לבד.", "Could not check right now (no connection to GitHub). DriveGram tries again by itself."));
+    }
 
     void OnUpdatesChanged()
     {
         var u = _updates.Offered;
-        if (_main is { IsDisposed: false } m) m.ShowUpdate(u is null ? null : "⬆  " + UpdateText(u), ShowUpdate);
+        if (_main is { IsDisposed: false } m) m.ShowUpdate(u is null ? null : UpdateBar(u), ShowUpdate);
         if (u is not null && _updates.FirstTimeFor(u))
             Balloon(L.T("יש גרסה חדשה של DriveGram", "A new version of DriveGram"),
-                L.T($"גרסה {L.Ltr(u.Version.ToString())} זמינה (שלך: {L.Ltr(Updates.Current.ToString())}). לחץ כאן כדי לראות מה חדש. אפשר גם אחר כך, מהתפריט של האייקון.",
-                    $"Version {u.Version} is available (yours: {Updates.Current}). Click here to see what's new. Or later, from the icon's menu."),
+                L.T($"גרסה {L.Ltr(u.Version.ToString())} זמינה. לחץ כאן כדי לראות מה חדש, או מאוחר יותר מהתפריט של האייקון.",
+                    $"Version {u.Version} is available. Click here to see what's new, or later from the icon's menu."),
                 onClick: ShowUpdate);
     }
 
@@ -1978,7 +2012,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
         _menu.Items.Clear();
         if (_updates.Offered is { } update)
         {
-            var item = Item(UpdateText(update), ShowUpdate, bold: true);
+            var item = Item(UpdateText(update), ShowUpdate);
             item.Image = Glyphs.Make('\uE896' /* download arrow */, Color.FromArgb(0xE0, 0x7A, 0x00), 16);
             item.ForeColor = Color.FromArgb(0xB4, 0x5A, 0x00);
             _menu.Items.Add(item);
@@ -2024,6 +2058,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
             lang.DropDownItems.Add(li);
         }
         _menu.Items.Add(lang);
+        _menu.Items.Add(Item(L.T("בדוק אם יש גרסה חדשה", "Check for a new version"), () => _ = CheckForUpdateNowAsync()));
         _menu.Items.Add(Item(L.T("פתח את תיקיית יומן הפעילות", "Open the log folder"),
             () => Process.Start(new ProcessStartInfo(Path.Combine(AppState.Root, "logs")) { UseShellExecute = true })));
         _menu.Items.Add(new ToolStripSeparator());
@@ -2039,7 +2074,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
         list.Add(Item(L.T("סל המחזור…", "Recycle bin…"), () => ShowTrash(d), on));
         list.Add(Item(L.T("ייצוא כל הקבצים לתיקייה…", "Export every file to a folder…"), () => Export(d), on));
         // works disconnected too: only local copies are deleted
-        list.Add(Item(L.T("פנה מקום במחשב הזה…", "Free up space on this PC…"), () => FreeUpSpace(d), !d.Starting && !d.Stopping));
+        list.Add(Item(L.T("פנה מקום במחשב הזה…", "Free up space on this PC…"), () => FreeUpSpace(d), !d.Starting && !d.Stopping && !d.FreeingOffline));
         list.Add(new ToolStripSeparator());
         if (d.Session is null)
             list.Add(Item(L.T("חבר", "Connect"), async () => { if (d.NeedsSetup) await SetupAsync(d); else await MountAsync(d); },

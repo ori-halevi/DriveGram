@@ -350,7 +350,7 @@ sealed class TransfersForm : Form
         var localBar = NewBar();
         Button(localBar, Glyphs.Add, L.T("הכן קובץ מהכונן…", "Prepare a file from the drive…"), PickAndPrepare);
         _prepareSel = Button(localBar, Glyphs.Download, L.T("הכן", "Prepare"), PrepareSelected);
-        _freeSel = Button(localBar, Glyphs.Delete, L.T("פנה מהמחשב", "Free from this PC"), FreeSelected);
+        _freeSel = Button(localBar, Glyphs.Delete, L.T("פנה מהמחשב הזה", "Free from this PC"), FreeSelected);
         _prepareSel.ToolTipText = L.T("הורד את כל הקבצים שבחרת ברשימה ושמור אותם במחשב הזה", "Download all of the files chosen in the list and keep them on this PC");
         _freeSel.ToolTipText = L.T("מחק מהמחשב הזה את העותקים של הקבצים שבחרת ברשימה (הם נשארים בטלגרם)", "Delete this PC's copies of the files chosen in the list (they stay in Telegram)");
         localBar.Items.Add(new ToolStripSeparator());
@@ -366,7 +366,7 @@ sealed class TransfersForm : Form
             if (!_settingFilter) { _prefs.LocalFilter = _localFilter.SelectedIndex; _prefs.Save(); }
             FillLocal();
         };
-        _searchWait.Tick += (_, _) => { _searchWait.Stop(); FillLocal(); };
+        _searchWait.Tick += (_, _) => { _searchWait.Stop(); if (!IsDisposed) FillLocal(); };
         _localSearch.TextChanged += (_, _) => { _searchWait.Stop(); _searchWait.Start(); };
         localBar.Items.Add(_localSearch);
         localBar.Items.Add(_localFilter);
@@ -422,6 +422,7 @@ sealed class TransfersForm : Form
         Disposed += (_, _) => _host.Preparer.Finished -= prepared;
         Shown += (_, _) => Start();
         FormClosed += (_, _) => _timer.Dispose();
+        Disposed += (_, _) => { _timer.Dispose(); _searchWait.Dispose(); };
     }
 
     /// <summary>Back to the uploads list (a notice about uploads opens it there).</summary>
@@ -709,7 +710,7 @@ sealed class TransfersForm : Form
         var offline = SelectedOffline();
         if (sel.Count == 0 && offline.Count > 0)
         {
-            m.Items.Add(new ToolStripMenuItem(L.T("הכונן מנותק: אפשר לפתוח את הקובץ אחרי שהוא יתחבר", "The drive is disconnected: the file opens once it connects")) { Enabled = false });
+            m.Items.Add(new ToolStripMenuItem(L.T("הכונן מנותק – אפשר לפתוח אחרי שהכונן יתחבר", "The drive is disconnected – it opens once the drive connects")) { Enabled = false });
             MenuItem(m, Glyphs.Delete, Many(L.T("פנה מהמחשב הזה", "Free from this PC"), offline.Count), FreeSelected, keys: "Del");
             MenuItem(m, Glyphs.Copy, L.T("העתק נתיב", "Copy path"), () => CopyPaths(offline.Select(r => r.Path)), keys: "Ctrl+C");
             return;
@@ -721,7 +722,7 @@ sealed class TransfersForm : Form
         MenuItem(m, Glyphs.Download, Many(L.T("הכן: שמור את כולו במחשב הזה", "Prepare: keep all of it on this PC"), sel.Count), PrepareSelected, sel.Any(r => r.Fraction < 0.999 || !r.Prepared));
         var running = sel.Where(r => r.Session is not null && _host.Preparer.ProgressOf(r.Session, r.Id) is not null).ToList();
         if (running.Count > 0)
-            MenuItem(m, Glyphs.Cancel, Many(L.T("בטל את ההכנה", "Cancel preparing"), running.Count), () =>
+            MenuItem(m, Glyphs.Cancel, Many(L.T("עצור את ההכנה", "Stop preparing"), running.Count), () =>
             {
                 foreach (var r in running) _host.Preparer.Cancel(r.Session!, r.Id);
                 _ = ScanAsync();
@@ -738,7 +739,7 @@ sealed class TransfersForm : Form
         if (e.Control && e.KeyCode == System.Windows.Forms.Keys.A) { SelectAll(list); e.Handled = true; }
         else if (e.Control && e.KeyCode == System.Windows.Forms.Keys.C)
         {
-            CopyPaths(list == _up ? Selected(_up).Select(x => x.D.Session!.FullPathOf(x.U.Id)) : SelectedLocal().Select(r => r.Path));
+            CopyPaths(list == _up ? Selected(_up).Select(x => x.D.Session!.FullPathOf(x.U.Id)) : SelectedLocal().Select(r => r.Path).Concat(SelectedOffline().Select(r => r.Path)));
             e.Handled = true;
         }
         else if (e.KeyCode == System.Windows.Forms.Keys.Delete && list.SelectedItems.Count > 0) { cancel(); e.Handled = true; }
@@ -802,7 +803,7 @@ sealed class TransfersForm : Form
         _cancelSel.Enabled = sel.Count > 0 && !_cancelling;
         var lsel = SelectedLocal().ToList();
         _prepareSel.Text = Many(L.T("הכן", "Prepare"), lsel.Count);
-        _freeSel.Text = Many(L.T("פנה מהמחשב", "Free from this PC"), lsel.Count);
+        _freeSel.Text = Many(L.T("פנה מהמחשב הזה", "Free from this PC"), lsel.Count + SelectedOffline().Count);
         _prepareSel.Enabled = lsel.Any(r => r.Fraction < 0.999 || !r.Prepared);
         _freeSel.Enabled = lsel.Count > 0 || SelectedOffline().Count > 0;
     }
@@ -936,37 +937,39 @@ sealed class TransfersForm : Form
     {
         if (DemoSays()) return;
         var offline = SelectedOffline();
-        if (offline.Count > 0) { await FreeOffline(offline); return; }
         var sel = SelectedLocal().ToList();
-        if (sel.Count == 0) return;
-        await _host.FreeFiles(sel.Select(r => (r.Session!, r.Id))); // the list is made again after the space is freed
+        if (offline.Count > 0 && !await FreeOffline(offline, alsoConnected: sel.Count)) return;
+        if (sel.Count > 0) await _host.FreeFiles(sel.Select(r => (r.Session!, r.Id))); // asks itself for prepared files
         if (!IsDisposed) await ScanAsync();
     }
 
     /// <summary>Prepared files of a drive that is not connected: freed from its local folder (they stay in Telegram).</summary>
-    async Task FreeOffline(List<LocalRow> rows)
+    /// <returns>false when the user said no (nothing is freed then, also not the connected rows).</returns>
+    async Task<bool> FreeOffline(List<LocalRow> rows, int alsoConnected)
     {
+        var also = alsoConnected > 0 ? L.N(alsoConnected, "\n\nגם קובץ אחד של כונן מחובר יפונה.", "\n\nגם {0} קבצים של כוננים מחוברים יפונו.",
+            "\n\nOne file of a connected drive is freed too.", "\n\n{0} files of connected drives are freed too.") : "";
         if (Ui.Ask(L.N(rows.Count,
-                "לפנות מהמחשב הזה קובץ שהכנת? הוא שמור בטלגרם, ויורד שוב כשתפתח אותו (צריך אינטרנט).",
-                "לפנות מהמחשב הזה {0} קבצים שהכנת? הם שמורים בטלגרם, ויורדו שוב כשתפתח אותם (צריך אינטרנט).",
-                "Free a file you prepared from this PC? It is stored in Telegram, and downloads again when you open it (needs internet).",
-                "Free {0} files you prepared from this PC? They are stored in Telegram, and download again when you open them (needs internet).")) != DialogResult.Yes) return;
+                "לפנות מהמחשב הזה קובץ שהכנת, של כונן מנותק? הוא שמור בטלגרם, ויורד שוב כשתפתח אותו (צריך אינטרנט).",
+                "לפנות מהמחשב הזה {0} קבצים שהכנת, של כוננים מנותקים? הם שמורים בטלגרם, ויורדו שוב כשתפתח אותם (צריך אינטרנט).",
+                "Free a file you prepared, of a disconnected drive, from this PC? It is stored in Telegram, and downloads again when you open it (needs internet).",
+                "Free {0} files you prepared, of disconnected drives, from this PC? They are stored in Telegram, and download again when you open them (needs internet).") + also) != DialogResult.Yes) return false;
         long freed = 0;
-        try
+        var failed = new List<string>();
+        foreach (var g in rows.GroupBy(r => r.Drive))
         {
-            freed = await Task.Run(() => rows.GroupBy(r => r.Drive).Sum(g => OfflineCache.FreePrepared(g.Key.State.Dir, g.Select(r => r.Id))));
+            var d = g.Key;
+            if (d.Session is not null || d.Starting || d.FreeingOffline) { failed.Add(d.Name); continue; } // connected meanwhile
+            d.FreeingOffline = true; // no connecting while its files are deleted
+            try { freed += await Task.Run(() => OfflineCache.FreePrepared(d.State.Dir, g.Select(r => r.Id))); }
+            catch (Exception ex) { Log.Warn($"free (disconnected) {d.Name}: {ex.Message}"); failed.Add(d.Name); }
+            finally { d.FreeingOffline = false; }
         }
-        catch (OfflineCache.DriveInUseException)
-        {
-            Ui.Info(L.T("הכונן פתוח כרגע בחלון אחר של DriveGram. פנה משם, או סגור אותו ונסה שוב.", "The drive is open in another DriveGram window right now. Free it there, or close that window and try again."));
-        }
-        catch (Exception ex)
-        {
-            Log.Warn($"free (disconnected): {ex.Message}");
-            Ui.Error(L.T("לא הצלחתי לפנות (לא נמחק כלום). נסה שוב בעוד רגע.", "Could not free it (nothing was deleted). Try again in a moment."));
-        }
-        if (freed > 0) Ui.Info(L.T($"פונו {Ui.Size(freed)} במחשב הזה.", $"{Ui.Size(freed)} freed on this PC."));
-        if (!IsDisposed) await ScanAsync();
+        if (failed.Count > 0)
+            Ui.Info(L.T($"לא פונו קבצים של: {string.Join(", ", failed)} (הכונן פתוח או התחבר בינתיים). מהם לא נמחק כלום; נסה שוב בעוד רגע.",
+                $"Files of {string.Join(", ", failed)} were not freed (the drive is open, or connected meanwhile). Nothing of them was deleted; try again in a moment."));
+        else if (freed > 0 && alsoConnected == 0) Ui.Info(L.T($"פונו {Ui.Size(freed)} במחשב הזה.", $"{Ui.Size(freed)} freed on this PC."));
+        return true;
     }
 
     /// <summary>Find the files that are (partly) on this PC, in the background: it reads the whole index.</summary>
@@ -1077,12 +1080,11 @@ sealed class TransfersForm : Form
         _local.ListViewItemSorter = null; // added together, sorted once (one by one, a sorted list re-sorts each time)
         _local.Items.AddRange(items);
         RefreshLocalProgress(); // the state column first: it is sorted by its text
-        _local.ListViewItemSorter = _localSort;
-        _localSort.Apply();
+        _local.ListViewItemSorter = _localSort; // (setting it sorts)
         foreach (var item in items) if (chosen.Contains(item.Name)) item.Selected = true;
         _local.EndUpdate();
         _localSort.Arrows();
-        if (top is not null && _local.Items[top] is { } back) back.EnsureVisible(); // where it was, not back to the top
+        if (top is not null && _local.Items[top] is { } back) _local.TopItem = back; // where it was, not back to the top
         bool filtered = _localFilter.SelectedIndex != 0 || search.Trim().Length > 0;
         _localEmpty.Text = _localRows.Count == 0
             ? (_anyConnected ? L.T("אין כרגע קבצים מהכוננים במחשב הזה. קבצים שפותחים נשמרים כאן לזמן מה, וקובץ ש\"מכינים\" נשמר עד שמפנים אותו.",
@@ -1109,9 +1111,12 @@ sealed class TransfersForm : Form
                 item.SubItems[3].Text = Bar(r.Fraction);
                 (item.ImageKey, item.SubItems[4].Text) = r.Fraction >= 0.999
                     ? ("offline", L.T("מוכן (הכונן מנותק)", "Prepared (drive disconnected)"))
-                    : ("offline", L.T("הוכן חלקית (הכונן מנותק)", "Partly prepared (drive disconnected)"));
-                item.ToolTipText = r.Path + "\n" + L.T("הקובץ הוכן במחשב הזה. הכונן מנותק כרגע, ולכן אפשר לפתוח אותו רק אחרי שהכונן יתחבר. אפשר לפנות אותו גם עכשיו.",
-                    "The file was prepared on this PC. The drive is disconnected right now, so it opens only once the drive connects. It can be freed now too.");
+                    : ("offline", L.T("מוכן בחלקו (הכונן מנותק)", "Partly prepared (drive disconnected)"));
+                item.ToolTipText = r.Path + "\n" + (r.Fraction >= 0.999
+                    ? L.T("הקובץ הוכן במחשב הזה. הכונן מנותק כרגע, ולכן אפשר לפתוח אותו רק אחרי שהכונן יתחבר. אפשר לפנות אותו גם עכשיו.",
+                        "The file was prepared on this PC. The drive is disconnected right now, so it opens only once the drive connects. It can be freed now too.")
+                    : L.T("רק חלק מהקובץ הוכן במחשב הזה. אחרי שהכונן יתחבר, בחר \"הכן\" שוב כדי להשלים.",
+                        "Only part of the file was prepared on this PC. Once the drive connects, choose \"Prepare\" again to finish."));
                 continue;
             }
             if (!_demo && _host.Drives.FirstOrDefault(x => x.State.Id == r.Drive.State.Id && x.Session is not null) is { } now
@@ -1124,7 +1129,7 @@ sealed class TransfersForm : Form
             item.SubItems[3].Text = Bar(r.Fraction);
             (item.ImageKey, item.SubItems[4].Text) = running is not null ? ("down", L.T("מוריד למחשב הזה…", "Downloading to this PC…"))
                 : prepared && r.Fraction >= 0.999 ? ("ready", L.T("מוכן – נשאר במחשב עד שתפנה", "Ready – stays on this PC until you free it"))
-                : prepared ? ("down", L.T("הוכן חלקית (נסה שוב)", "Partly prepared (try again)"))
+                : prepared ? ("down", L.T("מוכן בחלקו (נסה שוב)", "Partly prepared (try again)"))
                 : r.Fraction >= 0.999 ? ("full", L.T("כולו כאן (זמני)", "All here (temporary)"))
                 : ("part", L.T("חלקו כאן (זמני)", "Partly here (temporary)"));
             item.ToolTipText = r.Path + "\n" + LocalTip(item.SubItems[4].Text, r.Fraction, prepared, running is not null);
