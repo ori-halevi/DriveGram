@@ -165,6 +165,66 @@ sealed class ApiPage : WizardPage
     }
 }
 
+// ── Choosing the account (adding a drive from the Drives tab) ───────────────
+/// <summary>
+/// Which of the accounts signed in on this PC the new drive belongs to. Shown only when there is more
+/// than one: with a single account there is nothing to ask, and the wizard goes straight on. Accounts
+/// are not added here — that is what the Accounts tab is for.
+/// </summary>
+sealed class AccountPage : WizardPage
+{
+    readonly FlowLayoutPanel _list = Theme.Column();
+    readonly List<(RadioButton Button, AccountInfo Account)> _choices = [];
+    bool _only;
+
+    public override string Title => L.T("באיזה חשבון?", "On which account?");
+    public override string Subtitle => L.T("הכונן נשמר בשני ערוצים פרטיים של החשבון שתבחר.",
+        "The drive is kept in two private channels of the account you choose.");
+    public override bool Skip => _only;
+
+    public AccountPage(SetupContext ctx) : base(ctx)
+    {
+        var col = Theme.Column();
+        col.Controls.Add(_list);
+        SetContent(col);
+    }
+
+    public override Task EnterAsync()
+    {
+        var known = TelegramAccounts.Known();
+        if (_choices.Count == 0 || _choices.Count != known.Count)
+        {
+            _list.Controls.Clear();
+            _choices.Clear();
+            foreach (var a in known)
+            {
+                int drives = AppState.All().Count(x => x.Config.AccountKey == a.Key);
+                var rb = new RadioButton
+                {
+                    Text = L.Name(a.Name) + "   ·   " + L.N(drives, "כונן אחד במחשב הזה", "{0} כוננים במחשב הזה",
+                        "1 drive on this PC", "{0} drives on this PC"),
+                    AutoSize = true, Font = Theme.Body, Margin = new Padding(0, 6, 0, 6), Tag = a,
+                };
+                rb.CheckedChanged += (_, _) => Changed(_choices.Any(c => c.Button.Checked));
+                _choices.Add((rb, a));
+                _list.Controls.Add(rb);
+            }
+            if (_choices.Count > 0) _choices[0].Button.Checked = true;
+        }
+        // one account: nothing to ask — it is chosen and the page is skipped
+        _only = _choices.Count <= 1;
+        if (_only && _choices.Count == 1) Ctx.UseAccount(_choices[0].Account);
+        Changed(_choices.Any(c => c.Button.Checked));
+        return Task.CompletedTask;
+    }
+
+    public override Task<bool> NextAsync()
+    {
+        if (_choices.FirstOrDefault(c => c.Button.Checked) is { Button: not null } chosen) Ctx.UseAccount(chosen.Account);
+        return Task.FromResult(true);
+    }
+}
+
 // ── 3. Telegram sign-in ─────────────────────────────────────────────────────
 sealed class LoginPage : WizardPage
 {
