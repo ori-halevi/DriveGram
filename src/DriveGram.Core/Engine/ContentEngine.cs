@@ -121,7 +121,10 @@ public sealed class ContentEngine : IAsyncDisposable
         CS = keys.ChunkSize;
         _staging = Path.Combine(stateDir, "staging");
         Directory.CreateDirectory(_staging);
-        _cache = new BlockCache(Path.Combine(stateDir, "cache"), _o.CacheQuota, waitForKept: true); // Start → LoadKept
+        _cache = new BlockCache(Path.Combine(stateDir, "cache"), _o.CacheQuota, waitForKept: true) // Start → LoadKept
+        {
+            PreviewQuota = Math.Clamp(_o.CacheQuota / 8, 64L << 20, 1L << 30), // thumbnails' windows: 1 GB at most
+        };
         _reader = new ChunkReader(remote, _cache, keys);
         _uploadSlots = new SemaphoreSlim(Math.Max(1, _o.UploadConcurrency));
         _pieceSlots = new SemaphoreSlim(Math.Max(1, _o.UploadConcurrency) + 2);
@@ -739,7 +742,8 @@ public sealed class ContentEngine : IAsyncDisposable
     public int Read(string id, long offset, Span<byte> dst) => Read(id, offset, dst, allowRemote: true);
 
     /// <param name="allowRemote">false: only data already on this PC (staged or cached in full).</param>
-    public int Read(string id, long offset, Span<byte> dst, bool allowRemote)
+    /// <param name="preview">Explorer reading for a thumbnail or details (see <see cref="BlockCache"/>).</param>
+    public int Read(string id, long offset, Span<byte> dst, bool allowRemote, bool preview = false)
     {
         var st = State(id);
         for (int attempt = 0; ; attempt++)
@@ -758,7 +762,7 @@ public sealed class ContentEngine : IAsyncDisposable
             bool sequential = Interlocked.Exchange(ref st.LastReadEnd, offset + n) == offset;
             try
             {
-                Execute(plan, dst[..n], sequential);
+                Execute(plan, dst[..n], sequential, preview);
                 return n;
             }
             catch (Exception ex) when (attempt == 0 && ex is FileNotFoundException or DirectoryNotFoundException)
@@ -807,7 +811,7 @@ public sealed class ContentEngine : IAsyncDisposable
         return plan;
     }
 
-    void Execute(List<Seg> plan, Span<byte> dst, bool sequential)
+    void Execute(List<Seg> plan, Span<byte> dst, bool sequential, bool preview)
     {
         foreach (var seg in plan)
         {
@@ -835,7 +839,7 @@ public sealed class ContentEngine : IAsyncDisposable
                     var buf = new byte[r.Len];
                     using var cts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, _waits.Token);
                     cts.CancelAfter(ReadBudget);
-                    Remote(() => _reader.ReadAsync(r.Loc, r.InOff, buf, sequential, cts.Token).GetAwaiter().GetResult());
+                    Remote(() => _reader.ReadAsync(r.Loc, r.InOff, buf, sequential, cts.Token, preview).GetAwaiter().GetResult());
                     buf.CopyTo(target);
                     break;
                 }

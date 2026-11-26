@@ -7,7 +7,7 @@
     <Nullable>enable</Nullable>
     <AssemblyName>drivegram</AssemblyName>
     <RootNamespace>DriveGram.App</RootNamespace>
-    <Version>1.3.2</Version>
+    <Version>1.4.0</Version>
     <ApplicationIcon>..\..\assets\drivegram.ico</ApplicationIcon>
     <!-- the tray app lands in the same folder, so autostart / the drive icon have one place to point at -->
     <OutputPath>..\..\bin\$(Configuration)\</OutputPath>

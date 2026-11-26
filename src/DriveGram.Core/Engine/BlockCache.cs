@@ -5,17 +5,21 @@ namespace DriveGram.Engine;
 ///  - "w": 1 MiB windows of stored (still ENCRYPTED) chunk messages, from remote reads;
 ///  - "p": whole PLAINTEXT chunks that were written on this PC and then committed, so reading
 ///         back a file you just copied in costs no download.
+/// And, apart, with their own small quota: "v", the PREVIEW windows: what Explorer read to show a file's
+/// thumbnail and details (length, size of a picture). "Free from this PC" and "free up space" leave them,
+/// and they do not count as the file being here: browsing a folder again downloads nothing, and a freed
+/// file still shows its thumbnail.
 /// Survives restarts (rebuilt from the directory, ordered by last access time).
 /// </summary>
 public sealed class BlockCache
 {
     sealed record Entry(string Key, string Path, long Size);
 
-    readonly string _wDir, _pDir;
+    readonly string _wDir, _pDir, _vDir;
     readonly object _gate = new();
     readonly LinkedList<Entry> _lru = new(); // First = most recently used
     readonly Dictionary<string, LinkedListNode<Entry>> _map = new();
-    long _bytes, _keptBytes;
+    long _bytes, _keptBytes, _previewBytes; // _bytes: w and p only (the preview windows have their own quota)
     Func<string, bool>? _kept;
     bool _waitForKept; // nothing is evicted until the prepared files are known (they would go first)
 
@@ -41,6 +45,11 @@ public sealed class BlockCache
 
     public long Quota { get; set; }
     public long Bytes { get { lock (_gate) return _bytes; } }
+    /// <summary>The preview windows' own quota (the oldest go first).</summary>
+    public long PreviewQuota { get; set; } = 512L << 20;
+    public long PreviewBytes { get { lock (_gate) return _previewBytes; } }
+
+    static bool IsPreview(string key) => key.StartsWith("v/", StringComparison.Ordinal);
 
     /// <param name="waitForKept">Evict nothing until <see cref="SetKept"/> is called: on a restart the
     /// prepared files are not known yet, and as the oldest entries they would be evicted first.</param>
@@ -50,10 +59,13 @@ public sealed class BlockCache
         _waitForKept = waitForKept;
         _wDir = Path.Combine(dir, "w");
         _pDir = Path.Combine(dir, "p");
+        _vDir = Path.Combine(dir, "v");
         Directory.CreateDirectory(_wDir);
         Directory.CreateDirectory(_pDir);
+        Directory.CreateDirectory(_vDir);
         var files = new DirectoryInfo(_wDir).EnumerateFiles().Select(f => ("w/" + f.Name, f))
             .Concat(new DirectoryInfo(_pDir).EnumerateFiles().Select(f => ("p/" + f.Name, f)))
+            .Concat(new DirectoryInfo(_vDir).EnumerateFiles().Select(f => ("v/" + f.Name, f)))
             .Where(x =>
             {
                 if (!x.f.Name.EndsWith(".tmp")) return true;
@@ -64,12 +76,13 @@ public sealed class BlockCache
         foreach (var (key, f) in files)
         {
             _map[key] = _lru.AddLast(new Entry(key, f.FullName, f.Length));
-            _bytes += f.Length;
+            if (IsPreview(key)) _previewBytes += f.Length; else _bytes += f.Length;
         }
         Evict();
     }
 
     static string WKey(int msg, int win) => $"w/{msg}_{win}";
+    static string VKey(int msg, int win) => $"v/{msg}_{win}";
 
     public void SetQuota(long quota)
     {
@@ -77,9 +90,16 @@ public sealed class BlockCache
         Evict();
     }
 
+    /// <summary>The window is cached as part of the file (not just as a preview window).</summary>
     public bool HasWindow(int msg, int win)
     {
         lock (_gate) return _map.ContainsKey(WKey(msg, win));
+    }
+
+    /// <summary>The window is on this PC at all (cached, or a preview window).</summary>
+    public bool HasAnyWindow(int msg, int win)
+    {
+        lock (_gate) return _map.ContainsKey(WKey(msg, win)) || _map.ContainsKey(VKey(msg, win));
     }
 
     public void RemovePlain(string chunkId)
@@ -91,27 +111,47 @@ public sealed class BlockCache
         if (path is not null) TryDelete(path);
     }
 
+    /// <summary>Drop a window (both copies: cached and preview).</summary>
     public void RemoveWindow(int msg, int win)
     {
-        var key = WKey(msg, win);
-        string? path;
-        lock (_gate) path = _map.TryGetValue(key, out var n) ? n.Value.Path : null;
-        Remove(key);
-        if (path is not null) TryDelete(path);
+        foreach (var key in new[] { WKey(msg, win), VKey(msg, win) })
+        {
+            string? path;
+            lock (_gate) path = _map.TryGetValue(key, out var n) ? n.Value.Path : null;
+            Remove(key);
+            if (path is not null) TryDelete(path);
+        }
     }
 
-    public byte[]? TryGetWindow(int msg, int win)
+    public byte[]? TryGetWindow(int msg, int win) => TryGetWindow(msg, win, preview: false);
+
+    /// <summary>A window from either copy. Read for a preview (Explorer), it is also kept as a preview
+    /// window; read by a program, as part of the file (it is now really in use here).</summary>
+    public byte[]? TryGetWindow(int msg, int win, bool preview)
     {
-        var path = Touch(WKey(msg, win));
+        var (mine, other) = preview ? (VKey(msg, win), WKey(msg, win)) : (WKey(msg, win), VKey(msg, win));
+        var data = ReadEntry(mine);
+        if (data is not null) return data;
+        data = ReadEntry(other);
+        if (data is not null) PutWindow(msg, win, data, preview); // a copy of 1 MiB: the other one stays as it is
+        return data;
+    }
+
+    byte[]? ReadEntry(string key)
+    {
+        var path = Touch(key);
         if (path is null) return null;
         try { return File.ReadAllBytes(path); }
-        catch (IOException) { Remove(WKey(msg, win)); return null; }
+        catch (IOException) { Remove(key); return null; }
     }
 
-    public void PutWindow(int msg, int win, byte[] data)
+    public void PutWindow(int msg, int win, byte[] data) => PutWindow(msg, win, data, preview: false);
+
+    /// <param name="preview">Read by Explorer for a thumbnail or details: kept as a preview window.</param>
+    public void PutWindow(int msg, int win, byte[] data, bool preview)
     {
-        var key = WKey(msg, win);
-        var path = Path.Combine(_wDir, $"{msg}_{win}");
+        var key = preview ? VKey(msg, win) : WKey(msg, win);
+        var path = Path.Combine(preview ? _vDir : _wDir, $"{msg}_{win}");
         try
         {
             var tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
@@ -131,7 +171,8 @@ public sealed class BlockCache
     }
 
     /// <summary>Drop every cached copy (all of it is stored in Telegram too). A read that was about to use
-    /// one simply fetches it again. Returns the bytes freed.</summary>
+    /// one simply fetches it again. Returns the bytes freed. The preview windows stay (small, and they
+    /// keep browsing from downloading).</summary>
     public long Clear()
     {
         var victims = new List<string>();
@@ -142,7 +183,7 @@ public sealed class BlockCache
             for (var n = _lru.First; n is not null;)
             {
                 var next = n.Next;
-                if (!IsKept(n.Value.Key))
+                if (!IsKept(n.Value.Key) && !IsPreview(n.Value.Key))
                 {
                     victims.Add(n.Value.Path);
                     freed += n.Value.Size;
@@ -157,7 +198,8 @@ public sealed class BlockCache
         return freed;
     }
 
-    /// <summary>Drop these entries now (a prepared file the user freed).</summary>
+    /// <summary>Drop these entries now (a prepared file the user freed). Preview windows are never
+    /// dropped here ("free" leaves what Explorer needs to show the file).</summary>
     public long Drop(Func<string, bool> which)
     {
         var victims = new List<string>();
@@ -167,7 +209,7 @@ public sealed class BlockCache
             for (var n = _lru.First; n is not null;)
             {
                 var next = n.Next;
-                if (which(n.Value.Key))
+                if (!IsPreview(n.Value.Key) && which(n.Value.Key))
                 {
                     victims.Add(n.Value.Path);
                     freed += n.Value.Size;
@@ -213,10 +255,15 @@ public sealed class BlockCache
     {
         lock (_gate)
         {
-            bool kept = IsKept(key);
-            if (_map.Remove(key, out var old)) { _lru.Remove(old); _bytes -= old.Value.Size; if (kept) _keptBytes -= old.Value.Size; }
+            bool kept = IsKept(key), preview = IsPreview(key);
+            if (_map.Remove(key, out var old))
+            {
+                _lru.Remove(old);
+                if (preview) _previewBytes -= old.Value.Size; else _bytes -= old.Value.Size;
+                if (kept) _keptBytes -= old.Value.Size;
+            }
             _map[key] = _lru.AddFirst(new Entry(key, path, size));
-            _bytes += size;
+            if (preview) _previewBytes += size; else _bytes += size;
             if (kept) _keptBytes += size;
         }
         Evict();
@@ -229,7 +276,7 @@ public sealed class BlockCache
             if (_map.Remove(key, out var node))
             {
                 _lru.Remove(node);
-                _bytes -= node.Value.Size;
+                if (IsPreview(key)) _previewBytes -= node.Value.Size; else _bytes -= node.Value.Size;
                 if (IsKept(key)) _keptBytes -= node.Value.Size;
             }
         }
@@ -246,6 +293,7 @@ public sealed class BlockCache
             for (var n = _lru.Last; n is not null && _bytes - _keptBytes > Quota;)
             {
                 var prev = n.Previous;
+                if (IsPreview(n.Value.Key)) { n = prev; continue; } // their own quota, below
                 if (!IsKept(n.Value.Key))
                 {
                     _lru.Remove(n);
@@ -258,6 +306,19 @@ public sealed class BlockCache
             }
             // kept for good: moved to the other end (after the walk), so the next eviction does not pass them again
             foreach (var k in passed) { _lru.Remove(k); _lru.AddFirst(k); }
+            // the preview windows: the oldest first, within their own quota
+            for (var n = _lru.Last; n is not null && _previewBytes > PreviewQuota;)
+            {
+                var prev = n.Previous;
+                if (IsPreview(n.Value.Key))
+                {
+                    _lru.Remove(n);
+                    _map.Remove(n.Value.Key);
+                    _previewBytes -= n.Value.Size;
+                    victims.Add(n.Value.Path);
+                }
+                n = prev;
+            }
         }
         foreach (var v in victims) TryDelete(v);
     }

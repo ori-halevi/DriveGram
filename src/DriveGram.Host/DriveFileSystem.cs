@@ -26,6 +26,10 @@ public sealed class DriveFileSystem : FileSystemBase
         public bool CanWrite { get; } = canWrite;
         /// <summary>The sorted listing of a directory being enumerated through this handle.</summary>
         public List<(string Name, FileInfo Info)>? Listing;
+        /// <summary>Opened by Explorer (or its thumbnail maker): what it reads, up to a few MB, is kept as
+        /// the file's preview (see BlockCache).</summary>
+        public bool Preview { get; init; }
+        public long PreviewBytes;
     }
 
     /// <summary>The first change through a handle opened for writing makes it a writer (holds the commit
@@ -185,28 +189,53 @@ public sealed class DriveFileSystem : FileSystemBase
         "bztransmit", "bzfilelist", "bzserv", "CrashPlanService", "IDrive", "CarboniteService",
         "AvastSvc", "AvgSvc", "avp", "ekrn", "MBAMService", "vsserv", "bdservicehost", "NortonSecurity", "mcshield",
     };
-    static readonly System.Collections.Concurrent.ConcurrentDictionary<uint, (bool Scanner, long At)> ProcessKinds = new();
+    // Explorer itself (details: a video's length, a picture's size) and the COM Surrogate it makes thumbnails
+    // in. What they read of a file is kept apart as its preview: freeing the file leaves it, so browsing the
+    // folder again downloads nothing, and the thumbnail still shows.
+    static readonly HashSet<string> Previewers = new(StringComparer.OrdinalIgnoreCase) { "explorer", "dllhost" };
+    /// <summary>At most this much of one opening is kept as preview (a thumbnail needs a few MB; a copy
+    /// made in Explorer reads the whole file, and the rest of it is cached as usual).</summary>
+    const long PreviewBudget = 8L << 20;
 
-    bool IsBackgroundScanner()
+    enum Requester { App, Scanner, Previewer }
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<uint, (Requester Kind, string Name, long At)> ProcessKinds = new();
+
+    /// <summary>Which kind of program asks (WinFsp names it only for Create/Open/Rename).</summary>
+    (Requester Kind, string Name) WhoAsks()
     {
         uint pid;
-        try { pid = (uint)GetOperationProcessId(); } catch { return false; }
+        try { pid = (uint)GetOperationProcessId(); } catch { return (Requester.App, "?"); }
         long now = Environment.TickCount64;
-        if (ProcessKinds.TryGetValue(pid, out var k) && now - k.At < 60_000) return k.Scanner;
-        bool scanner;
-        try { using var p = System.Diagnostics.Process.GetProcessById((int)pid); scanner = Scanners.Contains(p.ProcessName); }
-        catch { scanner = false; } // protected processes (Defender) may refuse: decide by the name we can see
-        if (!scanner)
-        {
-            try
-            {
-                var name = GetProcessImageName(pid);
-                scanner = name is not null && Scanners.Contains(Path.GetFileNameWithoutExtension(name));
-            }
+        if (ProcessKinds.TryGetValue(pid, out var k) && now - k.At < 60_000) return (k.Kind, k.Name);
+        string name = "?";
+        try { using var p = System.Diagnostics.Process.GetProcessById((int)pid); name = p.ProcessName; }
+        catch { } // protected processes (Defender) may refuse: then by the image name we can see
+        if (name == "?")
+            try { if (GetProcessImageName(pid) is { } image) name = Path.GetFileNameWithoutExtension(image); }
             catch { }
+        var kind = Scanners.Contains(name) ? Requester.Scanner : Previewers.Contains(name) ? Requester.Previewer : Requester.App;
+        if (ProcessKinds.Count > 4096) ProcessKinds.Clear();
+        ProcessKinds[pid] = (kind, name, now);
+        return (kind, name);
+    }
+
+    // which programs open files that are not (all) on this PC: once per program and file in 30 minutes,
+    // so the log shows who downloads, without a line for every read
+    readonly System.Collections.Concurrent.ConcurrentDictionary<(string, string), long> _noted = new();
+
+    void NoteOpen(string program, Requester kind, Node n)
+    {
+        long now = Environment.TickCount64;
+        var key = (program, n.Id);
+        if (_noted.TryGetValue(key, out var at) && now - at < 30 * 60_000) return;
+        if (_noted.Count > 20_000) _noted.Clear();
+        _noted[key] = now;
+        try
+        {
+            if (_engine.IsFullyLocal(n.Id)) return;
+            Log.Info($"opened by {program}{(kind == Requester.Previewer ? " (preview)" : kind == Requester.Scanner ? " (scanner: only what is here)" : "")}: {n.Name}");
         }
-        ProcessKinds[pid] = (scanner, now);
-        return scanner;
+        catch { }
     }
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
@@ -320,10 +349,12 @@ public sealed class DriveFileSystem : FileSystemBase
         fileNode = default!; fileDesc = default!; fileInfo = default; normalizedName = default!;
         var n = _db.Resolve(fileName);
         if (n is null) return STATUS_OBJECT_NAME_NOT_FOUND;
-        if (!n.Dir && n.Size > 0 && IsBackgroundScanner() && !_engine.IsFullyLocal(n.Id)) return StatusFileIsOffline;
+        var (who, program) = n.Dir || n.Size == 0 ? (Requester.App, "") : WhoAsks();
+        if (!n.Dir && n.Size > 0) NoteOpen(program, who, n);
+        if (who == Requester.Scanner && !_engine.IsFullyLocal(n.Id)) return StatusFileIsOffline;
         if (ReadOnly && !n.Dir && (grantedAccess & WriteAccess) != 0) return STATUS_ACCESS_DENIED;
         bool canWrite = !n.Dir && !ReadOnly && (grantedAccess & WriteAccess) != 0;
-        fileNode = new Handle(n.Id, n.Dir, false, canWrite); // a writer only once it changes something
+        fileNode = new Handle(n.Id, n.Dir, false, canWrite) { Preview = who == Requester.Previewer }; // a writer only once it changes something
         fileInfo = Info(n);
         normalizedName = FullPath(n);
         return STATUS_SUCCESS;
@@ -392,7 +423,8 @@ public sealed class DriveFileSystem : FileSystemBase
         var n = _db.Get(h.Id) ?? throw new FileNotFoundException();
         if (offset >= (ulong)n.Size) return STATUS_END_OF_FILE;
         var span = new Span<byte>((void*)buffer, (int)length);
-        bytesTransferred = (uint)_engine.Read(h.Id, (long)offset, span);
+        bool preview = h.Preview && Interlocked.Add(ref h.PreviewBytes, length) <= PreviewBudget;
+        bytesTransferred = (uint)_engine.Read(h.Id, (long)offset, span, allowRemote: true, preview);
         return STATUS_SUCCESS;
     }
 

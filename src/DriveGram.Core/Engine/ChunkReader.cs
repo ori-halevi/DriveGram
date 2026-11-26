@@ -45,10 +45,10 @@ public sealed class ChunkReader
     /// it is fetched again, a bounded number of times — so one bad read cannot poison the cache and
     /// leave a file permanently broken. (GCM would still reject the bytes; this keeps it healable.)
     /// </summary>
-    Task<byte[]> Window(ChunkLoc c, int win, CancellationToken ct)
+    Task<byte[]> Window(ChunkLoc c, int win, CancellationToken ct, bool preview = false)
     {
         int expected = ExpectedWindowLength(c, win);
-        var cached = _cache.TryGetWindow(c.Msg, win);
+        var cached = _cache.TryGetWindow(c.Msg, win, preview);
         if (cached is not null && cached.Length == expected) return Task.FromResult(cached);
         var lazy = _inflight.GetOrAdd((c.Msg, win), key => new Lazy<Task<byte[]>>(async () =>
         {
@@ -60,7 +60,7 @@ public sealed class ChunkReader
                     Interlocked.Add(ref BytesDownloaded, data.Length);
                     if (data.Length == expected)
                     {
-                        _cache.PutWindow(key.Item1, key.Item2, data);
+                        _cache.PutWindow(key.Item1, key.Item2, data, preview);
                         return data;
                     }
                     Log.Warn($"chunk {c.ChunkId[..12]} window {key.Item2}: got {data.Length:N0} of {expected:N0} bytes (attempt {attempt})");
@@ -78,9 +78,12 @@ public sealed class ChunkReader
 
     /// <summary>Read plaintext [offset, offset+dst.Length) of a chunk into dst. A cached window whose bytes
     /// fail authentication (disk corruption) is thrown away and fetched again, once.</summary>
-    public async Task ReadAsync(ChunkLoc c, long offset, Memory<byte> dst, bool sequential, CancellationToken ct)
+    /// <param name="preview">Explorer reading for a thumbnail or details: the windows are kept as preview
+    /// windows (see <see cref="BlockCache"/>), and nothing is read ahead.</param>
+    public async Task ReadAsync(ChunkLoc c, long offset, Memory<byte> dst, bool sequential, CancellationToken ct, bool preview = false)
     {
-        try { await ReadOnceAsync(c, offset, dst, sequential, ct); }
+        if (preview) sequential = false;
+        try { await ReadOnceAsync(c, offset, dst, sequential, ct, preview); }
         catch (CryptographicException)
         {
             int F = _keys.FrameSize, W = IRemote.WindowSize;
@@ -88,11 +91,11 @@ public sealed class ChunkReader
             var (lo, ll) = ChunkCipher.FrameSpan((int)((offset + dst.Length - 1) / F), c.Size, F);
             for (int w = (int)(start / W); w <= (int)((lo + ll - 1) / W); w++) _cache.RemoveWindow(c.Msg, w);
             Log.Warn($"chunk {c.ChunkId[..12]}: cached bytes failed authentication; fetching again");
-            await ReadOnceAsync(c, offset, dst, sequential, ct);
+            await ReadOnceAsync(c, offset, dst, sequential, ct, preview);
         }
     }
 
-    async Task ReadOnceAsync(ChunkLoc c, long offset, Memory<byte> dst, bool sequential, CancellationToken ct)
+    async Task ReadOnceAsync(ChunkLoc c, long offset, Memory<byte> dst, bool sequential, CancellationToken ct, bool preview)
     {
         int len = dst.Length;
         if (len == 0) return;
@@ -106,7 +109,7 @@ public sealed class ChunkReader
         int w0 = (int)(cStart / W), w1 = (int)((cEnd - 1) / W);
 
         var tasks = new Task<byte[]>[w1 - w0 + 1];
-        for (int w = w0; w <= w1; w++) tasks[w - w0] = Window(c, w, ct);
+        for (int w = w0; w <= w1; w++) tasks[w - w0] = Window(c, w, ct, preview);
         var windows = await Task.WhenAll(tasks);
 
         if (sequential) Prefetch(c, w1 + 1);
