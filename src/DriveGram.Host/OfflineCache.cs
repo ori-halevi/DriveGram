@@ -34,9 +34,17 @@ public static class OfflineCache
         finally { try { instance.Release(); } catch (SemaphoreFullException) { } }
     }
 
-    /// <summary>The ids in prepared.txt; throws when it exists but cannot be read (then nothing may be freed).</summary>
-    static HashSet<string> PreparedIds(string dir) =>
-        File.Exists(PreparedList(dir)) ? File.ReadAllLines(PreparedList(dir)).Where(l => l.Length > 0).ToHashSet() : [];
+    /// <summary>The ids in prepared.txt; throws when it exists but cannot be read (then nothing may be freed).
+    /// Read without keeping the engine of a mount that starts meanwhile from writing it.</summary>
+    static HashSet<string> PreparedIds(string dir)
+    {
+        if (!File.Exists(PreparedList(dir))) return [];
+        using var f = new FileStream(PreparedList(dir), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var r = new StreamReader(f);
+        var ids = new HashSet<string>();
+        while (r.ReadLine() is { } l) if (l.Length > 0) ids.Add(l);
+        return ids;
+    }
 
     /// <summary>The files prepared on this PC (kept until freed), with their place on the drive.</summary>
     public static List<PreparedFile> Prepared(AppState s) => Prepared(s.Dir, s.Config.MountPoint);
@@ -48,19 +56,56 @@ public static class OfflineCache
         var ids = PreparedIds(dir);
         var res = new List<PreparedFile>();
         if (ids.Count == 0 || !File.Exists(IndexOf(dir))) return res;
-        using var db = IndexDb.Open(IndexOf(dir));
-        int frame = FrameSize(db);
+        using var db = new ReadOnlyIndex(IndexOf(dir));
+        int frame = db.FrameSize();
         foreach (var id in ids)
             if (db.Get(id) is { Dir: false } n && PathOf(db, n) is { } path) // gone, or in the recycle bin: not listed
-                res.Add(new PreparedFile(id, n.Name, mountPoint + path, n.Size, Fraction(dir, db, n, frame)));
+                res.Add(new PreparedFile(id, n.Name, mountPoint + path, n.Size, Fraction(dir, db.Chunks(id), n.Size, frame)));
         return res;
     }
 
-    static int FrameSize(IndexDb db) =>
-        db.GetMeta("layout") is { } l && l.Split('/') is [_, var f] && int.TryParse(f, out var v) ? v : Keys.DefaultFrameSize;
+    /// <summary>The drive's index opened for reading only: no schema step, no write, no file created (it may
+    /// run while a mount opens the same index, or while the drive is being removed).</summary>
+    sealed class ReadOnlyIndex : IDisposable
+    {
+        readonly Microsoft.Data.Sqlite.SqliteConnection _c;
+        public ReadOnlyIndex(string path)
+        {
+            _c = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+                { DataSource = path, Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly, Pooling = false }.ToString());
+            _c.Open();
+        }
+        public void Dispose() => _c.Dispose();
+
+        Microsoft.Data.Sqlite.SqliteCommand Cmd(string sql, params (string, object)[] args)
+        {
+            var c = _c.CreateCommand();
+            c.CommandText = sql;
+            foreach (var (k, v) in args) c.Parameters.AddWithValue(k, v);
+            return c;
+        }
+
+        public Node? Get(string id)
+        {
+            using var r = Cmd("SELECT id,parent,name,dir,size,attrs,ctime,mtime,trashed FROM nodes WHERE id=@id", ("@id", id)).ExecuteReader();
+            return r.Read() ? new Node(r.GetString(0), r.IsDBNull(1) ? null : r.GetString(1), r.GetString(2), r.GetInt64(3) != 0,
+                r.GetInt64(4), (uint)r.GetInt64(5), r.GetInt64(6), r.GetInt64(7), r.GetInt64(8)) : null;
+        }
+
+        public List<(string ChunkId, int Msg, int Size)> Chunks(string node)
+        {
+            var res = new List<(string, int, int)>();
+            using var r = Cmd("SELECT c.id, c.msg, c.size FROM file_chunks f JOIN chunks c ON c.id=f.chunk WHERE f.node=@n ORDER BY f.idx", ("@n", node)).ExecuteReader();
+            while (r.Read()) res.Add((r.GetString(0), r.GetInt32(1), r.GetInt32(2)));
+            return res;
+        }
+
+        public int FrameSize() =>
+            Cmd("SELECT v FROM meta WHERE k='layout'").ExecuteScalar() is string l && l.Split('/') is [_, var f] && int.TryParse(f, out var v) ? v : Keys.DefaultFrameSize;
+    }
 
     /// <summary>Where the file is on the drive; null when it, or a folder above it, is in the recycle bin.</summary>
-    static string? PathOf(IndexDb db, Node n)
+    static string? PathOf(ReadOnlyIndex db, Node n)
     {
         var parts = new List<string>();
         for (Node? x = n; x is not null && !x.IsRoot; x = x.Parent is null ? null : db.Get(x.Parent))
@@ -73,10 +118,9 @@ public static class OfflineCache
     }
 
     /// <summary>How much of a file's stored content is in the cache (as the engine's LocalFraction).</summary>
-    static double Fraction(string dir, IndexDb db, Node n, int frame)
+    static double Fraction(string dir, List<(string ChunkId, int Msg, int Size)> chunks, long size, int frame)
     {
-        if (n.Size == 0) return 1;
-        var chunks = db.CommittedChunks(n.Id);
+        if (size == 0) return 1;
         if (chunks.Count == 0) return 0;
         long here = 0, all = 0;
         foreach (var c in chunks)

@@ -36,4 +36,9 @@ certutil -hashfile installer\redist\%WINFSP% SHA256 | findstr /i /c:"%WINFSP_SHA
 echo === compiling installer ===
 "%ISCC%" /Q /DAppVersion=%VERSION% installer\DriveGram.iss || exit /b 1
 echo.
+rem which code this installer was built from (publish-release.cmd refuses another commit, or a build with uncommitted changes)
+set BUILT=
+for /f %%s in ('git rev-parse HEAD') do set BUILT=%%s
+git status --porcelain | findstr . >nul && set BUILT=%BUILT%-dirty
+>dist\DriveGram-Setup-%VERSION%.commit echo %BUILT%
 echo Done: dist\DriveGram-Setup-%VERSION%.exe

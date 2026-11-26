@@ -39,11 +39,18 @@ sealed class Updates
     public event Action? Changed;
 
     long _nextAt = Environment.TickCount64 + 60_000; // the first look a minute after start
-    volatile bool _checking;
+    volatile bool _checking, _lastFailed;
+
+    /// <summary>The network came back, or the PC woke up: after a failed look, look again in a moment
+    /// (not half an hour later).</summary>
+    public void Nudge()
+    {
+        if (_lastFailed) Interlocked.Exchange(ref _nextAt, Environment.TickCount64 + 15_000);
+    }
 
     static HttpClient MakeClient()
     {
-        var h = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
+        var h = new HttpClient { Timeout = TimeSpan.FromSeconds(60), MaxResponseContentBufferSize = 4 << 20 }; // the API's answer (downloads stream)
         h.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("DriveGram", null));
         h.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
         return h;
@@ -93,7 +100,7 @@ sealed class Updates
     /// Returns false when GitHub could not be reached.</summary>
     public async Task<bool> CheckNowAsync()
     {
-        if (_seen.Skipped is not null) { _seen.Skipped = null; SaveSeen(); }
+        if (_seen.Skipped is not null) { _seen.Skipped = null; SaveSeen(); Changed?.Invoke(); } // offered again (bar, menu)
         while (_checking) await Task.Delay(200);
         _checking = true;
         return await Task.Run(() => CheckCoreAsync());
@@ -122,9 +129,9 @@ sealed class Updates
                     foreach (var a in assets.EnumerateArray())
                     {
                         var n = a.GetProperty("name").GetString() ?? "";
-                        var u = a.GetProperty("browser_download_url").GetString() ?? "";
-                        if (!Regex.IsMatch(n, @"^DriveGram-Setup-[0-9.]+\.exe$", RegexOptions.IgnoreCase) || !u.StartsWith(ownDownloads, StringComparison.OrdinalIgnoreCase)) continue;
-                        (url, name) = (u, n);
+                        if (!Regex.IsMatch(n, @"^DriveGram-Setup-[0-9.]+\.exe$", RegexOptions.IgnoreCase)) continue;
+                        // the address built from known parts (not taken as given): this project's own release download
+                        (url, name) = ($"{ownDownloads}{Uri.EscapeDataString(tag)}/{Uri.EscapeDataString(n)}", n);
                         // GitHub's own measurement of the uploaded file (cannot be changed by editing the notes)
                         if (a.TryGetProperty("digest", out var dg) && dg.GetString() is { } d && d.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase))
                             sha = d[7..].ToLowerInvariant();
@@ -149,6 +156,7 @@ sealed class Updates
         {
             // looked: again tomorrow; failed (offline, asleep, GitHub busy): again in half an hour
             Interlocked.Exchange(ref _nextAt, Environment.TickCount64 + (ok ? Day : 30 * 60_000L));
+            _lastFailed = !ok;
             _checking = false;
         }
     }
@@ -176,8 +184,9 @@ sealed class Updates
         foreach (var old in Directory.EnumerateFiles(dir)) try { File.Delete(old); } catch { } // earlier downloads
         var path = System.IO.Path.Combine(dir, System.IO.Path.GetFileNameWithoutExtension(name) + "-" + Guid.NewGuid().ToString("N")[..8] + ".exe");
 
+        // a download that stopped moving does not wait forever (2 minutes without a byte); a slow one may go on
         using var stall = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        stall.CancelAfter(TimeSpan.FromMinutes(20)); // a download that stopped moving does not wait forever
+        stall.CancelAfter(TimeSpan.FromMinutes(2));
         using (var res = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, stall.Token))
         {
             res.EnsureSuccessStatusCode();
@@ -191,6 +200,7 @@ sealed class Updates
             while ((n = await src.ReadAsync(buf, stall.Token)) > 0)
             {
                 await dst.WriteAsync(buf.AsMemory(0, n), stall.Token);
+                stall.CancelAfter(TimeSpan.FromMinutes(2));
                 done += n;
                 if (done > MaxSetup) throw new InvalidDataException("the download is far too big for an installer");
                 progress.Report(total > 0 ? (double)done / total : null);

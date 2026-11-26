@@ -43,8 +43,14 @@ WinFsp 2.1 + C# (.NET 10): `src/DriveGram.Core` (engine, index, Telegram), `src/
 ## Updates and releases
 - Installed copies ask GitHub (`ori-halevi/DriveGram`, releases/latest) once a day whether a newer version
   is out (`src/DriveGram.Tray/Updates.cs`): a menu line, a bar in the main window, one notice per version,
-  "skip this version". "Download and install" fetches the release's `DriveGram-Setup-*.exe` and checks it
-  against the SHA-256 written in the release notes.
+  "don't offer this version", and "Check for a new version" in the icon's menu. "Download and install"
+  fetches the release's `DriveGram-Setup-*.exe` from this repo's release downloads only, and only when its
+  SHA-256 is known: GitHub's own asset `digest` first, else the `SHA256 (<file>): <hex>` line that
+  publish-release.cmd appends to the notes. Without either, only the download page is offered.
+- The version that ships is `VERSION` in build-installer.cmd (passed to dotnet and Inno); keep the csproj and
+  .iss defaults in step. build-installer.cmd records the commit it built (`dist\*.commit`), and
+  publish-release.cmd refuses a mismatch, uncommitted/untracked files, or a commit not yet on GitHub.
+- Suggested to the owner (not code): turn on "Immutable releases" in the repo settings.
 - **Deferred on purpose (2026-11-26): signing releases.** Today the installer is trusted because it comes
   from this repo's release downloads over TLS and matches GitHub's own SHA-256 of it. Whoever controls the
   GitHub account (a stolen login or token) could therefore publish an installer that every copy offers.

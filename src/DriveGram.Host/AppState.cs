@@ -159,12 +159,25 @@ public sealed class AppState
     }
 
     /// <summary>Forget the local index/cache (after the drive's channels vanished): the next mount starts empty.</summary>
+    /// The index goes first, and if it cannot go (something has it open for a moment), nothing else does:
+    /// staging deleted under a kept index would leave records of changes whose pieces are gone.
     public void ResetLocalData()
     {
-        foreach (var f in new[] { "index.db", "index.db-wal", "index.db-shm" })
-            try { File.Delete(Path.Combine(Dir, f)); } catch (IOException) { }
+        var index = new[] { "index.db", "index.db-wal", "index.db-shm" }.Select(f => Path.Combine(Dir, f)).ToList();
+        for (int attempt = 0; ; attempt++)
+        {
+            foreach (var f in index)
+                try { File.Delete(f); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            if (!index.Any(File.Exists)) break;
+            if (attempt >= 20)
+                throw new IOException(L.T("לא הצלחתי למחוק את הנתונים המקומיים הקודמים של הכונן (קובץ שלהם פתוח כרגע). לא נמחק כלום. נסה שוב בעוד רגע.",
+                    "Could not delete the drive's previous local data (one of its files is open right now). Nothing was deleted. Try again in a moment."));
+            Thread.Sleep(150);
+        }
         foreach (var d in new[] { "staging", "cache" })
             try { Directory.Delete(Path.Combine(Dir, d), true); } catch (IOException) { }
+        foreach (var f in new[] { "prepared.txt", "paused.txt" })
+            try { File.Delete(Path.Combine(Dir, f)); } catch (IOException) { }
         ForgetMaster();
     }
 

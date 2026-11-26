@@ -116,6 +116,8 @@ sealed class TrayApp : ApplicationContext, IMainHost
         _timer.Tick += (_, _) => UpdateIcon();
         _timer.Start();
         SystemEvents.SessionEnding += (_, _) => OnSessionEnding();
+        SystemEvents.PowerModeChanged += (_, e) => { if (e.Mode == PowerModes.Resume) _updates.Nudge(); };
+        System.Net.NetworkInformation.NetworkChange.NetworkAvailabilityChanged += (_, e) => { if (e.IsAvailable) _updates.Nudge(); };
         SystemEvents.SessionEnded += (_, _) => OnSessionEnded();
         System.Net.NetworkInformation.NetworkChange.NetworkAvailabilityChanged += (_, e) =>
         {
@@ -1138,9 +1140,11 @@ sealed class TrayApp : ApplicationContext, IMainHost
     {
         if (d.Starting || d.Stopping || d.FreeingOffline) return;
         long size;
+        d.FreeingOffline = true; // (also while measuring: it holds the drive's lock)
         try { size = await Task.Run(() => OfflineCache.TemporaryBytes(d.State)); }
         catch (OfflineCache.DriveInUseException) { Ui.Info(OpenElsewhere); return; }
         catch (Exception ex) { Log.Warn($"free up space (offline): {ex.Message}"); Ui.Error(L.T("לא הצלחתי לבדוק כמה מקום אפשר לפנות. לא נמחק כלום.", "Could not check how much space can be freed. Nothing was deleted.")); return; }
+        finally { d.FreeingOffline = false; }
         if (size < 1 << 20) { Ui.Info(L.T("אין כרגע עותקים זמניים שאפשר לפנות.", "There are no temporary copies to free right now.")); return; }
         if (Ui.Ask(L.T(
                 $"יימחקו מהמחשב הזה עותקים זמניים של קבצים מ־{d.Name}, בגודל {Ui.Size(size)}.\n\n" +
@@ -1232,7 +1236,8 @@ sealed class TrayApp : ApplicationContext, IMainHost
     async Task ChangeLetterAndNameCoreAsync(DriveController d)
     {
         string letter, label;
-        using (var form = new LetterNameForm(d.State, d.Session is not null, d.Session?.MountPoint, _preparer.Running.Any(j => j.Session == d.Session)))
+        using (var form = new LetterNameForm(d.State, d.Session is not null, d.Session?.MountPoint, _preparer.Running.Any(j => j.Session == d.Session),
+                   reconnectsNow: d.Session is null && (d.LastMountRefused || d.RetryTimer is not null)))
         {
             d.LetterName = form;
             var ok = form.ShowDialog();
@@ -1249,7 +1254,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
         while (d.Starting || d.Stopping) await Task.Delay(200); // an automatic reconnect: decide after it
         if (!_drives.Contains(d)) return;
         bool wasMounted = d.Session is not null;
-        if (!wasMounted && DriveOpenElsewhere(d))
+        if (!wasMounted && await DriveOpenElsewhereAsync(d))
         {
             Ui.Info(L.T("הכונן פתוח כרגע בחלון אחר של DriveGram. סגור אותו ונסה שוב.", "The drive is open in another DriveGram window right now. Close it and try again."));
             return;
@@ -1284,15 +1289,18 @@ sealed class TrayApp : ApplicationContext, IMainHost
     }
 
     /// <summary>The drive is mounted by another DriveGram window (the command line): its files are in use.</summary>
-    static bool DriveOpenElsewhere(DriveController d)
+    static async Task<bool> DriveOpenElsewhereAsync(DriveController d)
     {
         try
         {
             if (d.FreeingOffline) return false; // our own short hold, not another window
             using var instance = new Semaphore(1, 1, DriveSession.InstanceName(d.State.Dir));
-            if (!instance.WaitOne(2000)) return true;
-            instance.Release();
-            return false;
+            for (int i = 0; i < 10; i++) // a short hold (a list being read) passes: 2 s, without freezing the tray
+            {
+                if (instance.WaitOne(0)) { instance.Release(); return false; }
+                await Task.Delay(200);
+            }
+            return true;
         }
         catch { return true; } // cannot tell (e.g. a command line run as administrator): do not change it under it
     }
@@ -1681,17 +1689,17 @@ sealed class TrayApp : ApplicationContext, IMainHost
             ToolTipIcon.Info, () => ShowTransfers(local: true));
     }
 
-    public async Task FreeFiles(IEnumerable<(DriveSession Session, string Id)> files)
+    public async Task<long> FreeFiles(IEnumerable<(DriveSession Session, string Id)> files, bool confirmed = false)
     {
         var list = files.ToList();
-        if (list.Count == 0) return;
+        if (list.Count == 0) return 0;
         int prepared = list.Count(f => f.Session.Engine.IsPrepared(f.Id));
-        if (prepared > 0 && Ui.Ask(L.N(prepared,
+        if (!confirmed && prepared > 0 && Ui.Ask(L.N(prepared,
                 "לפנות מהמחשב הזה קובץ שהכנת? הוא שמור בטלגרם, אבל ייפתח שוב רק עם אינטרנט, ויורד מחדש.",
                 "לפנות מהמחשב הזה {0} קבצים שהכנת? הם שמורים בטלגרם, אבל ייפתחו שוב רק עם אינטרנט, ויורדו מחדש.",
                 "Free a file you prepared from this PC? It is stored in Telegram, but opens again only online, downloaded again.",
                 "Free {0} files you prepared from this PC? They are stored in Telegram, but open again only online, downloaded again.")) != DialogResult.Yes)
-            return;
+            return 0;
         foreach (var (s, id) in list) _preparer.Cancel(s, id);
         // a big prepared file is thousands of small cache files: deleted off the UI thread
         long freed = await Task.Run(() =>
@@ -1703,6 +1711,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
             return n;
         });
         foreach (var (s, id) in list) try { ShellChanged(s.FullPathOf(id)); } catch { }
+        if (confirmed) return freed;
         if (freed == 0)
             Ui.Info(L.N(list.Count,
                 "לא היה מה לפנות: הקובץ עוד מחכה להעלאה לטלגרם, או שאין ממנו עותק במחשב הזה.",
@@ -1712,7 +1721,11 @@ sealed class TrayApp : ApplicationContext, IMainHost
         else
             Balloon(L.T("התפנה מקום ✓", "Space freed ✓"), L.N(list.Count, $"פונו {Ui.Size(freed)} במחשב הזה. הקובץ עצמו שמור בטלגרם.", $"פונו {Ui.Size(freed)} במחשב הזה. הקבצים עצמם שמורים בטלגרם.",
                 $"{Ui.Size(freed)} freed on this PC. The file itself is stored in Telegram.", $"{Ui.Size(freed)} freed on this PC. The files themselves are stored in Telegram."));
+        return freed;
     }
+
+    /// <summary>A short notice from a window (e.g. the space freed).</summary>
+    public void Notify(string title, string text) => Balloon(title, text);
 
     void OnPrepared(Preparer.Job job, bool ok, string? error)
     {
@@ -1978,19 +1991,29 @@ sealed class TrayApp : ApplicationContext, IMainHost
     string UpdateText(UpdateInfo u) => L.T($"גרסה חדשה זמינה ({L.Ltr(u.Version.ToString())})…", $"A new version is available ({u.Version})…");
     static string UpdateBar(UpdateInfo u) => L.T($"יש גרסה חדשה של DriveGram: {L.Ltr(u.Version.ToString())} – לחץ כאן לפרטים", $"A new version of DriveGram: {u.Version} – click here for details");
 
+    bool _checkingByHand;
+
     async Task CheckForUpdateNowAsync()
     {
-        bool ok = await _updates.CheckNowAsync();
-        if (_updates.Offered is not null) { ShowUpdate(); return; }
-        Ui.Info(ok ? L.T($"יש לך את הגרסה האחרונה של DriveGram ({L.Ltr(Updates.Current.ToString())}).", $"You have the latest version of DriveGram ({Updates.Current}).")
-                   : L.T("לא הצלחתי לבדוק עכשיו (אין חיבור ל־GitHub). DriveGram ינסה שוב לבד.", "Could not check right now (no connection to GitHub). DriveGram tries again by itself."));
+        if (_checkingByHand) return;
+        _checkingByHand = true; // the window opens by itself: no notice besides it
+        try
+        {
+            bool ok = await _updates.CheckNowAsync();
+            if (_updates.Offered is not null) { ShowUpdate(); return; }
+            Ui.Info(ok ? L.T($"יש לך את הגרסה האחרונה של DriveGram ({L.Ltr(Updates.Current.ToString())}).", $"You have the latest version of DriveGram ({Updates.Current}).")
+                       : L.T("לא הצלחתי לבדוק עכשיו – אין חיבור לאינטרנט, או שהאתר לא ענה. DriveGram ינסה שוב לבד.", "Could not check right now – no internet connection, or the site did not answer. DriveGram tries again by itself."));
+        }
+        finally { _checkingByHand = false; }
     }
 
     void OnUpdatesChanged()
     {
         var u = _updates.Offered;
         if (_main is { IsDisposed: false } m) m.ShowUpdate(u is null ? null : UpdateBar(u), ShowUpdate);
-        if (u is not null && _updates.FirstTimeFor(u))
+        // a window still showing an older release (a newer one came out): closed, it shows the new one when opened
+        if (_updateForm is { IsDisposed: false, Downloading: false } open && open.Version != u?.Version) open.Close();
+        if (u is not null && _updates.FirstTimeFor(u) && !_checkingByHand)
             Balloon(L.T("יש גרסה חדשה של DriveGram", "A new version of DriveGram"),
                 L.T($"גרסה {L.Ltr(u.Version.ToString())} זמינה. לחץ כאן כדי לראות מה חדש, או מאוחר יותר מהתפריט של האייקון.",
                     $"Version {u.Version} is available. Click here to see what's new, or later from the icon's menu."),
@@ -2001,7 +2024,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
     {
         if (_updates.Offered is not { } u) return;
         if (_updateForm is { IsDisposed: false }) { _updateForm.Activate(); return; }
-        _updateForm = new UpdateForm(u);
+        _updateForm = new UpdateForm(u, () => _drives.Sum(d => d.Session is { } s && !d.Stopping ? s.Status.PendingFiles : 0));
         _updateForm.FormClosed += (_, _) => { if (_updateForm?.Skipped == true) _updates.Skip(u); _updateForm = null; };
         _updateForm.Show();
     }
@@ -2078,14 +2101,14 @@ sealed class TrayApp : ApplicationContext, IMainHost
         list.Add(new ToolStripSeparator());
         if (d.Session is null)
             list.Add(Item(L.T("חבר", "Connect"), async () => { if (d.NeedsSetup) await SetupAsync(d); else await MountAsync(d); },
-                !d.Starting && !d.FreeingOffline));
-        else list.Add(Item(L.T("נתק", "Disconnect"), async () => await StopAsync(d), !d.Stopping));
+                !d.Starting && !d.FreeingOffline && !d.ChangingLetter));
+        else list.Add(Item(L.T("נתק", "Disconnect"), async () => await StopAsync(d), !d.Stopping && !d.ChangingLetter));
         if (d.Session is { Sync.ControlTrusted: false } tampered)
             list.Add(Item(L.T("אשר את רשומת הכונן…", "Confirm the drive's record…"), async () => await ConfirmRecordAsync(d, tampered), !d.Stopping, bold: true));
         if (d.Session is { Writable: false, Sync: { LeaseHolder: { } holder, NeedsUpdate: false } })
             list.Add(Item(L.T($"בקש את הכונן מ־{L.Ltr(holder)}…", $"Ask {holder} for the drive…"), () => AskForDrive(d), !d.Stopping, bold: true));
         // "Settings and sign-in" was one wizard for three different things: split by what is wanted
-        bool idle = !d.Starting && !d.Stopping && !d.FreeingOffline;
+        bool idle = !d.Starting && !d.Stopping && !d.FreeingOffline && !d.ChangingLetter;
         if (d.NeedsSetup)
             list.Add(Item(L.T("התחברות לטלגרם…", "Telegram sign-in…"), async () => await SetupAsync(d), idle, bold: true));
         list.Add(Item(L.T("סיסמה ומפתח שחזור…", "Password and recovery key…"), () => ShowSecurity(d), on));

@@ -12,15 +12,21 @@ sealed class UpdateForm : Form
     public bool Skipped { get; private set; }
 
     readonly UpdateInfo _u;
+    readonly Func<int>? _pendingFiles;
+
+    public Version Version => _u.Version;
+    public bool Downloading => _download is { IsCancellationRequested: false };
     readonly Button _install, _skip, _later;
     readonly Label _status = Theme.Label("", Theme.Small, Theme.Muted, 600);
     CancellationTokenSource? _download;
 
     bool CanInstall => _u.SetupUrl is not null && _u.Sha256 is not null;
 
-    public UpdateForm(UpdateInfo u)
+    /// <param name="pendingFiles">Files of the connected drives still waiting to upload (asked before installing).</param>
+    public UpdateForm(UpdateInfo u, Func<int>? pendingFiles = null)
     {
         _u = u;
+        _pendingFiles = pendingFiles;
         Ui.Prepare(this);
         Text = L.T("DriveGram – גרסה חדשה", "DriveGram – a new version");
         StartPosition = FormStartPosition.CenterScreen;
@@ -49,9 +55,10 @@ sealed class UpdateForm : Form
         foot.AutoSize = true;
         foot.Padding = new Padding(20, 4, 20, 16);
         _status.Text = CanInstall
-            ? L.T("\"הורד והתקן\" מוריד את קובץ ההתקנה, בודק שהוא בדיוק הקובץ שפורסם, ופותח אותו. לפני ההתקנה DriveGram מסיים להעלות את מה שעוד לא עלה ומתנתק לרגע.",
-                "\"Download and install\" downloads the installer, checks it is exactly the file published, and opens it. Before installing, DriveGram finishes uploading what is not up yet and disconnects for a moment.")
-            : L.T("לגרסה הזו אין הורדה ישירה מכאן. אפשר להוריד אותה מדף ההורדה.", "This version has no direct download from here. It can be downloaded from the download page.");
+            ? L.T("\"הורד והתקן\" מוריד את קובץ ההתקנה, בודק שהוא בדיוק הקובץ שפורסם, ופותח אותו. בזמן ההתקנה הכוננים מתנתקים לרגע ומתחברים שוב.",
+                "\"Download and install\" downloads the installer, checks it is exactly the file published, and opens it. During the install the drives disconnect for a moment and connect again.")
+            : L.T("את הגרסה הזו אי אפשר להתקין ישירות מכאן, כי לא נמצא לה קובץ התקנה שאפשר לוודא שהוא המקורי. בדף ההורדה, הורד את הקובץ שמסתיים ב־‎.exe‎ והפעל אותו.",
+                "This version cannot be installed from here, because no installer for it can be checked as the original. On the download page, download the file ending in .exe and run it.");
         foot.Controls.Add(_status);
         var buttons = Theme.Row();
         buttons.Margin = new Padding(0, 8, 0, 0);
@@ -92,7 +99,10 @@ sealed class UpdateForm : Form
         {
             var l = raw;
             if (Regex.IsMatch(l, @"\b[0-9a-fA-F]{64}\b")) continue;
+            l = Regex.Replace(l, "[\u202A-\u202E\u2066-\u2069]", "");             // direction overrides: shown as written
+            bool heading = Regex.IsMatch(l, @"^\s{0,3}#{1,6}\s+");
             l = Regex.Replace(l, @"^\s{0,3}#{1,6}\s+", "");                       // headings
+            if (heading && Regex.IsMatch(l.Trim(), @"^(מה חדש|What's new)[:?]?$", RegexOptions.IgnoreCase)) continue; // the subtitle says it
             l = Regex.Replace(l, @"\[([^\]]+)\]\(([^)]+)\)", "$1 ($2)");          // links
             l = l.Replace("**", "").Replace("__", "").Replace("`", "");
             l = Regex.Replace(l, @"^(\s*)[-*+]\s+", m => new string(' ', m.Groups[1].Length) + "•  "); // bullets, nested too
@@ -116,9 +126,22 @@ sealed class UpdateForm : Form
         _download = new CancellationTokenSource();
         try
         {
-            var progress = new Progress<double?>(f => { if (!IsDisposed) _status.Text = f is { } x ? L.T($"מוריד את ההתקנה… {x * 100:0}%", $"Downloading the installer… {x * 100:0}%") : L.T("מוריד את ההתקנה…", "Downloading the installer…"); });
+            var progress = new Progress<double?>(f => { if (!IsDisposed) _status.Text = f is { } x ? L.T($"מוריד את קובץ ההתקנה… {x * 100:0}%", $"Downloading the installer… {x * 100:0}%") : L.T("מוריד את קובץ ההתקנה…", "Downloading the installer…"); });
             using var file = await Updates.DownloadAsync(_u, progress, _download.Token);
             if (IsDisposed || _download.IsCancellationRequested) return; // closed meanwhile: nothing is opened
+            // the installer waits for uploads before it replaces DriveGram, and gives up after 10 minutes
+            if (_pendingFiles?.Invoke() is > 0 and var waiting
+                && Ui.Ask(L.N(waiting,
+                    "קובץ אחד עוד מחכה להעלאה לטלגרם. ההתקנה תחכה שיעלה, ואם זה ייקח יותר מ־10 דקות היא תיעצר ותבקש לנסות שוב. כדאי להתקין אחרי שהוא יעלה. להתקין עכשיו בכל זאת?",
+                    "{0} קבצים עוד מחכים להעלאה לטלגרם. ההתקנה תחכה שיעלו, ואם זה ייקח יותר מ־10 דקות היא תיעצר ותבקש לנסות שוב. כדאי להתקין אחרי שהם יעלו. להתקין עכשיו בכל זאת?",
+                    "One file is still waiting to upload to Telegram. The installer waits for it, and if that takes over 10 minutes it stops and asks to try again. Better install after it is up. Install now anyway?",
+                    "{0} files are still waiting to upload to Telegram. The installer waits for them, and if that takes over 10 minutes it stops and asks to try again. Better install after they are up. Install now anyway?"),
+                    def: MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+            {
+                _status.Text = L.T("ההתקנה לא נפתחה. אפשר לחזור לכאן מהתפריט של האייקון אחרי שההעלאות יסתיימו.", "The installer was not opened. Come back here from the icon's menu once the uploads are done.");
+                Reset();
+                return;
+            }
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(file.Path) { UseShellExecute = true });
             Close();
         }

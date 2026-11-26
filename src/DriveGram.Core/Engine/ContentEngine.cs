@@ -394,7 +394,13 @@ public sealed class ContentEngine : IAsyncDisposable
     {
         List<string> ids;
         lock (_keptGate) ids = _keptIds.Where(i => !_preparing.Contains(i)).ToList();
-        try { File.WriteAllLines(KeptFile, ids); }
+        try
+        {
+            // a new file put in place at once: a reader (the tray, for a list) never blocks the write
+            var tmp = KeptFile + ".tmp";
+            File.WriteAllLines(tmp, ids);
+            File.Move(tmp, KeptFile, overwrite: true);
+        }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Log.Warn($"prepared files: {ex.Message}"); }
     }
 

@@ -18,7 +18,8 @@ sealed class LetterNameForm : Form
 
     /// <param name="mountedOn">The letter it is on right now (another one than usual when its own was busy).</param>
     /// <param name="preparing">Files of this drive are being prepared (they start again after the reconnect).</param>
-    public LetterNameForm(AppState state, bool connected, string? mountedOn = null, bool preparing = false)
+    /// <param name="reconnectsNow">Not connected, but it connects right after the change (its letter was refused).</param>
+    public LetterNameForm(AppState state, bool connected, string? mountedOn = null, bool preparing = false, bool reconnectsNow = false)
     {
         Ui.Prepare(this);
         Text = L.T($"DriveGram – אות ושם הכונן ({state.Config.VolumeLabel})", $"DriveGram – drive letter and name ({state.Config.VolumeLabel})");
@@ -58,6 +59,7 @@ sealed class LetterNameForm : Form
                 ? L.T("אם תשנה משהו, הכונן יתנתק ויתחבר מחדש לכמה שניות כשתלחץ \"שמור\". קבצים שעוד עולים ימשיכו לעלות אחר כך.",
                     "If you change something, the drive disconnects and reconnects for a few seconds when you press \"Save\". Files still uploading go on afterwards.")
                   + (preparing ? L.T(" גם הכנת הקבצים שרצה עכשיו תמשיך אחרי החיבור מחדש.", " Files being prepared now go on after the reconnect too.") : "")
+                : reconnectsNow ? L.T("אחרי השמירה הכונן ינסה להתחבר מיד, באות ובשם החדשים.", "After saving, the drive tries to connect right away, with the new letter and name.")
                 : L.T("השינוי ייכנס לתוקף בפעם הבאה שהכונן יתחבר.", "The change takes effect the next time the drive connects."),
             Theme.Small, Theme.Muted, 380);
         note.Margin = new Padding(0, 8, 0, 8);
