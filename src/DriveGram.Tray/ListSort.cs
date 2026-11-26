@@ -33,12 +33,24 @@ sealed class ListSort : System.Collections.IComparer
         return s;
     }
 
+    /// <summary>The user sorted the list (to remember it).</summary>
+    public event Action? Changed;
+
     void Click(int column)
     {
         if (column != Column) (Column, Descending) = (column, false);
         else if (!Descending) Descending = true;
         else if (_natural is not null) (Column, Descending) = (-1, false);
         else Descending = false;
+        Apply();
+        Changed?.Invoke();
+    }
+
+    /// <summary>The order remembered from last time.</summary>
+    public void Set(int column, bool descending)
+    {
+        if (column >= _list.Columns.Count) return;
+        (Column, Descending) = (column, descending && column >= 0);
         Apply();
     }
 

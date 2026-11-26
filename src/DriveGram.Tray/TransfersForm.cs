@@ -79,6 +79,8 @@ sealed class TransfersForm : Form
     readonly Dictionary<string, long> _upRank = [], _localRank = [];
     // the help (notes and the legend of Explorer's marks) under each list: open or closed, the same in both tabs
     static bool _helpOpen;
+    readonly UiPrefs _prefs = UiPrefs.Load();
+    bool _settingFilter;
     readonly List<(LinkLabel Link, Control[] Content)> _helps = [];
 
     readonly ImageList _icons = new() { ImageSize = new Size(18, 18), ColorDepth = ColorDepth.Depth32Bit };
@@ -357,7 +359,11 @@ sealed class TransfersForm : Form
         _localFilter.Alignment = ToolStripItemAlignment.Right;
         _localFilter.Overflow = ToolStripItemOverflow.Never;
         _localFilter.ToolTipText = L.T("אילו קבצים להציג", "Which files to show");
-        _localFilter.SelectedIndexChanged += (_, _) => FillLocal();
+        _localFilter.SelectedIndexChanged += (_, _) =>
+        {
+            if (!_settingFilter) { _prefs.LocalFilter = _localFilter.SelectedIndex; _prefs.Save(); }
+            FillLocal();
+        };
         _localSearch.TextChanged += (_, _) => FillLocal();
         localBar.Items.Add(_localSearch);
         localBar.Items.Add(_localFilter);
@@ -386,6 +392,15 @@ sealed class TransfersForm : Form
         _localEmpty.Padding = new Padding(10, 14, 10, 0);
         _localEmpty.Visible = false;
         localTab.Controls.AddRange([_local, _localEmpty, _localState, Help(localNote, Legend(uploading: false)), localBar]);
+
+        // as the user left them last time
+        _upSort.Set(_prefs.UpSortColumn, _prefs.UpSortDescending);
+        _localSort.Set(_prefs.LocalSortColumn, _prefs.LocalSortDescending);
+        _upSort.Changed += () => { (_prefs.UpSortColumn, _prefs.UpSortDescending) = (_upSort.Column, _upSort.Descending); _prefs.Save(); };
+        _localSort.Changed += () => { (_prefs.LocalSortColumn, _prefs.LocalSortDescending) = (_localSort.Column, _localSort.Descending); _prefs.Save(); };
+        _settingFilter = true;
+        if (_prefs.LocalFilter is >= 0 and <= 2) _localFilter.SelectedIndex = _prefs.LocalFilter;
+        _settingFilter = false;
 
         _tabs.ImageList = _icons;
         _tabs.TabPages.AddRange([upTab, localTab]);
@@ -421,7 +436,9 @@ sealed class TransfersForm : Form
     public void ShowPrepared()
     {
         _localSearch.Text = "";
+        _settingFilter = true; // shown this way now; the user's own choice stays for next time
         _localFilter.SelectedIndex = 1;
+        _settingFilter = false;
         ShowLocalTab();
     }
 
@@ -540,7 +557,7 @@ sealed class TransfersForm : Form
         var waits = drives.Select(d => d.Session!.WaitingUntil).Where(w => w is not null).Max();
         if (waits is { } until && until > DateTime.Now)
             parts.Add(L.T($"טלגרם ביקש להמתין עד {until:HH:mm:ss}", $"Telegram asked to wait until {until:HH:mm:ss}"));
-        _summary.Text = string.Join("   ·   ", parts);
+        _summary.Text = string.Join("\u00A0\u00A0·   ", parts.Select(p => p.Replace(' ', '\u00A0')));
         _capBar.Visible = _host.Daily.CapReached;
         _capText.Text = L.T($"הגעת לתקרה היומית ({_host.Daily.CapGb:0.#} GB): ההעלאות מושהות עד חצות. הקבצים מחכים בבטחה במחשב הזה.",
             $"The daily cap ({_host.Daily.CapGb:0.#} GB) was reached: uploads are paused until midnight. The files wait safely on this PC.");
@@ -564,6 +581,8 @@ sealed class TransfersForm : Form
         var waitUntil = drives.Select(d => d.Session!.WaitingUntil).Where(w => w is not null).Max();
         int all = rows.Count;
         var search = _upSearch.Text;
+        // the drive's speed shared by the files uploading at once: each one's time left, roughly
+        var sending = rows.Where(x => x.U.State == UploadState.Uploading).GroupBy(x => x.D).ToDictionary(g => g.Key, g => g.Count());
         _up.BeginUpdate();
         var byKey = _up.Items.Cast<ListViewItem>().ToDictionary(i => i.Name);
         var keep = new HashSet<string>();
@@ -589,6 +608,8 @@ sealed class TransfersForm : Form
             {
                 UploadState.Paused => ("paused", d.Session!.Engine.PausedAll && _host.Daily.CapReached ? L.T("מושהה (תקרה יומית)", "Paused (daily cap)") : L.T("מושהה", "Paused")),
                 UploadState.Uploading when waitUntil is { } w && w > DateTime.Now => ("up", L.T("טלגרם ביקש להמתין", "Telegram asked to wait")),
+                UploadState.Uploading when d.Uploading && d.Speed / Math.Max(1, sending.GetValueOrDefault(d)) is var each && each > 16 * 1024 && u.Total > u.Done
+                    => ("up", L.T("עולה", "Uploading") + "  ·  " + TimeLeft((u.Total - u.Done) / each)),
                 UploadState.Uploading => ("up", L.T("עולה", "Uploading")),
                 UploadState.Writing => ("writing", L.T("עדיין מועתק לכונן", "Still being copied in")),
                 _ => ("wait", L.T("ממתין בתור", "Waiting in line")),
@@ -673,6 +694,13 @@ sealed class TransfersForm : Form
         MenuItem(m, Glyphs.Folder, L.T("הצג בתיקייה", "Show in folder"), () => ShowInFolder(sel.Select(r => r.Path)));
         m.Items.Add(new ToolStripSeparator());
         MenuItem(m, Glyphs.Download, Many(L.T("הכן: שמור את כולו במחשב הזה", "Prepare: keep all of it on this PC"), sel.Count), PrepareSelected, sel.Any(r => r.Fraction < 0.999 || !r.Prepared));
+        var running = sel.Where(r => r.Session is not null && _host.Preparer.ProgressOf(r.Session, r.Id) is not null).ToList();
+        if (running.Count > 0)
+            MenuItem(m, Glyphs.Cancel, Many(L.T("עצור את ההכנה", "Stop preparing"), running.Count), () =>
+            {
+                foreach (var r in running) _host.Preparer.Cancel(r.Session!, r.Id);
+                _ = ScanAsync();
+            });
         MenuItem(m, Glyphs.Delete, Many(L.T("פנה מהמחשב הזה", "Free from this PC"), sel.Count), FreeSelected, keys: "Del");
         m.Items.Add(new ToolStripSeparator());
         MenuItem(m, Glyphs.Copy, L.T("העתק נתיב", "Copy path"), () => CopyPaths(sel.Select(r => r.Path)), keys: "Ctrl+C");
