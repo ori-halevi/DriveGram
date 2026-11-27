@@ -1827,10 +1827,10 @@ sealed class TrayApp : ApplicationContext, IMainHost
         foreach (var (s, id) in list) _preparer.Start(s, id);
         Balloon(L.T("מכין במחשב הזה", "Preparing on this PC"),
             L.N(list.Count,
-                "מוריד את הקובץ כולו. תקבל הודעה כשהוא מוכן, ואפשר לעקוב בלשונית \"העברות\" בחלון של DriveGram.",
-                "מוריד {0} קבצים במלואם. תקבל הודעה כשכל אחד מוכן, ואפשר לעקוב בלשונית \"העברות\" בחלון של DriveGram.",
-                "Downloading the whole file. You will be told when it is ready; follow it on the \"Transfers\" tab of the DriveGram window.",
-                "Downloading {0} whole files. You will be told when each is ready; follow them on the \"Transfers\" tab of the DriveGram window."),
+                "מוריד את הקובץ כולו. תקבל הודעה כשהוא מוכן, ואפשר לעקוב בלשונית \"פעילות\" בחלון של DriveGram.",
+                "מוריד {0} קבצים במלואם. תקבל הודעה כשכל אחד מוכן, ואפשר לעקוב בלשונית \"פעילות\" בחלון של DriveGram.",
+                "Downloading the whole file. You will be told when it is ready; follow it on the \"Activity\" tab of the DriveGram window.",
+                "Downloading {0} whole files. You will be told when each is ready; follow them on the \"Activity\" tab of the DriveGram window."),
             ToolTipIcon.Info, () => ShowTransfers(local: true));
     }
 
@@ -1877,8 +1877,8 @@ sealed class TrayApp : ApplicationContext, IMainHost
         try { ShellChanged(job.Session.FullPathOf(job.Id)); } catch { }
         if (ok)
             Balloon(L.T("הקובץ מוכן במחשב הזה ✓", "The file is ready on this PC ✓"),
-                L.T($"\"{L.Name(job.Name)}\" ייפתח מיד, גם בלי אינטרנט, ונשמר עד שתפנה אותו (בלשונית \"העברות\" בחלון של DriveGram, או בלחיצה ימנית עליו).",
-                    $"\"{job.Name}\" opens at once, even offline, and stays until you free it (on the \"Transfers\" tab of the DriveGram window, or by right-clicking it)."),
+                L.T($"\"{L.Name(job.Name)}\" ייפתח מיד, גם בלי אינטרנט, ונשמר עד שתפנה אותו (בלשונית \"פעילות\" בחלון של DriveGram, או בלחיצה ימנית עליו).",
+                    $"\"{job.Name}\" opens at once, even offline, and stays until you free it (on the \"Activity\" tab of the DriveGram window, or by right-clicking it)."),
                 ToolTipIcon.Info, () => ShowTransfers(local: true));
         else if (!string.IsNullOrEmpty(error))
             Balloon(L.T("ההכנה לא הושלמה", "Preparing did not finish"), $"\"{L.Name(job.Name)}\": {error}", ToolTipIcon.Warning, () => ShowTransfers(local: true));
@@ -2207,7 +2207,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
             _menu.Items.Add(item);
         }
         _menu.Items.Add(new ToolStripSeparator());
-        var transfers = Item(L.T("העברות וקבצים במחשב…", "Transfers and files on this PC…"), () => ShowTransfers());
+        var transfers = Item(L.T("פעילות וקבצים במחשב…", "Activity and files on this PC…"), () => ShowTransfers());
         transfers.Image = Glyphs.Make(Glyphs.Upload, Setup.Theme.AccentDark, 16);
         _menu.Items.Add(transfers);
         _menu.Items.Add(Item(L.T("קבצים שהכנתי…", "Files I prepared…"), ShowPrepared));

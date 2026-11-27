@@ -101,8 +101,8 @@ sealed class SettingsPage : UserControl
         col.Controls.Add(_capOn);
         col.Controls.Add(WithGb(_cap));
         col.Controls.Add(Note(L.T(
-            "הספירה מתגלגלת: מה שעלה לפני 24 שעות יוצא ממנה מעצמו, וההעלאות ממשיכות לבד. בינתיים הקבצים מחכים בבטחה במחשב הזה, ואפשר גם להמשיך בכל זאת מלשונית \"העברות\". העתקה גדולה לכונן בזמן העצירה עלולה להיעצר כשנגמר המקום במחשב.",
-            "The count rolls: what went up 24 hours ago leaves it by itself, and the uploads go on. Meanwhile the files wait safely on this PC, and you can also go on anyway from the \"Transfers\" tab. A big copy into the drive while paused may stop when this PC runs out of space.")));
+            "הספירה מתגלגלת: מה שעלה לפני 24 שעות יוצא ממנה מעצמו, וההעלאות ממשיכות לבד. בינתיים הקבצים מחכים בבטחה במחשב הזה, ואפשר גם להמשיך בכל זאת מלשונית \"פעילות\". העתקה גדולה לכונן בזמן העצירה עלולה להיעצר כשנגמר המקום במחשב.",
+            "The count rolls: what went up 24 hours ago leaves it by itself, and the uploads go on. Meanwhile the files wait safely on this PC, and you can also go on anyway from the \"Activity\" tab. A big copy into the drive while paused may stop when this PC runs out of space.")));
 
         Controls.Add(col);
 

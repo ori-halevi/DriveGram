@@ -61,7 +61,7 @@ sealed class MainForm : Form
 
         _tabs.Add(L.T("חשבונות", "Accounts"), Glyphs.People, _accountsPage);
         _tabs.Add(L.T("כוננים", "Drives"), Glyphs.Disk, _drivesPage);
-        _tabs.Add(L.T("העברות", "Transfers"), Glyphs.Upload, _transfersPage);
+        _tabs.Add(L.T("פעילות", "Activity"), Glyphs.Upload, _transfersPage);
         _tabs.Add(L.T("הגדרות", "Settings"), Glyphs.Settings, _settingsPage);
         _tabs.SelectedChanged += i =>
         {

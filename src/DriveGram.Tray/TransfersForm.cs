@@ -273,7 +273,7 @@ sealed class TransfersForm : Form
     {
         _host = host;
         Ui.Prepare(this);
-        Text = L.T("DriveGram – העברות וקבצים במחשב", "DriveGram – transfers and files on this PC");
+        Text = L.T("DriveGram – פעילות וקבצים במחשב", "DriveGram – activity and files on this PC");
         StartPosition = FormStartPosition.CenterScreen;
         Size = new Size(940, 620);
         MinimumSize = new Size(700, 420);

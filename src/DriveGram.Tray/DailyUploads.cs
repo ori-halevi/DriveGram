@@ -228,8 +228,8 @@ sealed class DailyUploads
             _s.CapTold = true;
             if (_s.AlertGb > 0 && _s.AlertGb <= _s.CapGb) _s.Alerted = _s.AboutToTold = true; // said by the cap notice
             Save();
-            say = L.T($"ב־24 השעות האחרונות עלו לטלגרם {Ui.Size(recent)}, וזו התקרה שבחרת. ההעלאות מושהות, והקבצים מחכים בינתיים בבטחה במחשב הזה. הן ימשיכו מעצמן {FreesInWords()}, ואפשר להמשיך כבר עכשיו מלשונית \"העברות\".",
-                $"{Ui.Size(recent)} went up to Telegram in the last 24 hours: the cap you chose. Uploads are paused, and the files wait safely on this PC meanwhile. They go on by themselves {FreesInWords()}, and you can go on now from the \"Transfers\" tab.");
+            say = L.T($"ב־24 השעות האחרונות עלו לטלגרם {Ui.Size(recent)}, וזו התקרה שבחרת. ההעלאות מושהות, והקבצים מחכים בינתיים בבטחה במחשב הזה. הן ימשיכו מעצמן {FreesInWords()}, ואפשר להמשיך כבר עכשיו מלשונית \"פעילות\".",
+                $"{Ui.Size(recent)} went up to Telegram in the last 24 hours: the cap you chose. Uploads are paused, and the files wait safely on this PC meanwhile. They go on by themselves {FreesInWords()}, and you can go on now from the \"Activity\" tab.");
         }
         else if (_s.AlertGb > 0 && recent >= Gb(_s.AlertGb) && !_s.Alerted)
         {
