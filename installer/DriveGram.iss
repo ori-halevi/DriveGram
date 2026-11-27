@@ -15,6 +15,9 @@ AppId={{78F6D8C0-DCCF-4C3B-844F-0E1DF90AC0A3}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
+; the list of installed programs shows the name alone: the version has a column of its own there
+; (AppVerName stays for setup's own pages, where "DriveGram 1.8.1" is what the user wants to read)
+UninstallDisplayName={#AppName}
 AppPublisher=DriveGram
 DefaultDirName={localappdata}\Programs\{#AppName}
 DefaultGroupName={#AppName}
