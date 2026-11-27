@@ -640,7 +640,6 @@ sealed class TrayApp : ApplicationContext, IMainHost
         DialogResult result;
         Keys? wizardKeys = null;
         string? createdDriveId = null;
-        bool restartForLanguage;
         List<Setup.NextDrive> after;
         // the window says what this run is for (the menu item that opened it)
         string? title = d is null ? null
@@ -657,17 +656,8 @@ sealed class TrayApp : ApplicationContext, IMainHost
             driveVanished = _wizard.Context.DriveVanished;
             wizardKeys = _wizard.Context.UnlockedKeys;
             createdDriveId = _wizard.Context.CreatedDriveId;
-            restartForLanguage = _wizard.Context.RestartForLanguage;
             after = _wizard.Context.Queue;
             _wizard = null;
-        }
-        if (restartForLanguage && isNew && createdDriveId is null)
-        {
-            // the language link on the first page: nothing was entered yet; open the wizard again in it
-            state.Delete();
-            UpdateIcon();
-            await SetupAsync(d);
-            return;
         }
         // The drive page saves a new binding (other channels / account) as soon as it is chosen, so a
         // cancel AFTER that point cannot restore the old one: the profile on disk is the truth.
@@ -1597,19 +1587,17 @@ sealed class TrayApp : ApplicationContext, IMainHost
         if (_wizard is { IsDisposed: false }) { _wizard.Activate(); return; }
         var before = TelegramAccounts.Known().Select(a => a.Key).ToHashSet();
         var temp = AppState.CreateNew(); // only carries the sign-in; the account itself is kept by TelegramAccounts
-        bool restart, finished;
+        bool finished;
         try
         {
-            using (_wizard = new Setup.SetupWizard(temp, isNew: true, accountOnly: true, firstRun: TelegramAccounts.Known().Count == 0))
+            using (_wizard = new Setup.SetupWizard(temp, isNew: true, accountOnly: true))
             {
                 finished = _wizard.ShowDialog() == DialogResult.OK;
-                restart = _wizard.Context.RestartForLanguage;
                 _wizard = null;
             }
         }
         finally { temp.Delete(); }
         var signedIn = temp.Config.AccountKey; // the account the wizard signed in to (maybe one already here)
-        if (restart) { await AddAccountAsync(); return; }
         _main?.RefreshAll();
         if (!finished)
         {
@@ -1623,8 +1611,14 @@ sealed class TrayApp : ApplicationContext, IMainHost
                     ?? (string.IsNullOrEmpty(signedIn) ? null : TelegramAccounts.Known().FirstOrDefault(a => a.Key == signedIn));
         if (added is null) return;
         Log.Info("tray: a Telegram account was added");
-        // straight on to its drives: the ones it already has, or a new one
-        await AddDrivesAsync(added, createNew: false);
+        // the window did ONE job and closed. The user is back in the main window, where the new account
+        // says, where the eye lands, that it has no drives here yet.
+        ShowMain(DriveGram.Tray.MainForm.Tab.Accounts);
+        Balloon(L.T("החשבון נוסף ✓", "The account was added ✓"),
+            L.T($"החשבון {L.Name(added.Name)} מחובר. עכשיו אפשר להוסיף לו כונן — בכרטיסיית \"חשבונות\", הכפתור \"הוסף כונן…\".",
+                $"The account {added.Name} is connected. Now you can add a drive to it — on the \"Accounts\" tab, the \"Add a drive…\" button."),
+            onClick: () => ShowMain(DriveGram.Tray.MainForm.Tab.Accounts));
+        await Task.CompletedTask;
     }
 
     /// <summary>"Add a drive" with no account named: the wizard asks which one (and skips the question

@@ -56,6 +56,16 @@ WinFsp 2.1 + C# (.NET 10): `src/DriveGram.Core` (engine, index, Telegram), `src/
   the main window, off screen, with sample data. **Rows and column headers of a list never appear in those
   pictures** (Windows paints them, and they stay out of a window's own drawing) — check lists on a real run.
 
+## Third-party assets
+- `assets/flags.png`: the country flags of the phone field, packed into one grid (42x30 each, 16 across,
+  alphabetical by ISO code — the order is written out in `Setup/Flags.cs`). Made from
+  [FlagKit](https://github.com/madebybowtie/FlagKit)'s @2x PNGs, **MIT licence, © 2016 Bowtie AB**. Windows
+  does not draw flag emoji at all, so a picture is the only way. build-installer.cmd copies it next to the
+  program; in a dev run `Flags` finds it in `assets/`.
+- Country calling codes are a table in `Setup/Countries.cs`; the names come from Windows (English), with
+  Hebrew names for the ones someone here is likely to type in Hebrew. Images are NOT mirrored in a Hebrew
+  window (checked with Portugal's flag), so a flag needs no special handling.
+
 ## Things that are easy to get wrong
 - **Explorer marks**: the overlay names are machine-wide (HKLM, written once by an elevated `reg.exe` at
   install); the COM classes are per user (HKCU). Explorer shows only 15 overlays, sorted by name: ours start

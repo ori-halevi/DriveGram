@@ -50,8 +50,6 @@ sealed class SetupContext : IDisposable
     public string? LastPassword { get; set; }
     /// <summary>Only adding a Telegram account (the main window's "Add account"): no drive here.</summary>
     public bool AccountOnly { get; init; }
-    /// <summary>The user chose another language on the first page: open the wizard again in it.</summary>
-    public bool RestartForLanguage { get; set; }
     /// <summary>The API details were already known, so their page was not shown (the sign-in page offers
     /// a link to change them instead).</summary>
     public bool ApiSkipped { get; set; }
@@ -240,7 +238,7 @@ sealed class SetupWizard : Form
     /// <param name="chooseAccount">"Add a drive" from the Drives tab: which account first (skipped when
     /// there is only one), then the drive. No account can be added here — that is the Accounts tab's job.</param>
     public SetupWizard(AppState state, bool isNew, TelegramChannels? originalChannels = null,
-        NextDrive? next = null, List<NextDrive>? queue = null, bool accountOnly = false, bool firstRun = false,
+        NextDrive? next = null, List<NextDrive>? queue = null, bool accountOnly = false,
         string? title = null, bool freshSignIn = false, bool chooseAccount = false)
     {
         _ctx = new SetupContext(state, isNew, originalChannels) { Current = next, Queue = queue ?? [], AccountOnly = accountOnly, FreshSignIn = freshSignIn };
@@ -265,8 +263,10 @@ sealed class SetupWizard : Form
         var icon = Path.Combine(AppContext.BaseDirectory, "drivegram.ico");
         if (File.Exists(icon)) Icon = new Icon(icon);
 
+        // three steps, always: what this is about, the API details, the sign-in. Then the window closes —
+        // the account is in, and adding drives to it is a job of its own, back in the main window.
         List<WizardPage> pages = accountOnly
-            ? (firstRun ? [new WelcomePage(_ctx), new ApiPage(_ctx), new LoginPage(_ctx)] : [new ApiPage(_ctx), new LoginPage(_ctx)])
+            ? [new WelcomePage(_ctx), new ApiPage(_ctx), new LoginPage(_ctx)]
             : chooseAccount ? [new AccountPage(_ctx), new DrivePage(_ctx), new FinishPage(_ctx)]
             : next is { Account: not null } ? [new DrivePage(_ctx), new FinishPage(_ctx)] // the account is known already
             : next is not null ? [new ApiPage(_ctx), new LoginPage(_ctx), new DrivePage(_ctx), new FinishPage(_ctx)] // another account: sign in first
@@ -461,17 +461,6 @@ sealed class SetupWizard : Form
         _busy = busy;
         UseWaitCursor = busy;
         UpdateButtons();
-    }
-
-    /// <summary>The first page's language link: close and open again in the other language (nothing was
-    /// entered yet on that page, so nothing is lost).</summary>
-    public void SwitchLanguage()
-    {
-        if (_busy) return;
-        L.Set(L.Hebrew ? "en" : "he");
-        _ctx.RestartForLanguage = true;
-        DialogResult = DialogResult.Cancel;
-        Close();
     }
 
     void UpdateButtons()

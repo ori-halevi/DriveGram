@@ -91,6 +91,29 @@ static class Program
             return;
         }
 
+        int snapCountry = Array.IndexOf(args, "--snapshot-countries");
+        if (snapCountry >= 0 && snapCountry + 1 < args.Length) // developer aid: the phone field's country list
+        {
+            var picker = new Setup.PhoneBox.CountryPicker(Setup.Countries.Here())
+                { StartPosition = FormStartPosition.Manual, Location = new Point(-4000, -4000), ShowInTaskbar = false };
+            picker.Shown += (_, _) =>
+            {
+                Directory.CreateDirectory(args[snapCountry + 1]);
+                using var bmp = new Bitmap(picker.Width, picker.Height);
+                using (var g = Graphics.FromImage(bmp))
+                {
+                    var hdc = g.GetHdc();
+                    try { PrintWindow(picker.Handle, hdc, 2); }
+                    finally { g.ReleaseHdc(hdc); }
+                }
+                if (L.Rtl) bmp.RotateFlip(RotateFlipType.RotateNoneFlipX);
+                bmp.Save(Path.Combine(args[snapCountry + 1], $"countries-{Setup.Theme.Name(Setup.Theme.Kind)}.png"));
+                picker.Close();
+            };
+            Application.Run(picker);
+            return;
+        }
+
         int snap = Array.IndexOf(args, "--snapshot-setup");
         if (snap >= 0 && snap + 1 < args.Length) // developer aid: render the wizard pages to images, offline
         {

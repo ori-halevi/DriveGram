@@ -12,41 +12,38 @@ namespace DriveGram.Tray.Setup;
 // ── 1. Welcome ──────────────────────────────────────────────────────────────
 sealed class WelcomePage : WizardPage
 {
-    public override string Title => Ctx.IsNew && AppState.All().Count > 0
-        ? L.T("כונן נוסף", "Another drive")
+    bool MoreAccount => Ctx.AccountOnly && TelegramAccounts.Known().Count > 0;
+
+    public override string Title => MoreAccount ? L.T("חשבון טלגרם נוסף", "Another Telegram account")
+        : Ctx.AccountOnly ? L.T("ברוך הבא ל־DriveGram", "Welcome to DriveGram")
+        : Ctx.IsNew && AppState.All().Count > 0 ? L.T("כונן נוסף", "Another drive")
         : L.T("ברוך הבא ל־DriveGram", "Welcome to DriveGram");
-    public override string Subtitle => L.T("כונן ב\"מחשב זה\" שהקבצים שלו נשמרים, מוצפנים, בחשבון הטלגרם שלך.",
-        "A drive in This PC whose files are stored, encrypted, in your Telegram account.");
+
+    public override string Subtitle => MoreAccount
+        ? L.T("עוד חשבון טלגרם שאפשר יהיה להחזיק בו כוננים.", "One more Telegram account to keep drives on.")
+        : L.T("כונן ב\"מחשב זה\" שהקבצים שלו נשמרים, מוצפנים, בחשבון הטלגרם שלך.",
+              "A drive in This PC whose files are stored, encrypted, in your Telegram account.");
     public override string NextText => L.T("בוא נתחיל", "Let's start");
-
-    readonly LinkLabel _language;
-
-    /// <summary>Only while nothing was set up yet (coming back here after a drive was created or chosen,
-    /// a restart would drop it).</summary>
-    public override Task EnterAsync()
-    {
-        _language.Visible = Ctx.State.Config.Channels is null && Ctx.CreatedDriveId is null;
-        return Task.CompletedTask;
-    }
 
     public WelcomePage(SetupContext ctx) : base(ctx)
     {
         var col = Theme.Column();
-        // the other language, before anything is typed: the wizard opens again in it (and the app follows)
-        var language = _language = new LinkLabel
-        {
-            Text = L.Hebrew ? "English" : "עברית", AutoSize = true, Font = Theme.Small, LinkColor = Theme.Accent,
-            RightToLeft = L.Hebrew ? RightToLeft.No : RightToLeft.Yes, Margin = new Padding(0, 0, 0, 10),
-        };
-        language.LinkClicked += (_, _) => (FindForm() as SetupWizard)?.SwitchLanguage();
-        col.Controls.Add(language);
-        bool another = ctx.IsNew && AppState.All().Count > 0;
+        bool another = ctx.IsNew && !ctx.AccountOnly && AppState.All().Count > 0;
         if (another)
             col.Controls.Add(Theme.Label(L.T(
                 "כל כונן מקבל אות משלו וערוצים משלו בטלגרם. אפשר לשים אותו באותו חשבון של כונן קיים, או בחשבון אחר.",
                 "Each drive gets its own letter and its own Telegram channels. It can live on the same account as an existing drive, or on another one."), maxWidth: 640));
-        col.Controls.Add(Theme.Label(L.T("ההגדרה לוקחת כ־2 דקות:", "Setup takes about 2 minutes:"), Theme.Heading));
-        string[] steps = ctx.UsesTelegram
+        if (MoreAccount)
+            col.Controls.Add(Theme.Label(L.T(
+                "אפשר להחזיק כוננים בכמה חשבונות טלגרם: למשל חשבון לסרטים וחשבון למסמכים, או חשבון נוסף כשהראשון מתמלא. הכוננים של כל חשבון מופיעים יחד ב\"מחשב זה\".",
+                "Drives can live on several Telegram accounts: one for films and one for documents, say, or another account when the first fills up. Every account's drives appear together in This PC."), maxWidth: 640));
+        col.Controls.Add(Theme.Label(ctx.AccountOnly
+            ? L.T("חיבור החשבון לוקח כדקה:", "Connecting the account takes about a minute:")
+            : L.T("ההגדרה לוקחת כ־2 דקות:", "Setup takes about 2 minutes:"), Theme.Heading));
+        string[] steps = ctx.AccountOnly
+            ? [L.T("פרטי API של טלגרם (מזהה חינמי שכל תוכנה צריכה)", "Telegram API details (a free ID every app needs)"),
+               L.T("התחברות לחשבון: סריקת קוד QR מהטלפון, או קוד שטלגרם שולח", "Sign in: scan a QR code with your phone, or type a code Telegram sends you")]
+            : ctx.UsesTelegram
             ? [L.T("פרטי API של טלגרם (מזהה חינמי שכל תוכנה צריכה)", "Telegram API details (a free ID every app needs)"),
                L.T("התחברות לחשבון: סריקת קוד QR מהטלפון, או קוד שטלגרם שולח", "Sign in: scan a QR code with your phone, or type a code Telegram sends you"),
                L.T("סיסמה לכונן: מצפינה הכל, ורק אתה יודע אותה", "A drive password: it encrypts everything, only you know it"),
@@ -99,9 +96,28 @@ sealed class ApiPage : WizardPage
         col.Controls.Add(Theme.Label("api_hash", Theme.Small, Theme.Muted));
         col.Controls.Add(_hash);
 
+        // "or" between typing and the file, so the file reads as another way in and not as a next step
+        var or = Theme.Label(L.T("— או —", "— or —"), Theme.Small, Theme.Muted, 200);
+        or.Margin = new Padding(0, 6, 0, 4);
+        col.Controls.Add(or);
+        var importRow = Theme.Row();
         var import = Theme.Secondary(L.T($"ייבוא מקובץ {L.Ltr(".env")}…", "Import from an .env file…"));
         import.Click += (_, _) => { try { ImportEnv(); } catch (Exception ex) { Ui.Error(TelegramErrors.Text(ex)); } };
-        col.Controls.Add(import);
+        var what = new Label
+        {
+            Text = "ⓘ", AutoSize = true, Font = new Font(Theme.Body.FontFamily, 13f), ForeColor = Theme.Accent,
+            Cursor = Cursors.Help, Margin = new Padding(6, 9, 4, 0),
+        };
+        var tip = new ToolTip { AutoPopDelay = 30000, InitialDelay = 200 };
+        var tipText = L.T(
+            "קובץ טקסט רגיל ששתי שורות בו:\n\nAPI_ID=12345678\nAPI_HASH=0123456789abcdef0123456789abcdef\n\n" +
+            "אפשר גם TELEGRAM_API_ID ו־TELEGRAM_API_HASH. שורות שמתחילות ב־# הן הערות, וגרשיים סביב הערך בסדר.",
+            "A plain text file with two lines:\n\nAPI_ID=12345678\nAPI_HASH=0123456789abcdef0123456789abcdef\n\n" +
+            "TELEGRAM_API_ID and TELEGRAM_API_HASH work too. Lines starting with # are comments, and quotes around a value are fine.");
+        tip.SetToolTip(what, tipText);
+        tip.SetToolTip(import, tipText);
+        importRow.Controls.AddRange([import, what]);
+        col.Controls.Add(importRow);
         col.Controls.Add(_status);
         SetContent(col);
 
@@ -228,7 +244,7 @@ sealed class AccountPage : WizardPage
 // ── 3. Telegram sign-in ─────────────────────────────────────────────────────
 sealed class LoginPage : WizardPage
 {
-    public override string NextText => Ctx.AccountOnly ? L.T("המשך לכוננים בחשבון", "Continue to the account's drives") : base.NextText;
+    public override string NextText => Ctx.AccountOnly ? L.T("סיום", "Done") : base.NextText;
     // an existing drive that is signed in already (e.g. "choose another drive"): straight on, once
     bool _autoUsed, _wasSignedOut, _freshDone;
     public override bool AutoNext { get { bool a = !Ctx.IsNew && !Ctx.FreshSignIn && Ctx.User is not null && !_autoUsed; if (a) _autoUsed = true; return a; } }
@@ -250,7 +266,7 @@ sealed class LoginPage : WizardPage
     readonly Button _qrRetry = Theme.Secondary(L.T("נסה שוב", "Try again"));
 
     readonly FlowLayoutPanel _phone = Theme.Column();
-    readonly TextBox _phoneBox = Theme.Input(240);
+    readonly PhoneBox _phoneBox = new(260);
     readonly Button _sendCode = Theme.Primary(L.T("שלח קוד", "Send code"));
     readonly FlowLayoutPanel _codeRow = Theme.Row();
     readonly LinkLabel _changeNumber = new()
@@ -323,9 +339,9 @@ sealed class LoginPage : WizardPage
         frame.Controls.Add(_qrImage);
         _qr.Controls.AddRange([frame, qrSide]);
 
-        _phoneBox.PlaceholderText = "+972501234567";
         var phoneRow = Theme.Row();
         phoneRow.Controls.AddRange([_phoneBox, _sendCode]);
+        _phoneBox.Entered += () => { if (_sendCode.Visible && _sendCode.Enabled) _sendCode.PerformClick(); };
         _codeBox.PlaceholderText = "12345";
         _codeRow.Controls.AddRange([_codeBox, _verify, _changeNumber]);
         _changeNumber.LinkClicked += (_, _) =>
@@ -339,7 +355,8 @@ sealed class LoginPage : WizardPage
             _phoneBox.Focus();
         };
         _codeRow.Visible = false;
-        _phone.Controls.Add(Theme.Label(L.T("מספר הטלפון של החשבון, בפורמט בינלאומי:", "The account's phone number, in international format:"), Theme.Small, Theme.Muted));
+        _phone.Controls.Add(Theme.Label(L.T("מספר הטלפון של החשבון (בחר מדינה, והקלד את המספר בלי ה־0 שבהתחלה):",
+            "The account's phone number (choose the country, then type the number without its leading 0):"), Theme.Small, Theme.Muted));
         _phone.Controls.Add(phoneRow);
         _phone.Controls.Add(Theme.Label(L.T(
             "הקוד נשלח לאפליקציית טלגרם עצמה, לצ'אט בשם \"Telegram\" עם ✓ כחול (בטלפון או במחשב). בדרך כלל הוא לא מגיע ב־SMS. כל שליחה חדשה מבטלת את הקוד הקודם.",
@@ -357,7 +374,6 @@ sealed class LoginPage : WizardPage
         _twoFa.Visible = false;
         _twoFaOk.Click += async (_, _) => await SubmitTwoFaAsync();
         // Enter in these boxes does their step (the wizard's "Next" stays off until the sign-in is done)
-        EnterClicks(_phoneBox, _sendCode);
         EnterClicks(_codeBox, _verify);
         EnterClicks(_twoFaBox, _twoFaOk);
 
@@ -519,7 +535,7 @@ sealed class LoginPage : WizardPage
             _qrCts?.Cancel();
             _qr.Visible = false;
             _phone.Visible = true;
-            _phoneBox.Text = "+972501234567";
+            _phoneBox.Number = "+972501234567";
             _codeRow.Visible = true;
             _codeBox.Text = "12345";
             ShowError(new TL.RpcException(400, "PHONE_CODE_INVALID"));
@@ -655,20 +671,12 @@ sealed class LoginPage : WizardPage
 
     async Task SendCodeAsync()
     {
-        var phone = new string(_phoneBox.Text.Where(c => char.IsDigit(c) || c == '+').ToArray());
+        // the field hands over the whole international number; the country beside it supplies the code
+        var phone = _phoneBox.Number;
         if (phone.Length < 8)
         {
-            _error.Text = L.T("הקלד מספר טלפון מלא, למשל ‎+972501234567‎.", "Enter the full phone number, e.g. +972501234567.");
+            _error.Text = L.T("הקלד את מספר הטלפון של החשבון (בלי ה־0 שבהתחלה).", "Enter the account's phone number (without its leading 0).");
             return;
-        }
-        if (!phone.StartsWith('+') && phone.StartsWith('0'))
-        {
-            if (!L.Hebrew)
-            {
-                _error.Text = L.T("הקלד את המספר עם קידומת המדינה, למשל ‎+972501234567‎.", "Enter the number with its country code, e.g. +44 7700 900123.");
-                return;
-            }
-            phone = "+972" + phone[1..]; // local Israeli format
         }
         await RunLoginStepAsync(_sendCode, phone);
     }
