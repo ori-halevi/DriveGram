@@ -25,8 +25,10 @@ sealed class DailyUploads
         public bool Alerted { get; set; }
         public bool AboutToTold { get; set; }
         public bool CapTold { get; set; }
-        /// <summary>"Upload anyway": the cap is ignored until the count falls back below it.</summary>
+        /// <summary>"Upload anyway": the cap is ignored until the count falls back below it (and never
+        /// for longer than the window itself, so it cannot quietly become "no cap at all").</summary>
         public bool CapLifted { get; set; }
+        public long CapLiftedAt { get; set; }
         /// <summary>The default notice was set once (a user who turns it off later keeps it off).</summary>
         public bool AlertDefaultSet { get; set; }
     }
@@ -37,16 +39,28 @@ sealed class DailyUploads
     const int SlotMinutes = 15;
     const int Slots = 24 * 60 / SlotMinutes; // a whole day
 
+    /// <summary>The clock, so a test can move time instead of waiting a day. Always UTC.</summary>
+    internal static Func<DateTime> Clock { get; set; } = () => DateTime.UtcNow;
+
     static string FilePath => Path.Combine(AppState.Root, "upload-limits.json");
     Saved _s = new();
     readonly Dictionary<object, long> _seen = new(); // per running drive: its upload counter last time
     long _savedAt;
     bool _dirty;
 
+    /// <summary>The saved limits could not be read (a damaged file): the user is told once, because a cap
+    /// that quietly stopped existing is worse than no cap at all.</summary>
+    public string? LoadFailed { get; private set; }
+
     public DailyUploads()
     {
-        try { if (File.Exists(FilePath)) _s = JsonSerializer.Deserialize<Saved>(File.ReadAllText(FilePath)) ?? new(); }
+        try
+        {
+            if (File.Exists(FilePath)) _s = Read(FilePath) ?? Read(FilePath + ".bak") ?? Fresh();
+            else if (File.Exists(FilePath + ".bak")) _s = Read(FilePath + ".bak") ?? Fresh();
+        }
         catch (Exception ex) { Log.Warn($"upload limits: {ex.Message}"); }
+        _s.Slots ??= [];
         if (!_s.AlertDefaultSet)
         {
             // on by default; a user who had already chosen a number keeps it
@@ -54,19 +68,45 @@ sealed class DailyUploads
             _s.AlertDefaultSet = true;
             _dirty = true;
         }
-        Trim();
+        try { Trim(); } catch (Exception ex) { Log.Warn($"upload limits: {ex.Message}"); _s.Slots = []; }
+    }
+
+    Saved? Read(string path)
+    {
+        if (!File.Exists(path)) return null;
+        try { return JsonSerializer.Deserialize<Saved>(File.ReadAllText(path)); }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+        {
+            Log.Error($"upload limits: {Path.GetFileName(path)} could not be read ({ex.Message})");
+            return null;
+        }
+    }
+
+    Saved Fresh()
+    {
+        LoadFailed = L.T("לא הצלחתי לקרוא את ההגדרות של תקרת ההעלאה, והן חזרו לברירת המחדל. בדוק אותן בהגדרות.",
+            "The upload cap's settings could not be read and are back to their defaults. Please check them in Settings.");
+        return new Saved();
     }
 
     static long SlotOf(DateTime utc) => (long)(utc - DateTime.UnixEpoch).TotalMinutes / SlotMinutes;
-    static DateTime SlotEnds(long slot) => DateTime.UnixEpoch.AddMinutes((slot + 1) * SlotMinutes);
+    static DateTime SlotStarts(long slot) => DateTime.UnixEpoch.AddMinutes(slot * SlotMinutes);
 
-    /// <summary>Forget what is older than a day (that is what "rolling" means).</summary>
+    /// <summary>
+    /// Forget what is not in the last 24 hours. Both ends matter: a slot in the FUTURE (the PC's clock was
+    /// wrong-ahead when it was written — a flat CMOS battery, a dual-boot machine, a typed-in date) would
+    /// never leave the window by itself, and would hold every upload back for ever.
+    /// </summary>
     void Trim()
     {
-        long oldest = SlotOf(DateTime.UtcNow) - Slots + 1;
-        var gone = _s.Slots.Keys.Where(k => !long.TryParse(k, out var slot) || slot < oldest).ToList();
+        long now = SlotOf(Clock());
+        var gone = _s.Slots.Keys.Where(k => !long.TryParse(k, out var slot) || slot < now - Slots + 1 || slot > now).ToList();
         foreach (var k in gone) _s.Slots.Remove(k);
-        if (gone.Count > 0) _dirty = true;
+        if (gone.Count > 0)
+        {
+            Log.Warn($"upload limits: {gone.Count} counted periods were outside the last 24 hours and were dropped");
+            _dirty = true;
+        }
     }
 
     /// <summary>Bytes uploaded in the last 24 hours.</summary>
@@ -77,7 +117,11 @@ sealed class DailyUploads
     static long Gb(double gb) => (long)(gb * (1L << 30));
 
     /// <summary>The cap holds the uploads back right now (reached, and not let through by the user).</summary>
-    public bool CapReached => _s.CapGb > 0 && !_s.CapLifted && RecentBytes >= Gb(_s.CapGb);
+    public bool CapReached => _s.CapGb > 0 && !Lifted && RecentBytes >= Gb(_s.CapGb);
+
+    /// <summary>The user let the uploads through, and that is still in force (at most one window long).</summary>
+    bool Lifted => _s.CapLifted
+        && new DateTimeOffset(Clock()).ToUnixTimeSeconds() - _s.CapLiftedAt < 24 * 3600;
 
     /// <summary>
     /// When the count will fall back under the cap by itself, if nothing more goes up: the moment the
@@ -88,10 +132,11 @@ sealed class DailyUploads
         if (_s.CapGb <= 0) return null;
         long cap = Gb(_s.CapGb), left = RecentBytes;
         if (left < cap) return null;
-        foreach (var slot in _s.Slots.Keys.Select(k => long.TryParse(k, out var v) ? v : 0).OrderBy(v => v))
+        foreach (var (key, bytes) in _s.Slots.OrderBy(p => long.Parse(p.Key)))
         {
-            left -= _s.Slots[slot.ToString()];
-            if (left < cap) return SlotEnds(slot).AddHours(24).ToLocalTime();
+            left -= bytes;
+            // a slot's bytes are out of the window exactly 24 hours after the slot STARTED
+            if (left < cap) return SlotStarts(long.Parse(key)).AddHours(24).ToLocalTime();
         }
         return null;
     }
@@ -100,7 +145,7 @@ sealed class DailyUploads
     public string FreesInWords()
     {
         if (CapFreesAt() is not { } when) return "";
-        var left = when - DateTime.Now;
+        var left = when - Clock().ToLocalTime();
         var at = L.Ltr(when.ToString("HH:mm"));
         if (left <= TimeSpan.FromMinutes(20)) return L.T($"בעוד דקות ספורות (בערך ב־{at})", $"in a few minutes (around {at})");
         if (left < TimeSpan.FromHours(1)) return L.T($"בעוד פחות משעה (בערך ב־{at})", $"in under an hour (around {at})");
@@ -124,6 +169,7 @@ sealed class DailyUploads
     public void LiftCap()
     {
         _s.CapLifted = true;
+        _s.CapLiftedAt = new DateTimeOffset(Clock()).ToUnixTimeSeconds();
         Save();
     }
 
@@ -135,7 +181,7 @@ sealed class DailyUploads
     {
         Trim();
         var alive = new HashSet<object>();
-        var slot = SlotOf(DateTime.UtcNow).ToString();
+        var slot = SlotOf(Clock()).ToString();
         foreach (var (key, up) in drives)
         {
             alive.Add(key);
@@ -155,7 +201,7 @@ sealed class DailyUploads
         if (_s.AlertGb > 0 && recent < Gb(_s.AlertGb) && (_s.Alerted || _s.AboutToTold)) { _s.Alerted = _s.AboutToTold = false; Save(); }
 
         string? say = null;
-        if (_s.CapGb > 0 && recent >= Gb(_s.CapGb) && !_s.CapLifted && !_s.CapTold)
+        if (_s.CapGb > 0 && recent >= Gb(_s.CapGb) && !Lifted && !_s.CapTold)
         {
             _s.CapTold = true;
             if (_s.AlertGb > 0 && _s.AlertGb <= _s.CapGb) _s.Alerted = _s.AboutToTold = true; // said by the cap notice
@@ -181,16 +227,23 @@ sealed class DailyUploads
         return say;
     }
 
+    /// <summary>Saved whole or not at all: a power cut in the middle must not cost the user their cap.</summary>
     void Save()
     {
         try
         {
             Directory.CreateDirectory(AppState.Root);
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(_s));
+            var tmp = FilePath + ".tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(_s));
+            if (File.Exists(FilePath)) File.Replace(tmp, FilePath, FilePath + ".bak", ignoreMetadataErrors: true);
+            else File.Move(tmp, FilePath);
             _savedAt = Environment.TickCount64;
             _dirty = false;
         }
-        catch (Exception ex) { Log.Warn($"upload limits: {ex.Message}"); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Log.Warn($"upload limits: {ex.Message}");
+        }
     }
 
     public void Flush() { if (_dirty) Save(); }

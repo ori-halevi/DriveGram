@@ -34,16 +34,21 @@ public sealed class AppSettings
     {
         lock (Gate)
         {
-            try
-            {
-                if (File.Exists(Path)) return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(Path), Read) ?? new();
-            }
-            catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
-            {
-                Log.Warn($"settings: {ex.Message}; using the defaults");
-            }
-            return new();
+            return Of(Path) ?? Of(Path + ".bak") ?? new AppSettings();
         }
+    }
+
+    static AppSettings? Of(string path)
+    {
+        try
+        {
+            if (File.Exists(path)) return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path), Read);
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+        {
+            Log.Warn($"settings: {System.IO.Path.GetFileName(path)}: {ex.Message}");
+        }
+        return null;
     }
 
     /// <summary>Change one field and save, keeping everything else in the file (also fields this version
@@ -59,7 +64,9 @@ public sealed class AppSettings
                 Directory.CreateDirectory(AppState.Root);
                 var tmp = Path + ".tmp";
                 File.WriteAllText(tmp, JsonSerializer.Serialize(s, Write));
-                File.Move(tmp, Path, overwrite: true);
+                // the copy it replaces is kept: a file damaged by a power cut is not the end of the choices
+                if (File.Exists(Path)) File.Replace(tmp, Path, Path + ".bak", ignoreMetadataErrors: true);
+                else File.Move(tmp, Path);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {

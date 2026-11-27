@@ -23,6 +23,7 @@ bool Flag(string name) => argv.Remove(name);
 var folder = Opt("--folder");
 var envFile = Opt("--env");
 bool verbose = Flag("--verbose");
+if (Flag("--preview")) AppState.MarkPreview(); // talk to the preview copy, not to the installed one
 bool checkOnly = Flag("--check");
 bool forceFlag = Flag("--force"); // export into a folder that already holds other files
 bool takeOver = Flag("--take-over");
@@ -147,8 +148,16 @@ async Task<int> UninstallCleanup(bool check)
             if (Directory.Exists(root))
             {
                 foreach (var dir in Directory.GetDirectories(root).Where(Ours)) Directory.Delete(dir, recursive: true);
+                // the files DriveGram keeps directly in the folder, and what a crash may have left beside
+                // them (.tmp / .bak / .retired): anything left behind would keep the folder from going
+                string[] ours = ["settings.json", "upload-limits.json", "ui-prefs.json", "updates.json",
+                    "former-devices.txt", "autostart.reinstall", "autostart.wanted"];
                 foreach (var file in Directory.GetFiles(root))
-                    if (Path.GetFileName(file) is "settings.json" or "former-devices.txt" or "autostart.reinstall") File.Delete(file);
+                {
+                    var name = Path.GetFileName(file);
+                    if (ours.Any(o => name == o || name.StartsWith(o + ".", StringComparison.OrdinalIgnoreCase)))
+                        File.Delete(file);
+                }
                 if (!Directory.EnumerateFileSystemEntries(root).Any()) Directory.Delete(root);
             }
             break;

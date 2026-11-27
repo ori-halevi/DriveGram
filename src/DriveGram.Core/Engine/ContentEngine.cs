@@ -1260,7 +1260,13 @@ public sealed class ContentEngine : IAsyncDisposable
         set
         {
             Interlocked.Exchange(ref _cacheQuota, Math.Max(128L << 20, value));
-            FitCacheToDisk(0);
+            // a smaller limit means dropping copies — thousands of small files. The caller is a window's
+            // button, so this is never done on its thread; what is being prepared keeps its room.
+            _ = Task.Run(() =>
+            {
+                try { FitCacheToDisk(Interlocked.Read(ref _prepareReserved)); }
+                catch (Exception ex) { Log.Warn($"cache limit: {ex.Message}"); }
+            });
         }
     }
 

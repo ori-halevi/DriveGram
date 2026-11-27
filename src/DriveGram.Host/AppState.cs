@@ -47,23 +47,25 @@ public sealed class AppState
         : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DriveGram");
 
     /// <summary>
-    /// A name shared by everything that belongs to ONE data folder: the "DriveGram is running" mutex and
-    /// the events the command line signals. The usual folder keeps the plain names (what every installed
-    /// copy, and the installer, already look for); a folder chosen with DRIVEGRAM_ROOT gets its own, so a
-    /// copy run from the source for a look at it lives beside the installed one instead of waking it.
+    /// This copy was started with --preview: a second copy, run from the source to look at, beside the
+    /// installed one (its own data folder comes from DRIVEGRAM_ROOT). Set once at startup.
+    ///
+    /// It has to be an explicit FLAG and must never be guessed from the data folder: the installer and the
+    /// uninstaller look for the plain "DriveGram is running" name to stop the app and wait for its uploads
+    /// before they replace its files, so an installed copy must keep that name whatever folder its data is
+    /// in (someone may simply keep their data elsewhere with DRIVEGRAM_ROOT).
     /// </summary>
-    public static string Scoped(string name) => IsUsualRoot
-        ? name
-        : name + "-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
-            Path.GetFullPath(Root).TrimEnd('\\', '/').ToUpperInvariant())))[..8];
+    public static bool Preview { get; private set; }
 
-    /// <summary>Is this the real data folder of this Windows user (and not a copy run for a look at it)?
-    /// A copy with its own folder leaves everything machine-wide — Explorer's drive icons, for instance —
-    /// to the real one.</summary>
-    public static bool IsUsualRoot => string.Equals(
-        Path.GetFullPath(Root).TrimEnd('\\', '/'),
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DriveGram"),
-        StringComparison.OrdinalIgnoreCase);
+    public static void MarkPreview() => Preview = true;
+
+    /// <summary>A name that belongs to THIS copy: the "DriveGram is running" mutex, and the events the
+    /// command line signals. The installed copy keeps the plain names; a preview copy gets its own, so the
+    /// two never wake, stop or answer for each other.</summary>
+    public static string Scoped(string name) => !Preview
+        ? name
+        : name + "-preview-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            Path.GetFullPath(Root).TrimEnd('\\', '/').ToUpperInvariant())))[..8];
 
     public string Dir { get; }
     public string Id => Path.GetFileName(Dir);

@@ -108,8 +108,8 @@ sealed class TrayApp : ApplicationContext, IMainHost
         _preparer = new Preparer(_ui);
         _preparer.Finished += OnPrepared;
         var dir = AppContext.BaseDirectory;
-        _idle = new Icon(Path.Combine(dir, "drivegram.ico"), SystemInformation.SmallIconSize);
-        _busy = new Icon(Path.Combine(dir, "drivegram-busy.ico"), SystemInformation.SmallIconSize);
+        _idle = TrayIcon(Path.Combine(dir, "drivegram.ico"));
+        _busy = TrayIcon(Path.Combine(dir, "drivegram-busy.ico"));
         foreach (var s in AppState.All()) TelegramAccounts.MigrateLegacy(s); // 0.8: one shared sign-in per account
         _drives = AppState.All().Select(s => new DriveController(s)).ToList();
 
@@ -121,7 +121,9 @@ sealed class TrayApp : ApplicationContext, IMainHost
         // waiting out Windows' own double-click time, so the menu appears a moment after the click.
         _clickWait.Interval = Math.Max(200, SystemInformation.DoubleClickTime);
         _clickWait.Tick += (_, _) => { _clickWait.Stop(); ShowTrayMenu(); };
-        _icon.MouseUp += (_, e) => { if (e.Button == MouseButtons.Left) { _clickWait.Stop(); _clickWait.Start(); } };
+        // MouseClick, not MouseUp: Windows sends an "up" for BOTH clicks of a double click, so with MouseUp
+        // the menu opened half a second after every double click. MouseClick is not raised for the second.
+        _icon.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left && !_quitting) { _clickWait.Stop(); _clickWait.Start(); } };
         _icon.DoubleClick += (_, _) => { _clickWait.Stop(); ShowMain(DriveGram.Tray.MainForm.Tab.Transfers); };
         Setup.Theme.Changed += () => _ui.Post(_ => OnLookChanged(), null);
         _timer.Tick += (_, _) => UpdateIcon();
@@ -134,14 +136,17 @@ sealed class TrayApp : ApplicationContext, IMainHost
         {
             if (e.IsAvailable) _ui.Post(async _ => { await Task.Delay(3000); RetryWaitingDrivesNow(); }, null);
         };
-        // left by a crash on a borrowed letter. Only the real copy does this: one run for a look, with its
-        // own data folder, must not touch what Explorer shows for the drives of the real one.
-        if (AppState.IsUsualRoot) ShellIntegration.ClearStaleDriveIcons(_drives.Select(x => x.State.Config.MountPoint));
+        // left by a crash on a borrowed letter. Only the real copy does this: a preview copy must not
+        // touch what Explorer shows for the drives of the installed one.
+        if (!AppState.Preview) ShellIntegration.ClearStaleDriveIcons(_drives.Select(x => x.State.Config.MountPoint));
         SystemEvents.PowerModeChanged += (_, e) => { if (e.Mode == PowerModes.Resume) _ui.Post(_ => OnResume(), null); };
 
-        // Explorer's overlay icons and right-click menu ask here (the shell extension)
+        // Explorer's overlay icons and right-click menu ask here (the shell extension). One pipe serves
+        // the whole Windows session, so a preview copy leaves it to the installed one: two servers on one
+        // name would answer Explorer by turns, and the preview knows nothing of the real drives.
         try
         {
+            if (AppState.Preview) throw new InvalidOperationException("a preview copy does not serve Explorer");
             _bridge = new ShellBridge
             {
                 Resolve = ResolveShellPath,
@@ -224,6 +229,16 @@ sealed class TrayApp : ApplicationContext, IMainHost
             d.Session?.Sync.Wake();
             if (d.Session is null && d.RetryTimer is not null && !d.Starting) { d.RetryDelaySeconds = 15; _ = MountAsync(d); }
         }
+    }
+
+    /// <summary>The icon by the clock. A missing icon file (an antivirus took it, a half-finished
+    /// install) must not stop the app from starting: Windows' own program icon stands in.</summary>
+    static Icon TrayIcon(string path)
+    {
+        try { if (File.Exists(path)) return new Icon(path, SystemInformation.SmallIconSize); }
+        catch (Exception ex) { Log.Warn($"tray icon {Path.GetFileName(path)}: {ex.Message}"); }
+        Log.Warn($"tray icon {Path.GetFileName(path)} is missing; using Windows' own");
+        return SystemIcons.Application;
     }
 
     void Listen(EventWaitHandle ev, Action onSignal) => new Thread(() =>
@@ -552,6 +567,8 @@ sealed class TrayApp : ApplicationContext, IMainHost
         TrackDaily();
         _daily.Flush();
         _timer.Stop();
+        _clickWait.Stop();
+        _clickWait.Dispose();
         _icon.Visible = false;
         _icon.Dispose();
         _activate.Dispose();
@@ -1728,13 +1745,33 @@ sealed class TrayApp : ApplicationContext, IMainHost
 
     public void SetTheme(Setup.ThemeKind kind) => Setup.Theme.Set(kind);
 
-    /// <summary>The look changed: the icons drawn in the accent colour are made again, and every window
-    /// already wears the new colours (Theme.Set saw to that).</summary>
+    /// <summary>
+    /// The look changed. Every window already wears the new colours (Theme.Set saw to that), but icons
+    /// drawn in the accent colour are little pictures made once, so the main window is built again — it is
+    /// the one window full of them, and the one the user is looking at when they change the look.
+    /// </summary>
     void OnLookChanged()
     {
         _idleBmp = _busyBmp = null;
-        _main?.RefreshAll();
+        ReopenMain();
         UpdateIcon();
+    }
+
+    /// <summary>Build the main window again (a new look or a new language changes every text and picture
+    /// in it), on the same tab and in the same place.</summary>
+    void ReopenMain(DriveGram.Tray.MainForm.Tab? tab = null)
+    {
+        if (_main is not { IsDisposed: false } old) return;
+        var place = old.Bounds;
+        var state = old.WindowState;
+        var on = tab ?? old.Current;
+        old.Close();
+        old.Dispose();
+        _main = null;
+        ShowMain(on);
+        if (_main is not { } fresh) return;
+        if (state == FormWindowState.Normal) fresh.Bounds = place;
+        else fresh.WindowState = state;
     }
 
     /// <summary>
@@ -1746,23 +1783,14 @@ sealed class TrayApp : ApplicationContext, IMainHost
         if (L.Preference == preference) return;
         L.Set(preference);
         Log.Info($"tray: the language is now '{preference}'");
-        if (_main is { IsDisposed: false } old)
-        {
-            var place = old.Bounds;
-            var state = old.WindowState;
-            old.Close();
-            old.Dispose();
-            _main = null;
-            ShowMain(DriveGram.Tray.MainForm.Tab.Settings);
-            if (_main is { } fresh && state == FormWindowState.Normal) { fresh.StartPosition = FormStartPosition.Manual; fresh.Bounds = place; }
-            else if (_main is { } max) max.WindowState = state;
-        }
+        ReopenMain(DriveGram.Tray.MainForm.Tab.Settings);
         UpdateIcon();
     }
 
     /// <summary>The icon's menu, as a left click opens it (the same menu a right click shows).</summary>
     void ShowTrayMenu()
     {
+        if (_quitting || _icon.Icon is null) return;
         try
         {
             // NotifyIcon knows how to place its own menu against the taskbar; nothing public asks for it

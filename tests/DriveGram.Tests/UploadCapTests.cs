@@ -6,48 +6,52 @@ namespace DriveGram.Tests;
 
 /// <summary>
 /// The upload cap counts the last 24 HOURS, not "since midnight": what went up 24 hours ago leaves the
-/// count by itself. The count is seeded here by writing the file the program keeps it in, which is the
-/// only way to test "a day ago" without moving the clock. Runs against an isolated DRIVEGRAM_ROOT.
+/// count by itself. The count is seeded here by writing the file the program keeps it in, and the clock is
+/// moved instead of waiting — the whole point of the rewrite is what happens as time passes.
+/// Runs against an isolated DRIVEGRAM_ROOT.
 /// </summary>
 [Collection("isolated-root")]
 public sealed class UploadCapTests : IDisposable
 {
     readonly string _root = Path.Combine(Path.GetTempPath(), "drivegram-tests", "cap-" + Guid.NewGuid().ToString("N"));
     readonly string? _previous = Environment.GetEnvironmentVariable("DRIVEGRAM_ROOT");
+    DateTime _now = DateTime.UtcNow;
 
     public UploadCapTests()
     {
         Environment.SetEnvironmentVariable("DRIVEGRAM_ROOT", _root);
         Directory.CreateDirectory(_root);
+        DailyUploads.Clock = () => _now;
     }
 
     public void Dispose()
     {
+        DailyUploads.Clock = () => DateTime.UtcNow;
         Environment.SetEnvironmentVariable("DRIVEGRAM_ROOT", _previous);
         try { Directory.Delete(_root, true); } catch { }
     }
 
     const long Gb = 1L << 30;
+    string Path_ => Path.Combine(_root, "upload-limits.json");
 
     /// <summary>The quarter-hour slot a moment in the past belongs to (how the program stores the count).</summary>
-    static string Slot(TimeSpan ago) =>
-        ((long)(DateTime.UtcNow - ago - DateTime.UnixEpoch).TotalMinutes / 15).ToString();
+    string Slot(TimeSpan ago) => ((long)(_now - ago - DateTime.UnixEpoch).TotalMinutes / 15).ToString();
 
     void Seed(double capGb, params (TimeSpan Ago, long Bytes)[] uploads)
     {
         var slots = new Dictionary<string, long>();
         foreach (var (ago, bytes) in uploads) slots[Slot(ago)] = slots.GetValueOrDefault(Slot(ago)) + bytes;
-        File.WriteAllText(Path.Combine(_root, "upload-limits.json"), JsonSerializer.Serialize(new
+        File.WriteAllText(Path_, JsonSerializer.Serialize(new
         {
             AlertGb = 0.0, CapGb = capGb, Slots = slots, AlertDefaultSet = true,
         }));
     }
 
-    static string? Tick(DailyUploads d, long uploadedSinceLastTick = 0)
+    /// <summary>One turn of the tray's timer, with a drive that uploaded this much since the last one.</summary>
+    static string? Tick(DailyUploads d, object drive, long uploaded = 0)
     {
-        var drive = new object();
-        d.Tick([(drive, 0L)], 0);                        // the drive's counter as it was
-        return d.Tick([(drive, uploadedSinceLastTick)], 0); // and what it uploaded since
+        d.Tick([(drive, 0L)], 0);
+        return d.Tick([(drive, uploaded)], 0);
     }
 
     [Fact]
@@ -68,8 +72,33 @@ public sealed class UploadCapTests : IDisposable
         // it frees itself when the 23-hour-old 4 GB leaves the window: in about an hour, not at midnight
         var frees = daily.CapFreesAt();
         Assert.NotNull(frees);
-        var inHowLong = frees!.Value - DateTime.Now;
-        Assert.InRange(inHowLong.TotalMinutes, 40, 80);
+        Assert.InRange((frees!.Value - _now.ToLocalTime()).TotalMinutes, 45, 75);
+    }
+
+    [Fact]
+    public void TheCapReleasesItselfAsTimePasses()
+    {
+        Seed(5, (TimeSpan.FromHours(23), 4 * Gb), (TimeSpan.FromHours(1), 2 * Gb));
+        var daily = new DailyUploads();
+        var drive = new object();
+        Tick(daily, drive);
+        Assert.True(daily.CapReached);
+
+        _now = _now.AddHours(2); // the 4 GB is now more than a day old
+        Tick(daily, drive);
+        Assert.False(daily.CapReached);
+        Assert.Equal(2 * Gb, daily.RecentBytes);
+    }
+
+    [Fact]
+    public void AClockThatWasAheadCannotHoldTheUploadsForEver()
+    {
+        // the PC's clock was days ahead when these bytes were counted; it has since been corrected
+        Seed(5, (TimeSpan.FromDays(-3), 10 * Gb), (TimeSpan.FromHours(1), 1 * Gb));
+        var daily = new DailyUploads();
+        Assert.Equal(1 * Gb, daily.RecentBytes); // the ones from the future are gone, not waiting to expire
+        Assert.False(daily.CapReached);
+        Assert.Null(daily.CapFreesAt());
     }
 
     [Fact]
@@ -84,21 +113,35 @@ public sealed class UploadCapTests : IDisposable
     [Fact]
     public void UploadAnywayLastsOnlyUntilTheCountFallsBackUnderTheCap()
     {
-        Seed(5, (TimeSpan.FromMinutes(10), 6 * Gb));
+        Seed(5, (TimeSpan.FromHours(23), 6 * Gb));
         var daily = new DailyUploads();
+        var drive = new object();
         Assert.True(daily.CapReached);
 
         daily.LiftCap();
         Assert.False(daily.CapReached); // the user chose to go on
 
-        // the count is under the cap again (here: a fresh start on a count that is low), so the cap is armed
-        // again — and the next rise above it holds the uploads once more
-        Seed(5, (TimeSpan.FromMinutes(10), 1 * Gb));
-        var later = new DailyUploads();
-        Tick(later);
-        Assert.False(later.CapReached);
-        Tick(later, 5 * Gb);
-        Assert.True(later.CapReached);
+        _now = _now.AddHours(2); // those 6 GB leave the window: the count is under the cap again
+        Tick(daily, drive);
+        Assert.False(daily.CapReached);
+
+        Tick(daily, drive, 6 * Gb); // and the next rise above the cap holds the uploads once more
+        Assert.True(daily.CapReached);
+    }
+
+    [Fact]
+    public void UploadAnywayDoesNotOutliveTheWindowItWasGivenIn()
+    {
+        Seed(5, (TimeSpan.FromMinutes(10), 6 * Gb));
+        var daily = new DailyUploads();
+        daily.LiftCap();
+        Assert.False(daily.CapReached);
+
+        // a day later the count is still above the cap (new uploads kept it there): the cap is back
+        _now = _now.AddHours(25);
+        var drive = new object();
+        Tick(daily, drive, 6 * Gb);
+        Assert.True(daily.CapReached);
     }
 
     [Fact]
@@ -106,8 +149,59 @@ public sealed class UploadCapTests : IDisposable
     {
         Seed(5, (TimeSpan.FromMinutes(10), 1 * Gb));
         var daily = new DailyUploads();
-        Assert.Null(Tick(daily));                       // under the cap: nothing to say
-        Assert.NotNull(Tick(daily, 5 * Gb));            // passed it: said once
-        Assert.Null(Tick(daily, 1 * Gb));               // still over it: not said again
+        var drive = new object();
+        Assert.Null(Tick(daily, drive));                 // under the cap: nothing to say
+        Assert.NotNull(Tick(daily, drive, 5 * Gb));      // passed it: said once
+        Assert.Null(Tick(daily, drive, 1 * Gb));         // still over it: not said again
+    }
+
+    [Fact]
+    public void WhatWasCountedSurvivesARestart()
+    {
+        Seed(50, (TimeSpan.FromHours(1), 1 * Gb));
+        var daily = new DailyUploads();
+        var drive = new object();
+        Tick(daily, drive, 2 * Gb);
+        _now = _now.AddMinutes(40); // a later quarter-hour slot
+        Tick(daily, drive, 3 * Gb);
+        daily.Flush();
+
+        Assert.Equal(6 * Gb, new DailyUploads().RecentBytes); // 1 seeded + 2 + 3, in three different slots
+    }
+
+    [Fact]
+    public void ADamagedFileDoesNotQuietlyCostTheUserTheirCap()
+    {
+        Seed(7, (TimeSpan.FromHours(1), 1 * Gb));
+        new DailyUploads().Flush();
+        File.Copy(Path_, Path_ + ".bak", overwrite: true);
+        File.WriteAllText(Path_, "{ this is not json");
+
+        var daily = new DailyUploads();
+        Assert.Equal(7, daily.CapGb); // taken from the copy beside it
+        Assert.Null(daily.LoadFailed);
+    }
+
+    [Fact]
+    public void WithNoCopyToFallBackOnTheUserIsTold()
+    {
+        File.WriteAllText(Path_, "{ this is not json");
+        var daily = new DailyUploads();
+        Assert.Equal(0, daily.CapGb);
+        Assert.NotNull(daily.LoadFailed); // the window says so; it does not pretend a cap is still in force
+    }
+
+    [Fact]
+    public void TheLimitsOfVersion170AreKept()
+    {
+        // what 1.7.0 wrote: a calendar day's count, in fields this version no longer knows
+        File.WriteAllText(Path_, """
+            {"AlertGb":20,"CapGb":30,"Day":"2026-11-27","Bytes":5898577134,"AlertedDay":"2026-11-26",
+             "CapLiftedDay":"","AlertDefaultSet":true}
+            """);
+        var daily = new DailyUploads();
+        Assert.Equal(20, daily.AlertGb);
+        Assert.Equal(30, daily.CapGb);
+        Assert.Equal(0, daily.RecentBytes); // the day's count starts afresh, once, in the permissive direction
     }
 }

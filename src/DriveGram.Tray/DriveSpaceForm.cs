@@ -61,7 +61,8 @@ sealed class DriveSpaceForm : Form
             Theme.Small, Theme.Muted, 560));
 
         _free = Theme.Secondary(L.T("פנה מקום עכשיו…", "Free up space now…"));
-        _free.Click += (_, _) => { freeNow(); Close(); };
+        // the limit the user just typed is kept too: pressing "free up space now" is not "cancel"
+        _free.Click += (_, _) => { DialogResult = DialogResult.OK; freeNow(); Close(); };
         var ok = Theme.Primary(L.T("שמור", "Save"));
         ok.Click += (_, _) => { DialogResult = DialogResult.OK; Close(); };
         var cancel = Theme.Secondary(L.T("ביטול", "Cancel"));

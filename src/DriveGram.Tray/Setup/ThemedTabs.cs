@@ -124,6 +124,7 @@ sealed class ThemedTabs : Panel
 
         protected override void OnKeyDown(KeyEventArgs e)
         {
+            if (_owner._items.Count == 0) { base.OnKeyDown(e); return; }
             // the arrows move between tabs; in Hebrew the strip is mirrored, so they are swapped
             int step = e.KeyCode == System.Windows.Forms.Keys.Right ? 1 : e.KeyCode == System.Windows.Forms.Keys.Left ? -1 : 0;
             if (L.Rtl) step = -step;
@@ -143,7 +144,8 @@ sealed class ThemedTabs : Panel
         {
             var g = e.Graphics;
             using (var back = new SolidBrush(Theme.Surface)) g.FillRectangle(back, ClientRectangle);
-            using var icons = new Font(IconFamily, 15f, GraphicsUnit.Pixel);
+            // sized from the text beside it, so the pair keeps its proportions when Windows scales text
+            using var icons = new Font(IconFamily, Math.Max(12f, Theme.Body.Height * 0.78f), GraphicsUnit.Pixel);
             const int bar = 3;
             for (int i = 0; i < _owner._items.Count; i++)
             {

@@ -47,6 +47,9 @@ sealed class MainForm : Form
         Text = "DriveGram";
         StartPosition = FormStartPosition.CenterScreen;
         Size = new Size(900, 680);
+        // set before the window is shown, so one built again after a look or language change does not
+        // appear in the middle of the screen and then jump back to where it was
+        Shown += (_, _) => StartPosition = FormStartPosition.Manual;
         MinimumSize = new Size(720, 480);
 
         _accountsPage.Controls.Add(_accounts);
@@ -87,6 +90,15 @@ sealed class MainForm : Form
         Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true,
         Padding = new Padding(18, 16, 18, 16),
     }.Wears(Slot.Window);
+
+    /// <summary>Which tab is open now (so the window can be built again on the same one).</summary>
+    public Tab Current => _tabs.Selected switch
+    {
+        0 => Tab.Accounts,
+        1 => Tab.Drives,
+        3 => Tab.Settings,
+        _ => Tab.Transfers,
+    };
 
     public void Select(Tab tab, bool localFiles = false)
     {
@@ -140,7 +152,7 @@ sealed class MainForm : Form
     {
         if (IsDisposed) return;
         var known = _app.Accounts();
-        var accountsShape = string.Join("|", known.Select(a => a.Key + ":" + string.Join(",", _app.Drives.Where(d => d.State.Config.AccountKey == a.Key).Select(d => d.Letter))));
+        var accountsShape = string.Join("|", known.Select(a => a.Key + ":" + string.Join(",", _app.Drives.Where(d => d.State.Config.AccountKey == a.Key).Select(d => d.Name))));
         if (accountsShape != _accountsShape) { _accountsShape = accountsShape; BuildAccounts(known); }
         // the controller object too: after Settings or an account switch a fresh one replaces it (same values)
         var drivesShape = string.Join("|", _app.Drives.Select(d => $"{System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(d)}:{d.State.Id}:{d.Letter}:{(d.Session is { } s ? System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(s) : 0)}:{d.State.Config.VolumeLabel}:{d.State.Config.AccountName}"));

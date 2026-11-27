@@ -57,7 +57,7 @@ sealed class SettingsPage : UserControl
             langs.Controls.Add(rb);
         }
         col.Controls.Add(langs);
-        col.Controls.Add(Note(L.T("\"לפי וינדוס\": עברית כשוינדוס בעברית, אחרת אנגלית.",
+        col.Controls.Add(Note(L.T("\"לפי וינדוס\": עברית כשווינדוס בעברית, אחרת אנגלית.",
             "\"Same as Windows\": Hebrew when Windows is in Hebrew, English otherwise.")));
 
         // ── the look ──
@@ -67,7 +67,7 @@ sealed class SettingsPage : UserControl
         looks.MaximumSize = new Size(TextWidth + 40, 0);
         foreach (var (kind, name) in new[]
                  {
-                     (ThemeKind.Auto, L.T("לפי המערכת", "Same as Windows")),
+                     (ThemeKind.Auto, L.T("לפי וינדוס", "Same as Windows")),
                      (ThemeKind.Light, L.T("בהיר", "Light")),
                      (ThemeKind.Dark, L.T("כהה", "Dark")),
                      (ThemeKind.Rose, L.T("ורד", "Rose")),
@@ -89,14 +89,14 @@ sealed class SettingsPage : UserControl
             "Telegram publishes no daily limit. What is known: an account without Premium uploads more slowly, and Telegram blocks patterns that look like spam or abuse. If you prefer to be careful, you can get a notice, or pause uploads, at an amount you choose. The count covers the last 24 hours (not up to midnight), and every drive on this PC.")));
         col.Controls.Add(_today);
 
-        _alertOn = Theme.WrapCheck(L.T("התרע כשב־24 השעות האחרונות עלו לטלגרם יותר מ־:", "Tell me when more than this went up to Telegram in the last 24 hours:"), Theme.Body, TextWidth);
+        _alertOn = Theme.WrapCheck(L.T("הודע לי כשעלו לטלגרם, ב־24 השעות האחרונות, יותר מ:", "Tell me when more than this went up to Telegram in the last 24 hours:"), Theme.Body, TextWidth);
         _alertOn.Margin = new Padding(0, 12, 0, 2);
         col.Controls.Add(_alertOn);
         col.Controls.Add(WithGb(_alert));
         col.Controls.Add(Note(L.T("ההתראה מופיעה גם מראש, כשמה שממתין להעלאה עומד לחרוג מהכמות הזו, ותופיע שוב רק אחרי שהספירה תרד מתחת לכמות.",
             "The notice also comes ahead of time, when what waits to upload is about to pass that amount, and comes again only once the count has fallen back under it.")));
 
-        _capOn = Theme.WrapCheck(L.T("עצור את ההעלאות כשב־24 השעות האחרונות עלו יותר מ־:", "Pause uploads once more than this went up in the last 24 hours:"), Theme.Body, TextWidth);
+        _capOn = Theme.WrapCheck(L.T("עצור את ההעלאות כשעלו, ב־24 השעות האחרונות, יותר מ:", "Pause uploads once more than this went up in the last 24 hours:"), Theme.Body, TextWidth);
         _capOn.Margin = new Padding(0, 12, 0, 2);
         col.Controls.Add(_capOn);
         col.Controls.Add(WithGb(_cap));
@@ -110,8 +110,10 @@ sealed class SettingsPage : UserControl
         _capOn.CheckedChanged += (_, _) => { _cap.Enabled = _capOn.Checked; Queue(); };
         _alert.ValueChanged += (_, _) => Queue();
         _cap.ValueChanged += (_, _) => Queue();
+        _alert.TextChanged += (_, _) => Queue();
+        _cap.TextChanged += (_, _) => Queue();
         _save.Tick += (_, _) => { _save.Stop(); Store(); };
-        Disposed += (_, _) => _save.Dispose();
+        Disposed += (_, _) => { Commit(); _save.Dispose(); };
         Reload();
     }
 
@@ -145,11 +147,26 @@ sealed class SettingsPage : UserControl
         _save.Start();
     }
 
-    void Store() => _host.SetLimits(_alertOn.Checked ? (double)_alert.Value : 0, _capOn.Checked ? (double)_cap.Value : 0);
+    /// <summary>Save a change that is still waiting its moment (the page is going away, or about to be
+    /// filled again): without this, ticking the cap and closing the window at once loses the tick.</summary>
+    public void Commit()
+    {
+        if (!_save.Enabled) return;
+        _save.Stop();
+        Store();
+    }
+
+    void Store() => _host.SetLimits(_alertOn.Checked ? Typed(_alert) : 0, _capOn.Checked ? Typed(_cap) : 0);
+
+    /// <summary>What the box shows, including a number typed and not yet left: NumericUpDown keeps that as
+    /// text until the control is validated, so "200" typed and then closed used to save the old value.</summary>
+    static double Typed(NumericUpDown box) =>
+        double.TryParse(box.Text, out var v) && v >= (double)box.Minimum && v <= (double)box.Maximum ? v : (double)box.Value;
 
     /// <summary>Show what is saved now (opening the page, and after the look or the language changed).</summary>
     public void Reload()
     {
+        Commit(); // what the user just changed is saved before the page is filled from what is saved
         _loading = true;
         try
         {

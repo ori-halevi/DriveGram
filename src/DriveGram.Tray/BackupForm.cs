@@ -220,7 +220,7 @@ sealed class BackupForm : Form
             // a backup exists when some OTHER account administers both channels
             var me = _state.Config.AccountId;
             bool backed = list.Count == 2 && list.All(c => c.Admins.Any(a => a.UserId != me));
-            _adminsState.ForeColor = backed ? Theme.Success : Theme.Attention;
+            _adminsState.Says(backed ? Slot.Success : Slot.Attention);
             _adminsState.Text = backed
                 ? L.T("✓  יש חשבון נוסף שמנהל את שני הערוצים.", "✓  Another account administers both channels.")
                 : L.T("עדיין אין חשבון נוסף שמנהל את שני הערוצים.", "No other account administers both channels yet.");

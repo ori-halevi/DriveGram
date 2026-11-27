@@ -208,7 +208,22 @@ sealed class TransfersForm : Form
             e.Graphics.DrawLine(pen, 0, 0, box.Width, 0); // a line of its own, so it is not read as a row
         };
         foreach (var c in new[] { legend, note }) { c.Dock = DockStyle.None; c.Margin = new Padding(0, 2, 0, 2); box.Controls.Add(c); }
+        // the strip is as wide as the window, which the user can make narrow: everything in it wraps to
+        // what there is instead of being cut off (it can no longer be closed to get the room back)
+        box.Resize += (_, _) => FitWidth(box, box.ClientSize.Width - box.Padding.Horizontal);
         return box;
+    }
+
+    /// <summary>Let every label and every wrapping row inside know how much width it really has.</summary>
+    static void FitWidth(Control parent, int width)
+    {
+        if (width < 80) return;
+        foreach (Control c in parent.Controls)
+        {
+            if (c is Label label) label.MaximumSize = new Size(width, 0);
+            else if (c is FlowLayoutPanel { WrapContents: true } row) row.MaximumSize = new Size(width, 0);
+            FitWidth(c, width);
+        }
     }
 
     static ToolStripTextBox SearchBox()
@@ -283,7 +298,7 @@ sealed class TransfersForm : Form
         head.Padding = new Padding(16, 12, 16, 6);
         head.Controls.Add(_summary);
         var capRow = Theme.Column(); // the text, then its button (side by side, a larger font pushed the button out)
-        var lift = Theme.Secondary(L.T("המשך להעלות היום בכל זאת", "Upload anyway today"));
+        var lift = Theme.Secondary(L.T("המשך להעלות בכל זאת", "Upload anyway"));
         lift.Click += (_, _) => { _host.LiftCap(); RefreshNow(); };
         _capText.Margin = new Padding(0, 6, 0, 0);
         capRow.Controls.AddRange([_capText, lift]);
@@ -312,7 +327,7 @@ sealed class TransfersForm : Form
         _resumeSel.ToolTipText = L.T("המשך את הקבצים המסומנים ברשימה", "Resume the files selected in the list");
         _cancelSel.ToolTipText = L.T("בטל את ההעלאה של הקבצים המסומנים ברשימה", "Cancel the upload of the files selected in the list");
         upBar.Items.Add(new ToolStripSeparator());
-        var cap = Button(upBar, Glyphs.Gauge, L.T("תקרת העלאה…", "Upload cap…"), () => _host.OpenSettings());
+        var cap = Button(upBar, Glyphs.Gauge, L.T("תקרת העלאה (בהגדרות)…", "Upload cap (in Settings)…"), () => _host.OpenSettings());
         cap.Overflow = ToolStripItemOverflow.Never; // never hidden behind the toolbar's "»"
         cap.ToolTipText = L.T("נקבעת בהגדרות: כמה מותר להעלות ב־24 שעות, והתראה לפני שמגיעים לזה",
             "Set in Settings: how much may be uploaded in 24 hours, and a notice before reaching it");
@@ -348,8 +363,8 @@ sealed class TransfersForm : Form
         // ── tab 2: on this PC ──
         var localTab = new Panel { Dock = DockStyle.Fill }.Wears(Slot.Window);
         var localBar = NewBar();
-        Button(localBar, Glyphs.Add, L.T("הכן קובץ מהכונן…", "Prepare a file from the drive…"), PickAndPrepare);
-        _prepareSel = Button(localBar, Glyphs.Download, L.T("הכן", "Prepare"), PrepareSelected);
+        Button(localBar, Glyphs.Add, L.T("בחר קובץ מהכונן להכנה…", "Choose a file from the drive to prepare…"), PickAndPrepare);
+        _prepareSel = Button(localBar, Glyphs.Download, L.T("הכן את המסומנים", "Prepare the selected"), PrepareSelected);
         _freeSel = Button(localBar, Glyphs.Delete, L.T("פנה מהמחשב הזה", "Free from this PC"), FreeSelected);
         _prepareSel.ToolTipText = L.T("הורד את כל הקבצים שבחרת ברשימה ושמור אותם במחשב הזה", "Download all of the files chosen in the list and keep them on this PC");
         _freeSel.ToolTipText = L.T("מחק מהמחשב הזה את העותקים של הקבצים שבחרת ברשימה (הם נשארים בטלגרם)", "Delete this PC's copies of the files chosen in the list (they stay in Telegram)");
@@ -468,7 +483,7 @@ sealed class TransfersForm : Form
     {
         _demo = true;
         _timer.Stop(); // the sample rows stay put (a refresh would replace them with the real ones: none)
-        _summary.Text = L.T("נותרו להעלות 11.6 GB   ·   מהירות 4.2 MB/שנייה   ·   עוד כ־47 דקות   ·   ב־24 שעות עלו 23.4 GB   ·   תקרה 50GB",
+        _summary.Text = L.T("נותרו להעלות 11.6 GB   ·   מהירות 4.2 MB לשנייה   ·   עוד כ־47 דקות   ·   ב־24 שעות עלו 23.4 GB   ·   תקרה ל־24 שעות 50 GB",
             "11.6 GB left to upload   ·   4.2 MB/s   ·   about 47 minutes left   ·   23.4 GB uploaded in 24 hours   ·   cap 50 GB");
         long G = 1L << 30, M = 1L << 20;
         var ups = new[]
@@ -488,7 +503,7 @@ sealed class TransfersForm : Form
         _up.Items[1].Selected = true;
         var locals = new[]
         {
-            (new LocalRow(null!, null!, "a", "הסרט של הערב.mkv", @"T:\Movies\x.mkv", 3 * G, 1, true), "ready", L.T("מוכן – נשאר במחשב עד שתפנה", "Ready – stays on this PC until you free it")),
+            (new LocalRow(null!, null!, "a", "הסרט של הערב.mkv", @"T:\Movies\x.mkv", 3 * G, 1, true), "ready", L.T("מוכן – יישאר עד שתפנה", "Ready – stays until you free it")),
             (new LocalRow(null!, null!, "b", "Loki.S02E05.1080p.mkv", @"T:\x.mkv", (long)(2.3 * G), 0.42, true), "down", L.T("מוריד למחשב הזה…", "Downloading to this PC…")),
             (new LocalRow(null!, null!, "c", "עונה 1 פרק 3.mp4", @"T:\x.mp4", 400 * M, 0.55, false), "part", L.T("חלקו כאן (זמני)", "Partly here (temporary)")),
             (new LocalRow(null!, null!, "d", "מצגת.pptx", @"T:\x.pptx", 12 * M, 1, false), "full", L.T("כולו כאן (זמני)", "All here (temporary)")),
@@ -567,7 +582,7 @@ sealed class TransfersForm : Form
         if (left > 0)
         {
             parts.Add(L.T($"נותרו להעלות {Ui.Size(left)}", $"{Ui.Size(left)} left to upload"));
-            if (speed > 1024) parts.Add(L.T($"מהירות {Ui.Size((long)speed)}/שנייה", $"{Ui.Size((long)speed)}/s"));
+            if (speed > 1024) parts.Add(L.T($"מהירות {Ui.Size((long)speed)} לשנייה", $"{Ui.Size((long)speed)}/s"));
             if (speed > 1024) parts.Add(TimeLeft(left / speed));
         }
         parts.Add(L.T($"ב־24 שעות עלו {Ui.Size(_host.Daily.RecentBytes)}", $"{Ui.Size(_host.Daily.RecentBytes)} uploaded in 24 hours"));
@@ -642,15 +657,16 @@ sealed class TransfersForm : Form
         _upSort.Apply();
         _up.EndUpdate();
         _upSort.Arrows();
-        bool allConnected = _host.Drives.All(d => d.Session is not null && !d.Stopping);
+        bool allConnected = _host.Drives.Count > 0 && _host.Drives.All(d => d.Session is not null && !d.Stopping);
         _upEmpty.Text = allConnected ? L.T("✓  אין העלאות כרגע. הכל שמור בטלגרם.", "✓  No uploads right now. Everything is saved in Telegram.")
             : drives.Count == 0 ? L.T("אין כונן מחובר כרגע. קבצים שממתינים להעלאה יעלו כשהכונן יתחבר.", "No drive is connected right now. Files waiting to upload go up when the drive connects.")
             : L.T("אין העלאות כרגע בכוננים המחוברים. קבצים של כונן שאינו מחובר יעלו כשהוא יתחבר.", "No uploads right now on the connected drives. Files of a drive that is not connected go up when it connects.");
-        _upEmpty.ForeColor = allConnected ? Theme.Success : Theme.Muted;
+        // green means "saved in Telegram": not for "no drive is connected", which says nothing of the sort
+        _upEmpty.Says(allConnected && drives.Count > 0 ? Slot.Success : Slot.Muted);
         if (all > 0 && keep.Count == 0)
         {
             _upEmpty.Text = L.T($"אין העלאות ששמן מכיל \"{search.Trim()}\".", $"No uploads whose name contains \"{search.Trim()}\".");
-            _upEmpty.ForeColor = Theme.Muted;
+            _upEmpty.Says(Slot.Muted);
         }
         _upEmpty.Visible = keep.Count == 0;
         _up.Visible = keep.Count > 0;
@@ -1153,7 +1169,7 @@ sealed class TransfersForm : Form
             bool prepared = r.Session.Engine.IsPrepared(r.Id);
             item.SubItems[3].Text = Bar(r.Fraction);
             (item.ImageKey, item.SubItems[4].Text) = running is not null ? ("down", L.T("מוריד למחשב הזה…", "Downloading to this PC…"))
-                : prepared && r.Fraction >= 0.999 ? ("ready", L.T("מוכן – נשאר במחשב עד שתפנה", "Ready – stays on this PC until you free it"))
+                : prepared && r.Fraction >= 0.999 ? ("ready", L.T("מוכן – יישאר עד שתפנה", "Ready – stays until you free it"))
                 : prepared ? ("down", L.T("מוכן בחלקו (נסה שוב)", "Partly prepared (try again)"))
                 : r.Fraction >= 0.999 ? ("full", L.T("כולו כאן (זמני)", "All here (temporary)"))
                 : ("part", L.T("חלקו כאן (זמני)", "Partly here (temporary)"));

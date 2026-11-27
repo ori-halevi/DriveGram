@@ -69,14 +69,18 @@ sealed record Palette
         Slot.DangerBack => DangerBack,
         Slot.DangerBorder => DangerBorder,
         Slot.Hover => Hover,
-        _ => Color.Empty,
+        _ => Color.Empty, // None and Fixed have no colour of their own
     };
 }
 
 /// <summary>A colour by its job, not by its value. <see cref="Slot.None"/> = leave this colour alone.</summary>
 enum Slot
 {
-    None, Window, Surface, Card, Input, Border, Text, Muted,
+    /// <summary>Nothing was said about this colour (the look guesses it once).</summary>
+    None,
+    /// <summary>Leave it exactly as it is, in every look: a QR code's white, white on a red button.</summary>
+    Fixed,
+    Window, Surface, Card, Input, Border, Text, Muted,
     Accent, AccentDark, AccentSoft, OnAccent, Error, Success, Attention,
     WarnBack, WarnBorder, InfoBack, InfoBorder, DangerBack, DangerBorder, Hover,
 }
@@ -291,6 +295,10 @@ static class Theme
 
     static Wear Of(Control c) => Worn.GetValue(c, _ => new Wear());
 
+    /// <summary>Give a control a colour AND remember what it means, so a look change keeps the meaning
+    /// (an orange warning stays a warning instead of turning into ordinary text).</summary>
+    public static T Says<T>(this T c, Slot fore) where T : Control => c.Wears(fore: fore);
+
     /// <summary>Say which colours a control wears, so it follows the look when it changes.</summary>
     public static T Wears<T>(this T c, Slot back = Slot.None, Slot fore = Slot.None) where T : Control
     {
@@ -326,12 +334,15 @@ static class Theme
     {
         if (!_loaded) Load();
         var w = Of(root);
+        if (w.Back == Slot.Fixed && w.Fore == Slot.Fixed) { foreach (Control fixedChild in root.Controls) Apply(fixedChild); return; }
         if (w.Primary || w.Secondary) Style((Button)root, w.Primary);
         else
         {
             if (w.Back == Slot.None && !(root is System.Windows.Forms.Label or LinkLabel or CheckBox or RadioButton))
                 w.Back = SlotOf(root.BackColor, BackOrder);
             if (w.Fore == Slot.None) w.Fore = SlotOf(root.ForeColor, ForeOrder);
+            if (w.Back == Slot.Fixed) w.Back = Slot.None; // told to keep its own background
+            if (w.Fore == Slot.Fixed) { if (w.Back != Slot.None) root.BackColor = Current.Of(w.Back); goto painted; }
             // A control nobody dressed and whose colour belongs to no slot (a system colour, DimGray):
             // give it the window's own colours, so it is never dark text on a dark window.
             if (w.Back == Slot.None && root is ListView or TextBox or NumericUpDown or ComboBox or ListBox) w.Back = Slot.Input;
@@ -339,6 +350,7 @@ static class Theme
             if (w.Back != Slot.None) root.BackColor = Current.Of(w.Back);
             root.ForeColor = Current.Of(w.Fore);
         }
+    painted:
         if (root is LinkLabel link)
         {
             link.LinkColor = Current.Of(w.Fore == Slot.Muted ? Slot.Muted : Slot.Accent);
@@ -425,9 +437,12 @@ static class Theme
         }
         if (primary)
         {
-            b.BackColor = b.Enabled ? Accent : Blend(Accent, Window, 0.55);
-            b.ForeColor = b.Enabled ? OnAccent : Blend(OnAccent, Accent, 0.4);
-            b.FlatAppearance.BorderSize = 0;
+            // a button that cannot be pressed loses the accent altogether instead of fading into it:
+            // faded white on faded blue came out at 2.3:1 in the dark look, unreadable
+            b.BackColor = b.Enabled ? Accent : Surface;
+            b.ForeColor = b.Enabled ? OnAccent : Muted;
+            b.FlatAppearance.BorderSize = (byte)(b.Enabled ? 0 : 1);
+            b.FlatAppearance.BorderColor = Border;
             b.FlatAppearance.MouseOverBackColor = AccentDark;
         }
         else

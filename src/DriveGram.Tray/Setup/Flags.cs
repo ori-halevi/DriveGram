@@ -50,12 +50,14 @@ static class Flags
     /// <summary>Is there a flag for this country at all?</summary>
     public static bool Has(string iso) => IndexOf(iso) >= 0;
 
-    static int IndexOf(string iso)
-    {
-        if (iso.Length != 2) return -1;
-        int at = Order.IndexOf(iso.ToUpperInvariant(), StringComparison.Ordinal);
-        return at >= 0 && at % 2 == 0 ? at / 2 : -1;
-    }
+    /// <summary>Where each country sits in the sheet. Built from the order above two letters at a time:
+    /// searching the text for a code would also find it ACROSS a boundary ("GB" inside "…BG|BH…"), which
+    /// silently lost the flag of 41 countries, Britain and Ukraine among them.</summary>
+    static readonly Dictionary<string, int> Places = Enumerable.Range(0, Order.Length / 2)
+        .ToDictionary(i => Order.Substring(i * 2, 2), i => i);
+
+    static int IndexOf(string iso) =>
+        iso.Length == 2 && Places.TryGetValue(iso.ToUpperInvariant(), out var at) ? at : -1;
 
     /// <summary>The country's flag, `height` pixels tall (null when there is none).</summary>
     public static Image? Of(string iso, int height)

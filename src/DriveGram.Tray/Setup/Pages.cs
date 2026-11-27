@@ -47,7 +47,7 @@ sealed class WelcomePage : WizardPage
             ? [L.T("פרטי API של טלגרם (מזהה חינמי שכל תוכנה צריכה)", "Telegram API details (a free ID every app needs)"),
                L.T("התחברות לחשבון: סריקת קוד QR מהטלפון, או קוד שטלגרם שולח", "Sign in: scan a QR code with your phone, or type a code Telegram sends you"),
                L.T("סיסמה לכונן: מצפינה הכל, ורק אתה יודע אותה", "A drive password: it encrypts everything, only you know it"),
-               L.T("אות לכונן וסוג הכונן (DriveGram יופעל עם וינדוס; אפשר לכבות בתפריט של הסמל)", "A drive letter and the drive type (DriveGram starts with Windows; it can be turned off in the icon's menu)")]
+               L.T("אות לכונן וסוג הכונן", "A drive letter and the drive type")]
             : [L.T("סיסמה לכונן (מצב ניסיון: הקבצים נשמרים בתיקייה מקומית)", "A drive password (trial mode: files are kept in a local folder)"),
                L.T("אות לכונן, סוג הכונן, והפעלה אוטומטית עם וינדוס", "A drive letter, the drive type, and starting with Windows")];
         for (int i = 0; i < steps.Length; i++)
@@ -87,7 +87,7 @@ sealed class ApiPage : WizardPage
         var row = Theme.Row();
         row.Controls.AddRange([Theme.Label(L.T("1. היכנס עם מספר הטלפון של החשבון ל־", "1. Sign in with the account's phone number at ")), link]);
         col.Controls.Add(row);
-        col.Controls.Add(Theme.Label(L.T("2. בחר API development tools, ומלא טופס קצר. השם לא משנה, למשל DriveGram.",
+        col.Controls.Add(Theme.Label(L.T("2. בחר ב־API development tools ומלא טופס קצר. השם לא משנה, למשל DriveGram.",
             "2. Choose API development tools and fill in the short form (any name, e.g. DriveGram).")));
         col.Controls.Add(Theme.Label(L.T("3. העתק לכאן את api_id ואת api_hash (הם נשמרים רק במחשב הזה):", "3. Copy api_id and api_hash here (they are kept only on this PC):")));
 
@@ -101,7 +101,7 @@ sealed class ApiPage : WizardPage
         or.Margin = new Padding(0, 6, 0, 4);
         col.Controls.Add(or);
         var importRow = Theme.Row();
-        var import = Theme.Secondary(L.T($"ייבוא מקובץ {L.Ltr(".env")}…", "Import from an .env file…"));
+        var import = Theme.Secondary(L.T($"ייבוא מקובץ {L.LtrPath(".env")}…", "Import from an .env file…"));
         import.Click += (_, _) => { try { ImportEnv(); } catch (Exception ex) { Ui.Error(TelegramErrors.Text(ex)); } };
         var what = new Label
         {
@@ -141,7 +141,7 @@ sealed class ApiPage : WizardPage
 
     void ImportEnv()
     {
-        using var dlg = new OpenFileDialog { Title = L.T($"בחר קובץ {L.Ltr(".env")}", "Choose an .env file"), Filter = "env|*.env;.env|*.*|*.*" };
+        using var dlg = new OpenFileDialog { Title = L.T($"בחר קובץ {L.LtrPath(".env")}", "Choose an .env file"), Filter = "env|*.env;.env|*.*|*.*" };
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
         foreach (var (key, value) in DriveGram.Host.EnvFile.Read(dlg.FileName))
         {
@@ -227,9 +227,15 @@ sealed class AccountPage : WizardPage
             }
             if (_choices.Count > 0) _choices[0].Button.Checked = true;
         }
-        // one account: nothing to ask — it is chosen and the page is skipped
-        _only = _choices.Count <= 1;
-        if (_only && _choices.Count == 1) Ctx.UseAccount(_choices[0].Account);
+        // one account: nothing to ask — it is chosen and the page is skipped. With none at all the page
+        // stays, saying so: going on would bind the drive to an account that is not there.
+        _only = _choices.Count == 1;
+        if (_only) Ctx.UseAccount(_choices[0].Account);
+        if (_choices.Count == 0 && _list.Controls.Count == 0)
+            _list.Controls.Add(Theme.Label(L.T(
+                "עוד לא מחובר שום חשבון טלגרם במחשב הזה. סגור את החלון הזה, ובכרטיסיית \"חשבונות\" לחץ \"הוסף חשבון טלגרם…\".",
+                "No Telegram account is connected on this PC yet. Close this window and, on the \"Accounts\" tab, press \"Add a Telegram account…\"."),
+                Theme.Body, Theme.Text, 620));
         Changed(_choices.Any(c => c.Button.Checked));
         return Task.CompletedTask;
     }
@@ -260,8 +266,10 @@ sealed class LoginPage : WizardPage
     readonly RadioButton _byPhone = MethodButton(L.T("מספר טלפון וקוד", "Phone number and code"), false);
 
     readonly FlowLayoutPanel _qr = Theme.Row();
-    // white whatever the look is: a QR code the phone's camera can read
-    readonly PictureBox _qrImage = new() { Size = new Size(230, 230), SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.White };
+    // white whatever the look is: a QR code the phone's camera can read (Slot.Fixed keeps it white when
+    // the look changes — without it the white would be read as "the window's colour" and turn dark)
+    readonly PictureBox _qrImage = new PictureBox
+        { Size = new Size(230, 230), SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.White }.Wears(Slot.Fixed, Slot.Fixed);
     readonly Label _qrState = Theme.Label(L.T("מכין קוד…", "Preparing a code…"), Theme.Small, Theme.Muted, 360);
     readonly Button _qrRetry = Theme.Secondary(L.T("נסה שוב", "Try again"));
 
@@ -275,7 +283,7 @@ sealed class LoginPage : WizardPage
         Font = Theme.Small, LinkColor = Theme.Accent, Margin = new Padding(12, 10, 12, 0),
     };
     readonly TextBox _codeBox = Theme.Input(140);
-    readonly Button _verify = Theme.Primary(L.T("אמת", "Verify"));
+    readonly Button _verify = Theme.Primary(L.T("אשר", "Verify"));
 
     readonly FlowLayoutPanel _twoFa = Theme.Column();
     readonly Label _twoFaHint = Theme.Label("", Theme.Small, Theme.Muted);
@@ -328,7 +336,7 @@ sealed class LoginPage : WizardPage
         qrSide.Padding = new Padding(18, 0, 18, 0);
         qrSide.Controls.Add(Theme.Label(L.T("בטלפון:", "On your phone:"), Theme.Heading));
         qrSide.Controls.Add(Theme.Label(L.T("1. פתח את טלגרם", "1. Open Telegram"), maxWidth: 360));
-        qrSide.Controls.Add(Theme.Label(L.T("2. הגדרות ← מכשירים ← קישור מכשיר שולחני", "2. Settings → Devices → Link Desktop Device"), maxWidth: 360));
+        qrSide.Controls.Add(Theme.Label(L.T("2. הגדרות ← מכשירים ← קישור מכשיר", "2. Settings → Devices → Link Desktop Device"), maxWidth: 360));
         qrSide.Controls.Add(Theme.Label(L.T("3. כוון את המצלמה לקוד", "3. Point the camera at this code"), maxWidth: 360));
         qrSide.Controls.Add(_qrState);
         _qrRetry.Visible = false;
@@ -673,7 +681,7 @@ sealed class LoginPage : WizardPage
     {
         // the field hands over the whole international number; the country beside it supplies the code
         var phone = _phoneBox.Number;
-        if (phone.Length < 8)
+        if (_phoneBox.LocalLength < 5)
         {
             _error.Text = L.T("הקלד את מספר הטלפון של החשבון (בלי ה־0 שבהתחלה).", "Enter the account's phone number (without its leading 0).");
             return;
@@ -1115,12 +1123,9 @@ sealed class DrivePage : WizardPage
             _createGroup.Controls.Add(_newRememberRow);
             _createGroup.Controls.SetChildIndex(_newRememberRow, _createGroup.Controls.GetChildIndex(_newLetterRow) + 1);
         }
-        var title = Theme.Label(L.T("הגדרות לעמוד הזה", "Settings for this page"), Theme.Body, Theme.Text);
-        title.Font = new Font(Theme.Body, FontStyle.Bold);
-        title.Margin = new Padding(0, 0, 0, 2);
         var bar = Theme.Card(Theme.Surface, Theme.Border);
         var barCol = Theme.Column();
-        barCol.Controls.AddRange([title, switches]);
+        barCol.Controls.Add(switches);
         bar.Controls.Add(barCol);
         bar.Margin = new Padding(0, 0, 0, 12);
         _choices.Controls.Add(bar);
@@ -1811,7 +1816,7 @@ sealed class FinishPage : WizardPage
         var account = Ctx.State.Folder is { } folder ? L.LtrPath(folder)
             : string.IsNullOrEmpty(cfg.AccountName) ? null : L.Name(cfg.AccountName);
         var where = !_presetUsed ? "" : L.T($"הכונן יופיע כ־{L.Ltr((string)_letter.SelectedItem!)} {L.Name(_label.Text)}\n", $"The drive appears as {(string)_letter.SelectedItem!} {_label.Text}\n");
-        var ready = Ctx.IsNew ? L.T("הכונן מוכן. הקבצים יעלו מוצפנים ברקע, ואייקון ליד השעון יראה מה המצב.",
+        var ready = Ctx.IsNew ? L.T("הכונן מוכן. הקבצים יעלו מוצפנים ברקע, והסמל שליד השעון יראה מה המצב.",
             "The drive is ready. Files upload encrypted in the background; an icon next to the clock shows what is happening.") : "";
         _summary.Text = ((account is null ? "" : L.T($"חשבון: {account}\n", $"Account: {account}\n")) + where + ready).TrimEnd('\n');
         _summary.Parent!.Visible = _summary.Text.Length > 0;

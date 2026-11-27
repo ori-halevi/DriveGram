@@ -21,6 +21,10 @@ static class Program
     [STAThread]
     static void Main(string[] args)
     {
+        // a second copy, run from the source to look at beside the installed one (its own data folder
+        // comes from DRIVEGRAM_ROOT): its own "is running" name, and it serves neither Explorer nor the
+        // drive icons — those belong to the installed copy
+        if (args.Contains("--preview")) AppState.MarkPreview();
         Log.Open(Path.Combine(AppState.Root, "logs"));
         Log.Verbose = args.Contains("--verbose");
         // shut down after the apps (0x100 = the lowest normal level): Word & co. save to the drive first

@@ -17,7 +17,7 @@ static class TelegramErrors
             "PHONE_NUMBER_BANNED" => L.T("המספר הזה חסום בטלגרם.", "This number is banned by Telegram."),
             "PHONE_NUMBER_UNOCCUPIED" => L.T("אין חשבון טלגרם למספר הזה. צור חשבון באפליקציית טלגרם ונסה שוב.",
                                              "There is no Telegram account for this number. Create one in the Telegram app and try again."),
-            "PHONE_CODE_INVALID" => L.T("הקוד שגוי. ודא שאתה מקליד את הקוד האחרון שקיבלת (כל שליחה חדשה מבטלת את הקודם).",
+            "PHONE_CODE_INVALID" => L.T("הקוד שגוי. ודא שהקלדת את הקוד האחרון שקיבלת.",
                                         "Wrong code. Make sure you type the latest code (each new one cancels the previous)."),
             "PHONE_CODE_EXPIRED" => L.T("תוקף הקוד פג. לחץ על \"מספר אחר / קוד חדש\" ואז על \"שלח קוד\".", "The code expired. Click \"Another number / a new code\", then \"Send code\"."),
             "PHONE_CODE_EMPTY" => L.T("לא הוקלד קוד.", "No code was entered."),

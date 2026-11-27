@@ -97,7 +97,8 @@ public sealed class DriveSession : IAsyncDisposable
     /// <summary>Signalled by `drivegram quit` (and the installer): the tray app finishes uploads and exits.</summary>
     public static string QuitEventName => AppState.Scoped(@"Local\DriveGram-quit");
 
-    public static string StopEventName(AppState state) => @"Local\DriveGram-stop-" + Path.GetFileName(state.Dir);
+    public static string StopEventName(AppState state) =>
+        AppState.Scoped(@"Local\DriveGram-stop-" + Path.GetFileName(state.Dir));
     static string InstanceName(AppState state) => InstanceName(state.Dir);
     /// <summary>The lock a mounted drive holds (here or in another window): its local files are in use.</summary>
     public static string InstanceName(string dir) => @"Local\DriveGram-instance-" + Path.GetFileName(dir.TrimEnd('\\', '/'));

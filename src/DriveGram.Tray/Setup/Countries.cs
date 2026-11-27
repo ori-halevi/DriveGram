@@ -7,6 +7,9 @@ namespace DriveGram.Tray.Setup;
 sealed record Country(string Iso, string Dial, string Name)
 {
     public string Plus => "+" + Dial;
+
+    /// <summary>What a list shows (and reads out) for this row: a record's own text would be its fields.</summary>
+    public override string ToString() => Name;
 }
 
 /// <summary>
@@ -128,6 +131,8 @@ static class Countries
     public static Country? OfNumber(string number)
     {
         var digits = new string(number.Where(char.IsAsciiDigit).ToArray());
+        // "00972…" is the old way of writing "+972…", and no calling code begins with a zero
+        if (digits.StartsWith("00", StringComparison.Ordinal)) digits = digits[2..];
         if (digits.Length == 0) return null;
         return All.Where(c => digits.StartsWith(c.Dial, StringComparison.Ordinal))
             .OrderByDescending(c => c.Dial.Length)
@@ -135,5 +140,11 @@ static class Countries
             .FirstOrDefault();
     }
 
-    static int Shared(Country c) => c.Iso switch { "US" => 0, "RU" => 0, "CA" => 1, _ => 2 };
+    /// <summary>
+    /// Several countries share one calling code. This is the one a number in it almost always belongs to:
+    /// without it the alphabet decided, and "+44…" came out as Guernsey rather than the United Kingdom.
+    /// </summary>
+    static readonly string[] Main = ["US", "RU", "GB", "FI", "NO", "IT", "AU", "NZ", "RE", "GP", "MA"];
+
+    static int Shared(Country c) => Array.IndexOf(Main, c.Iso) is var at && at >= 0 ? at : 99;
 }

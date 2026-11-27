@@ -177,6 +177,7 @@ end;
   into settings.json only when there is none: an upgrade must never undo a choice made in the program. }
 var
   LookPage: TWizardPage;
+  LangBox, ThemeBox: TPanel;
   LangAuto, LangHe, LangEn: TNewRadioButton;
   LookLight, LookDark, LookRose: TNewRadioButton;
 
@@ -187,17 +188,30 @@ begin
     'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize', 'AppsUseLightTheme', Light) and (Light = 0);
 end;
 
-function MakeRadio(Page: TWizardPage; Caption: String; Top: Integer; First: Boolean): TNewRadioButton;
+{ radio buttons belong to the group of their PARENT, so each group needs a holder of its own: with one
+  parent, choosing a look would clear the language and the page could never be answered }
+function MakeGroup(Page: TWizardPage; Top, Height: Integer): TPanel;
 begin
-  Result := TNewRadioButton.Create(Page);
+  Result := TPanel.Create(Page);
   Result.Parent := Page.Surface;
+  Result.Left := 0;
+  Result.Top := ScaleY(Top);
+  Result.Width := Page.SurfaceWidth;
+  Result.Height := ScaleY(Height);
+  Result.BevelOuter := bvNone;
+  Result.ParentBackground := True;
+end;
+
+function MakeRadio(Group: TPanel; Caption: String; Top: Integer): TNewRadioButton;
+begin
+  Result := TNewRadioButton.Create(Group);
+  Result.Parent := Group;
   Result.Caption := Caption;
   Result.Left := ScaleX(8);
   Result.Top := ScaleY(Top);
-  Result.Width := Page.SurfaceWidth - ScaleX(16);
+  Result.Width := Group.Width - ScaleX(16);
   Result.Height := ScaleY(18);
   Result.Checked := False;
-  if First then Result.TabStop := True;
 end;
 
 function MakeLabel(Page: TWizardPage; Caption: String; Top: Integer): TNewStaticText;
@@ -216,17 +230,30 @@ procedure InitializeWizard;
 begin
   LookPage := CreateCustomPage(wpSelectTasks, CustomMessage('LookTitle'), CustomMessage('LookSubtitle'));
   MakeLabel(LookPage, CustomMessage('LookLanguage'), 0);
-  LangAuto := MakeRadio(LookPage, CustomMessage('LookAuto'), 20, True);
-  LangHe := MakeRadio(LookPage, 'עברית', 42, False);
-  LangEn := MakeRadio(LookPage, 'English', 64, False);
+  LangBox := MakeGroup(LookPage, 20, 68);
+  LangAuto := MakeRadio(LangBox, CustomMessage('LookAuto'), 0);
+  LangHe := MakeRadio(LangBox, 'עברית', 22);
+  LangEn := MakeRadio(LangBox, 'English', 44);
   MakeLabel(LookPage, CustomMessage('LookTheme'), 96);
-  LookLight := MakeRadio(LookPage, CustomMessage('LookLight'), 116, False);
-  LookDark := MakeRadio(LookPage, CustomMessage('LookDark'), 138, False);
-  LookRose := MakeRadio(LookPage, CustomMessage('LookRose'), 160, False);
+  ThemeBox := MakeGroup(LookPage, 116, 68);
+  LookLight := MakeRadio(ThemeBox, CustomMessage('LookLight'), 0);
+  LookDark := MakeRadio(ThemeBox, CustomMessage('LookDark'), 22);
+  LookRose := MakeRadio(ThemeBox, CustomMessage('LookRose'), 44);
   MakeLabel(LookPage, CustomMessage('LookNote'), 196);
-  { what the user is already looking at: the installer's own language, and the look Windows is set to }
-  if ActiveLanguage = 'hebrew' then LangHe.Checked := True else LangEn.Checked := True;
+  { the language keeps following Windows unless the user says otherwise; the look is the one Windows wears }
+  LangAuto.Checked := True;
   if WindowsIsDark then LookDark.Checked := True else LookLight.Checked := True;
+end;
+
+function SettingsExist: Boolean;
+begin
+  Result := FileExists(ExpandConstant('{localappdata}\DriveGram\settings.json'));
+end;
+
+{ nothing to ask when the program already holds the answer: an upgrade would only throw it away }
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := (PageID = LookPage.ID) and SettingsExist;
 end;
 
 function ChosenLanguage: String;
@@ -452,11 +479,11 @@ var Marker: String;
 begin
   { the old versions' (one may still be loaded by Explorer until the user signs out): only once the new one
     is in place and registered, so an install that fails half-way leaves the old one working }
-  if CurStep = ssPostInstall then
-  begin
-    MoveShellExtensionAside('DriveGramShell-{#AppVersion}.dll');
+  { before the files, so a silent install that starts the program right away already has it }
+  if CurStep = ssInstall then
     SaveLookIfFirstInstall;
-  end;
+  if CurStep = ssPostInstall then
+    MoveShellExtensionAside('DriveGramShell-{#AppVersion}.dll');
   if (CurStep = ssPostInstall) and NeedsOverlayNames and not WizardSilent then
   begin
     MsgBox(CustomMessage('ShellIcons'), mbInformation, MB_OK); { said before the prompt, in full (the status line is one line) }

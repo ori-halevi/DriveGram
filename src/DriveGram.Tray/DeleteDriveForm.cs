@@ -12,12 +12,13 @@ sealed class DeleteDriveForm : Form
     static Color Danger => Theme.Error;
     readonly CheckBox _understand = new() { AutoSize = true };
     readonly TextBox _typed = Theme.Input(300);
-    readonly Button _delete = new()
+    // red in every look, with white on it: the one button that cannot be undone. Slot.Fixed keeps the
+    // look's hands off it — in a dark look "white" belongs to no slot and would be read as ordinary text.
+    readonly Button _delete = new Button
     {
-        // red in every look, with white on it: the one button that cannot be undone
         AutoSize = true, MinimumSize = new Size(170, 38), FlatStyle = FlatStyle.Flat, ForeColor = Color.White,
         Enabled = false, Font = Theme.Body, DialogResult = DialogResult.OK,
-    };
+    }.Wears(Slot.Fixed, Slot.Fixed);
     readonly string _name;
 
     public DeleteDriveForm(string letter, string name, DeletionPreview p)

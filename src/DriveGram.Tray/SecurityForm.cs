@@ -111,7 +111,7 @@ sealed class SecurityForm : Form
         {
             var ctrl = await Task.Run(() => _session.Sync.ReadControlAsync(default));
             bool has = _hasKey = ctrl?.Vault.Recovery is not null;
-            _recoveryState.ForeColor = has ? Theme.Success : Theme.Attention;
+            _recoveryState.Says(has ? Slot.Success : Slot.Attention);
             _recoveryState.Text = has
                 ? L.T("✓  לכונן יש מפתח שחזור.", "✓  The drive has a recovery key.")
                 : L.T("לכונן עדיין אין מפתח שחזור. מומלץ מאוד ליצור אחד.", "The drive has no recovery key yet. Creating one is strongly recommended.");

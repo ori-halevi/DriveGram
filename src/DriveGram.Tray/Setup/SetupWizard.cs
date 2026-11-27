@@ -316,7 +316,7 @@ sealed class SetupWizard : Form
         // tall enough for the buttons (a bordered one is 41 px at 125%, more with larger text): a fixed
         // inner height cut off their bottom edge
         footer.Height = Math.Max(68, footer.Padding.Vertical + new[] { _next, _back, _cancel }.Max(b => b.GetPreferredSize(Size.Empty).Height));
-        footer.Paint += (_, e) => e.Graphics.DrawLine(new Pen(Theme.Border), 0, 0, footer.Width, 0);
+        footer.Paint += (_, e) => { using var line = new Pen(Theme.Border); e.Graphics.DrawLine(line, 0, 0, footer.Width, 0); };
 
         Controls.AddRange([_host, header, footer]);
         AcceptButton = _next;

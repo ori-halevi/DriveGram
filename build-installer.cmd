@@ -14,7 +14,7 @@ echo === publishing (self-contained, win-x64) ===
 dotnet publish src\DriveGram.Tray -c Release -r win-x64 --self-contained -p:Version=%VERSION% -o publish -v q || exit /b 1
 dotnet publish src\DriveGram -c Release -r win-x64 --self-contained -p:Version=%VERSION% -o publish -v q || exit /b 1
 copy /y assets\*.ico publish\ >nul
-copy /y assetslags.png publish\ >nul
+copy /y assets\flags.png publish\ >nul || exit /b 1
 
 echo === shell extension (overlay icons and right-click menu in Explorer) ===
 set VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe
