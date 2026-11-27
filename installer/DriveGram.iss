@@ -41,6 +41,24 @@ Name: "hebrew"; MessagesFile: "compiler:Languages\Hebrew.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [CustomMessages]
+hebrew.LookTitle=שפה ומראה
+english.LookTitle=Language and look
+hebrew.LookSubtitle=איך DriveGram ייראה אצלך. אפשר לשנות את זה בכל רגע בחלון של DriveGram, בכרטיסייה "הגדרות".
+english.LookSubtitle=How DriveGram will look. You can change this at any time in the DriveGram window, on the "Settings" tab.
+hebrew.LookLanguage=שפת התוכנה:
+english.LookLanguage=The program's language:
+hebrew.LookAuto=לפי וינדוס
+english.LookAuto=Same as Windows
+hebrew.LookTheme=מראה:
+english.LookTheme=Look:
+hebrew.LookLight=בהיר
+english.LookLight=Light
+hebrew.LookDark=כהה
+english.LookDark=Dark
+hebrew.LookRose=ורד
+english.LookRose=Rose
+hebrew.LookNote=הבחירה הזו נשמרת רק בהתקנה ראשונה; שדרוג לא דורס מה שבחרת בתוכנה.
+english.LookNote=This choice is saved on a first install only; an upgrade never overwrites what you chose in the program.
 hebrew.Desktop=צור קיצור דרך בשולחן העבודה
 hebrew.Launch=הפעל את DriveGram עכשיו
 hebrew.InstallingWinFsp=מתקין את WinFsp (רכיב מערכת שנדרש לכונן)... ייתכן שיופיע חלון אישור של וינדוס: אשר אותו.
@@ -152,6 +170,89 @@ begin
     3: Result := '{54A010A3-BBFE-429A-B67E-1625D8BCC7F0}';
   else Result := '{DF25C5D1-CE6A-4208-82B8-711293B1114D}';
   end;
+end;
+
+{ ── the "language and look" page ─────────────────────────────────────────────
+  Asked here so the program is in the right language and the right look the first time it opens. Saved
+  into settings.json only when there is none: an upgrade must never undo a choice made in the program. }
+var
+  LookPage: TWizardPage;
+  LangAuto, LangHe, LangEn: TNewRadioButton;
+  LookLight, LookDark, LookRose: TNewRadioButton;
+
+function WindowsIsDark: Boolean;
+var Light: Cardinal;
+begin
+  Result := RegQueryDWordValue(HKEY_CURRENT_USER,
+    'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize', 'AppsUseLightTheme', Light) and (Light = 0);
+end;
+
+function MakeRadio(Page: TWizardPage; Caption: String; Top: Integer; First: Boolean): TNewRadioButton;
+begin
+  Result := TNewRadioButton.Create(Page);
+  Result.Parent := Page.Surface;
+  Result.Caption := Caption;
+  Result.Left := ScaleX(8);
+  Result.Top := ScaleY(Top);
+  Result.Width := Page.SurfaceWidth - ScaleX(16);
+  Result.Height := ScaleY(18);
+  Result.Checked := False;
+  if First then Result.TabStop := True;
+end;
+
+function MakeLabel(Page: TWizardPage; Caption: String; Top: Integer): TNewStaticText;
+begin
+  Result := TNewStaticText.Create(Page);
+  Result.Parent := Page.Surface;
+  Result.Caption := Caption;
+  Result.Left := 0;
+  Result.Top := ScaleY(Top);
+  Result.Width := Page.SurfaceWidth;
+  Result.WordWrap := True;
+  Result.AutoSize := True;
+end;
+
+procedure InitializeWizard;
+begin
+  LookPage := CreateCustomPage(wpSelectTasks, CustomMessage('LookTitle'), CustomMessage('LookSubtitle'));
+  MakeLabel(LookPage, CustomMessage('LookLanguage'), 0);
+  LangAuto := MakeRadio(LookPage, CustomMessage('LookAuto'), 20, True);
+  LangHe := MakeRadio(LookPage, 'עברית', 42, False);
+  LangEn := MakeRadio(LookPage, 'English', 64, False);
+  MakeLabel(LookPage, CustomMessage('LookTheme'), 96);
+  LookLight := MakeRadio(LookPage, CustomMessage('LookLight'), 116, False);
+  LookDark := MakeRadio(LookPage, CustomMessage('LookDark'), 138, False);
+  LookRose := MakeRadio(LookPage, CustomMessage('LookRose'), 160, False);
+  MakeLabel(LookPage, CustomMessage('LookNote'), 196);
+  { what the user is already looking at: the installer's own language, and the look Windows is set to }
+  if ActiveLanguage = 'hebrew' then LangHe.Checked := True else LangEn.Checked := True;
+  if WindowsIsDark then LookDark.Checked := True else LookLight.Checked := True;
+end;
+
+function ChosenLanguage: String;
+begin
+  if LangHe.Checked then Result := 'he'
+  else if LangEn.Checked then Result := 'en'
+  else Result := 'auto';
+end;
+
+function ChosenTheme: String;
+begin
+  if LookDark.Checked then Result := 'dark'
+  else if LookRose.Checked then Result := 'rose'
+  else Result := 'light';
+end;
+
+procedure SaveLookIfFirstInstall;
+var Dir, Path: String;
+begin
+  Dir := ExpandConstant('{localappdata}\DriveGram');
+  Path := Dir + '\settings.json';
+  if FileExists(Path) then Exit; { the program's own choice wins over an upgrade's }
+  ForceDirectories(Dir);
+  SaveStringToFile(Path, '{' + #13#10 +
+    '  "Language": "' + ChosenLanguage + '",' + #13#10 +
+    '  "Theme": "' + ChosenTheme + '"' + #13#10 + '}', False);
 end;
 
 function NeedsOverlayNames: Boolean;
@@ -352,7 +453,10 @@ begin
   { the old versions' (one may still be loaded by Explorer until the user signs out): only once the new one
     is in place and registered, so an install that fails half-way leaves the old one working }
   if CurStep = ssPostInstall then
+  begin
     MoveShellExtensionAside('DriveGramShell-{#AppVersion}.dll');
+    SaveLookIfFirstInstall;
+  end;
   if (CurStep = ssPostInstall) and NeedsOverlayNames and not WizardSilent then
   begin
     MsgBox(CustomMessage('ShellIcons'), mbInformation, MB_OK); { said before the prompt, in full (the status line is one line) }
