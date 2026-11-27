@@ -1605,7 +1605,9 @@ sealed class TrayApp : ApplicationContext, IMainHost
     {
         if (_wizard is { IsDisposed: false }) { _wizard.Activate(); return; }
         var before = TelegramAccounts.Known().Select(a => a.Key).ToHashSet();
-        var temp = AppState.CreateNew(); // only carries the sign-in; the account itself is kept by TelegramAccounts
+        // reuseApi: false — adding an account always starts at step 1, with the fields empty. Another
+        // account's API is a shortcut the user may ASK for there, not something filled in for them.
+        var temp = AppState.CreateNew(reuseApi: false); // only carries the sign-in; the account itself is kept by TelegramAccounts
         bool finished;
         try
         {

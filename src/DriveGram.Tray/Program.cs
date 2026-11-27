@@ -127,6 +127,14 @@ static class Program
             return;
         }
 
+        int snapAcc = Array.IndexOf(args, "--snapshot-account");
+        if (snapAcc >= 0 && snapAcc + 1 < args.Length) // developer aid: the three steps of adding an account
+        {
+            Application.Run(new Setup.SetupWizard(AppState.CreateNew(reuseApi: false), isNew: true, accountOnly: true)
+                { SnapshotDir = args[snapAcc + 1], StartPosition = FormStartPosition.Manual, Location = new Point(-4000, -4000), ShowInTaskbar = false });
+            return;
+        }
+
         int snapDel = Array.IndexOf(args, "--snapshot-delete");
         if (snapDel >= 0 && snapDel + 1 < args.Length) // developer aid: render the delete confirmation, offline
         {

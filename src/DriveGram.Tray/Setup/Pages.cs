@@ -72,6 +72,10 @@ sealed class ApiPage : WizardPage
     readonly TextBox _id = Theme.Input(180);
     readonly TextBox _hash = Theme.Input(380);
     readonly Label _status = Theme.Label("", Theme.Small);
+    readonly LinkLabel _reuse = new()
+    {
+        AutoSize = true, Font = Theme.Small, LinkColor = Theme.Accent, Margin = new Padding(0, 10, 0, 0),
+    };
     bool _entered, _autoSkip;
 
     public override string Title => L.T("פרטי API של טלגרם", "Telegram API details");
@@ -121,8 +125,30 @@ sealed class ApiPage : WizardPage
         col.Controls.Add(_status);
         SetContent(col);
 
-        _id.Text = ctx.State.Config.ApiId == 0 ? "" : ctx.State.Config.ApiId.ToString();
-        _hash.Text = ctx.State.Config.ApiHash;
+        // Adding an account starts empty: the usual reason to come here is a NEW account, which has its
+        // own API details. (A drive of an account already here does keep what that account uses.)
+        if (!ctx.AccountOnly)
+        {
+            _id.Text = ctx.State.Config.ApiId == 0 ? "" : ctx.State.Config.ApiId.ToString();
+            _hash.Text = ctx.State.Config.ApiHash;
+        }
+        else
+        {
+            var known = DriveGram.Host.AppState.KnownApis();
+            if (known.Count > 0)
+            {
+                // the shortcut, for the user who is signing in again to an account that was disconnected,
+                // or who uses one API for more than one account: offered, never done by itself
+                _reuse.Text = L.T($"או: להשתמש בפרטי ה־API ששמורים כבר במחשב הזה ({L.Ltr("api_id " + known[0].ApiId)})",
+                    $"Or: use the API details already saved on this PC ({"api_id " + known[0].ApiId})");
+                _reuse.LinkClicked += (_, _) =>
+                {
+                    _id.Text = known[0].ApiId.ToString();
+                    _hash.Text = known[0].ApiHash;
+                };
+                col.Controls.Add(_reuse);
+            }
+        }
         _id.TextChanged += (_, _) => UpdateState();
         _hash.TextChanged += (_, _) => UpdateState();
     }
@@ -155,13 +181,14 @@ sealed class ApiPage : WizardPage
         }
     }
 
-    public override bool SkipsAhead => !_entered && Valid;
+    public override bool SkipsAhead => !Ctx.AccountOnly && !_entered && Valid;
     public override string NextText => Ctx.ApiSkipped ? L.T("שמירה וחזרה להתחברות", "Save and back to sign-in") : base.NextText;
 
     public override Task EnterAsync()
     {
         UpdateState();
-        _autoSkip = !_entered && Valid; // already configured: straight to sign-in (a link there leads back here)
+        // never when an account is being added: that always starts at step 1, whatever is saved here
+        _autoSkip = !Ctx.AccountOnly && !_entered && Valid;
         _entered = true;
         return Task.CompletedTask;
     }

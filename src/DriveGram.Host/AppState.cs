@@ -133,18 +133,30 @@ public sealed class AppState
         return s;
     }
 
-    /// <summary>A brand-new profile (nothing is written until Save()).</summary>
-    public static AppState CreateNew()
+    /// <summary>A brand-new profile (nothing is written until Save()). A new ACCOUNT passes
+    /// reuseApi: false — its API details are its own, and are asked for.</summary>
+    public static AppState CreateNew(bool reuseApi = true)
     {
         var s = new AppState(Path.Combine(Root, "drive-" + Guid.NewGuid().ToString("N")[..8]));
         var used = All().Select(a => char.ToUpperInvariant(a.Config.MountPoint[0])).ToHashSet();
         var inUse = DriveInfo.GetDrives().Select(d => d.Name[0]).ToHashSet();
         s.Config.MountPoint = $"{"TUVWXYZSRQPONMLKJIHGFED".FirstOrDefault(c => !used.Contains(c) && !inUse.Contains(c), 'T')}:";
-        var withApi = All().FirstOrDefault(a => a.Config.ApiId != 0); // reuse API credentials of an existing drive
+        if (!reuseApi) return s;
+        var withApi = All().FirstOrDefault(a => a.Config.ApiId != 0); // another drive of the same account
         if (withApi is not null) { s.Config.ApiId = withApi.Config.ApiId; s.Config.ApiHash = withApi.Config.ApiHash; }
         else if (TelegramAccounts.Known().FirstOrDefault(a => a.ApiId != 0) is { } account)
         { s.Config.ApiId = account.ApiId; s.Config.ApiHash = account.ApiHash; } // signed in, no drive yet
         return s;
+    }
+
+    /// <summary>The Telegram API details already saved on this PC, each one once (the newest first).
+    /// Offered to a user adding an account as a shortcut — never filled in for them.</summary>
+    public static List<(int ApiId, string ApiHash)> KnownApis()
+    {
+        var all = new List<(int, string)>();
+        foreach (var a in TelegramAccounts.Known()) if (a.ApiId != 0) all.Add((a.ApiId, a.ApiHash));
+        foreach (var s in All()) if (s.Config.ApiId != 0) all.Add((s.Config.ApiId, s.Config.ApiHash));
+        return all.Distinct().ToList();
     }
 
     /// <summary>Every configured drive on this PC (Telegram drives and saved trial drives), oldest first.</summary>
