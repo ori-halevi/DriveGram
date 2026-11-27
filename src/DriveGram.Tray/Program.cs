@@ -139,6 +139,11 @@ static class Program
                 form.DrawToBitmap(bmp, new Rectangle(0, 0, form.Width, form.Height));
                 Directory.CreateDirectory(args[snapDel + 1]);
                 bmp.Save(Path.Combine(args[snapDel + 1], "delete.png"));
+                form.Demo(); // and again with the button armed: red, with white on it
+                Application.DoEvents();
+                using var armed = new Bitmap(form.Width, form.Height);
+                form.DrawToBitmap(armed, new Rectangle(0, 0, form.Width, form.Height));
+                armed.Save(Path.Combine(args[snapDel + 1], "delete-armed.png"));
                 form.Close();
             };
             Application.Run(form);

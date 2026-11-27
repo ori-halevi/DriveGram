@@ -52,6 +52,9 @@ sealed class DailyUploads
     /// that quietly stopped existing is worse than no cap at all.</summary>
     public string? LoadFailed { get; private set; }
 
+    /// <summary>The message above, handed over once (so it is said to the user and not said again).</summary>
+    public string? TakeLoadFailed() { var it = LoadFailed; LoadFailed = null; return it; }
+
     public DailyUploads()
     {
         try
@@ -99,12 +102,25 @@ sealed class DailyUploads
     /// </summary>
     void Trim()
     {
-        long now = SlotOf(Clock());
-        var gone = _s.Slots.Keys.Where(k => !long.TryParse(k, out var slot) || slot < now - Slots + 1 || slot > now).ToList();
-        foreach (var k in gone) _s.Slots.Remove(k);
-        if (gone.Count > 0)
+        long now = SlotOf(Clock()), oldest = now - Slots + 1;
+        int dropped = 0, moved = 0;
+        foreach (var key in _s.Slots.Keys.ToList())
         {
-            Log.Warn($"upload limits: {gone.Count} counted periods were outside the last 24 hours and were dropped");
+            if (!long.TryParse(key, out var slot) || slot < oldest) { _s.Slots.Remove(key); dropped++; }
+            else if (slot > now)
+            {
+                // from the future. Those bytes WERE uploaded, so they are moved to now rather than
+                // thrown away: the clock may simply have been put back (a dual-boot PC, a corrected
+                // clock), and what was counted must not vanish from the count.
+                var bytes = _s.Slots[key];
+                _s.Slots.Remove(key);
+                _s.Slots[now.ToString()] = _s.Slots.GetValueOrDefault(now.ToString()) + bytes;
+                moved++;
+            }
+        }
+        if (dropped + moved > 0)
+        {
+            Log.Warn($"upload limits: {dropped} counted periods left the last 24 hours, {moved} came from a clock that has since moved");
             _dirty = true;
         }
     }
@@ -120,8 +136,11 @@ sealed class DailyUploads
     public bool CapReached => _s.CapGb > 0 && !Lifted && RecentBytes >= Gb(_s.CapGb);
 
     /// <summary>The user let the uploads through, and that is still in force (at most one window long).</summary>
-    bool Lifted => _s.CapLifted
-        && new DateTimeOffset(Clock()).ToUnixTimeSeconds() - _s.CapLiftedAt < 24 * 3600;
+    bool Lifted => _s.CapLifted && Seconds(Clock()) - _s.CapLiftedAt < 24 * 3600;
+
+    /// <summary>The clock as plain seconds. (DateTimeOffset would read a clock that says nothing about
+    /// its kind as local time, and the lift would last an hour more or less than a day.)</summary>
+    static long Seconds(DateTime t) => (long)(t - DateTime.UnixEpoch).TotalSeconds;
 
     /// <summary>
     /// When the count will fall back under the cap by itself, if nothing more goes up: the moment the
@@ -169,7 +188,7 @@ sealed class DailyUploads
     public void LiftCap()
     {
         _s.CapLifted = true;
-        _s.CapLiftedAt = new DateTimeOffset(Clock()).ToUnixTimeSeconds();
+        _s.CapLiftedAt = Seconds(Clock());
         Save();
     }
 
@@ -196,6 +215,9 @@ sealed class DailyUploads
         if (_dirty && Environment.TickCount64 - _savedAt > 30_000) Save();
 
         long recent = _s.Slots.Values.Sum();
+        // "upload anyway" lasts at most one window. When it runs out with the count still above the cap,
+        // the uploads stop again — and that must be said, not just happen.
+        if (_s.CapLifted && !Lifted) { _s.CapLifted = false; _s.CapTold = false; _dirty = true; }
         // under the limit again: the notice and the cap are armed for the next rise, and "upload anyway" is over
         if (_s.CapGb > 0 && recent < Gb(_s.CapGb) && (_s.CapTold || _s.CapLifted)) { _s.CapTold = _s.CapLifted = false; Save(); }
         if (_s.AlertGb > 0 && recent < Gb(_s.AlertGb) && (_s.Alerted || _s.AboutToTold)) { _s.Alerted = _s.AboutToTold = false; Save(); }

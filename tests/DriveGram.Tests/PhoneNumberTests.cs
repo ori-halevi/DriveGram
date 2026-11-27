@@ -9,7 +9,8 @@ namespace DriveGram.Tests;
 /// </summary>
 public sealed class PhoneNumberTests
 {
-    const string Il = "972", Uk = "44", Us = "1";
+    static Country Of(string iso) => Countries.Find(iso) ?? throw new Xunit.Sdk.XunitException($"no {iso}");
+    static string Local(string typed, string iso) => PhoneBox.LocalDigits(typed, Of(iso));
 
     [Theory]
     // written as it is dialled at home, with the leading zero and whatever separators
@@ -30,31 +31,51 @@ public sealed class PhoneNumberTests
     // letters and signs are not digits
     [InlineData("tel: 050-123-4567", "501234567")]
     public void ANumberIsReadAsItWasMeant(string typed, string expected) =>
-        Assert.Equal(expected, PhoneBox.LocalDigits(typed, Il));
+        Assert.Equal(expected, Local(typed, "IL"));
+
+    [Fact]
+    public void ANumberThatBeginsWithItsOwnCountrysCodeIsLeftWhole()
+    {
+        // every Kazakh number begins with 7, and the country's code IS +7: taking it off would send the
+        // code to a different number altogether
+        Assert.Equal("7012345678", Local("701 234 5678", "KZ"));
+        Assert.Equal("7012345678", Local("+7 701 234 5678", "KZ"));
+        // Italian mobiles begin with 39, like the country's code
+        Assert.Equal("3912345678", Local("391 234 5678", "IT"));
+        // and a country whose numbers are shorter than its own code is long (the Faroes: +298, 6 digits)
+        Assert.Equal("298123", Local("298123", "FO"));
+    }
+
+    [Fact]
+    public void ItalyKeepsTheZeroItIsDialledWith()
+    {
+        // Italy is dialled from abroad WITH the zero of its city codes: +39 06 1234 5678
+        Assert.Equal("0612345678", Local("06 1234 5678", "IT"));
+        Assert.Equal("0612345678", Local("+39 06 1234 5678", "IT"));
+    }
+
+    [Fact]
+    public void RussiaAndKazakhstanMayWriteTheirEightInstead()
+    {
+        // at home a long-distance call there starts with 8 where the rest of the world writes +7
+        Assert.Equal("9161234567", Local("8 916 123 4567", "RU"));
+        Assert.Equal("7012345678", Local("8 701 234 5678", "KZ"));
+    }
 
     [Fact]
     public void OnlyTheFirstZeroIsTheWayItIsDialledAtHome()
     {
         // the zeros inside the number are part of it; only the one in front is the home prefix
-        Assert.Equal("500123456", PhoneBox.LocalDigits("050-0123456", Il));
-        Assert.Equal("5012345670", PhoneBox.LocalDigits("0501234567-0", Il));
-    }
-
-    [Fact]
-    public void ACountryCodeAtTheFrontIsOnlyDroppedWhenAWholeNumberIsLeftAfterIt()
-    {
-        // a British number that happens to start with the country's own code, and is too short to be one
-        Assert.Equal("441234", PhoneBox.LocalDigits("441234", Uk));
-        // and a real one, where it is the code
-        Assert.Equal("7911123456", PhoneBox.LocalDigits("+44 7911 123456", Uk));
+        Assert.Equal("500123456", Local("050-0123456", "IL"));
+        Assert.Equal("5012345670", Local("0501234567-0", "IL"));
     }
 
     [Fact]
     public void ANumberCannotGrowBeyondWhatAPhoneNumberIs()
     {
-        // E.164: 15 digits in all, the calling code included — a pasted page of digits is cut, not sent
-        Assert.Equal(15 - Il.Length, PhoneBox.LocalDigits(new string('5', 40), Il).Length);
-        Assert.Equal(15 - Us.Length, PhoneBox.LocalDigits(new string('5', 40), Us).Length);
+        // E.164: 15 digits in all, the calling code included
+        Assert.Equal(15 - 3, Local(new string('5', 40), "IL").Length);
+        Assert.Equal(15 - 1, Local(new string('5', 40), "US").Length);
     }
 
     [Theory]

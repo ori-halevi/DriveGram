@@ -50,8 +50,8 @@ public sealed class UploadCapTests : IDisposable
     /// <summary>One turn of the tray's timer, with a drive that uploaded this much since the last one.</summary>
     static string? Tick(DailyUploads d, object drive, long uploaded = 0)
     {
-        d.Tick([(drive, 0L)], 0);
-        return d.Tick([(drive, uploaded)], 0);
+        var first = d.Tick([(drive, 0L)], 0); // the first turn only learns where the drive's counter is
+        return d.Tick([(drive, uploaded)], 0) ?? first;
     }
 
     [Fact]
@@ -93,12 +93,21 @@ public sealed class UploadCapTests : IDisposable
     [Fact]
     public void AClockThatWasAheadCannotHoldTheUploadsForEver()
     {
-        // the PC's clock was days ahead when these bytes were counted; it has since been corrected
+        // the PC's clock was days ahead when these bytes were counted; it has since been corrected.
+        // They were really uploaded, so they still count — but from NOW, so they leave within a day
+        // instead of waiting three days to stop holding every upload back.
         Seed(5, (TimeSpan.FromDays(-3), 10 * Gb), (TimeSpan.FromHours(1), 1 * Gb));
         var daily = new DailyUploads();
-        Assert.Equal(1 * Gb, daily.RecentBytes); // the ones from the future are gone, not waiting to expire
-        Assert.False(daily.CapReached);
-        Assert.Null(daily.CapFreesAt());
+        Assert.Equal(11 * Gb, daily.RecentBytes);
+        Assert.True(daily.CapReached);
+        var frees = daily.CapFreesAt();
+        Assert.NotNull(frees);
+        Assert.InRange((frees!.Value - _now.ToLocalTime()).TotalHours, 23.5, 24.1);
+
+        var later = new DailyUploads();
+        _now = _now.AddHours(25);
+        Tick(later, new object());
+        Assert.False(later.CapReached); // and a day later nothing holds the uploads back
     }
 
     [Fact]
@@ -134,14 +143,22 @@ public sealed class UploadCapTests : IDisposable
     {
         Seed(5, (TimeSpan.FromMinutes(10), 6 * Gb));
         var daily = new DailyUploads();
+        var drive = new object();
         daily.LiftCap();
         Assert.False(daily.CapReached);
 
-        // a day later the count is still above the cap (new uploads kept it there): the cap is back
-        _now = _now.AddHours(25);
-        var drive = new object();
-        Tick(daily, drive, 6 * Gb);
+        // the uploads go on and keep the count above the cap the whole time, so the count never falls
+        // back under it — only the 24 hours of "upload anyway" running out can bring the cap back
+        string? said = null;
+        for (int hour = 1; hour <= 25; hour++)
+        {
+            _now = _now.AddHours(1);
+            said ??= Tick(daily, drive, 6 * Gb);
+            if (hour < 24) Assert.False(daily.CapReached); // still let through
+        }
         Assert.True(daily.CapReached);
+        // and the user is told the uploads stopped again, instead of them stopping silently
+        Assert.NotNull(said);
     }
 
     [Fact]
@@ -170,11 +187,25 @@ public sealed class UploadCapTests : IDisposable
     }
 
     [Fact]
+    public void SavingKeepsTheCopyThatWasThereBefore()
+    {
+        // what the fallback above relies on: every save leaves the file it replaced beside it
+        Seed(0, (TimeSpan.FromHours(1), 1 * Gb));
+        var daily = new DailyUploads();
+        daily.SetLimits(0, 7);
+        daily.SetLimits(0, 9);
+        Assert.True(File.Exists(Path_ + ".bak"), "a save left no copy behind");
+        Assert.Contains("\"CapGb\":7", File.ReadAllText(Path_ + ".bak"));
+        Assert.Contains("\"CapGb\":9", File.ReadAllText(Path_));
+    }
+
+    [Fact]
     public void ADamagedFileDoesNotQuietlyCostTheUserTheirCap()
     {
-        Seed(7, (TimeSpan.FromHours(1), 1 * Gb));
-        new DailyUploads().Flush();
-        File.Copy(Path_, Path_ + ".bak", overwrite: true);
+        Seed(0, (TimeSpan.FromHours(1), 1 * Gb));
+        var saved = new DailyUploads();
+        saved.SetLimits(0, 7); // writes the file
+        saved.SetLimits(0, 7); // and again, so the copy beside it holds a whole file too
         File.WriteAllText(Path_, "{ this is not json");
 
         var daily = new DailyUploads();

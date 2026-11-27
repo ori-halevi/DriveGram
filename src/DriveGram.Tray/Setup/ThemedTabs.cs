@@ -144,8 +144,9 @@ sealed class ThemedTabs : Panel
         {
             var g = e.Graphics;
             using (var back = new SolidBrush(Theme.Surface)) g.FillRectangle(back, ClientRectangle);
-            // sized from the text beside it, so the pair keeps its proportions when Windows scales text
-            using var icons = new Font(IconFamily, Math.Max(12f, Theme.Body.Height * 0.78f), GraphicsUnit.Pixel);
+            // sized from the text beside it (Font is the one this strip really wears, so the pair keeps
+            // its proportions when Windows is set to bigger text)
+            using var icons = new Font(IconFamily, Math.Max(12f, Font.Height * 0.78f), GraphicsUnit.Pixel);
             const int bar = 3;
             for (int i = 0; i < _owner._items.Count; i++)
             {

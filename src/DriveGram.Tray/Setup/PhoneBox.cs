@@ -83,18 +83,35 @@ sealed class PhoneBox : UserControl
     /// "+972 50 123 4567", "00972…" (the old way of writing +), and "972501234567" (the whole number with
     /// no +, which used to come out as +972972501234567 and was sent to Telegram like that).
     /// </summary>
-    string LocalDigits() => LocalDigits(_local.Text, _chosen.Dial);
+    string LocalDigits() => LocalDigits(_local.Text, _chosen);
 
-    /// <summary>The same, for any text and calling code (and so checkable without a window).</summary>
-    internal static string LocalDigits(string text, string dial)
+    /// <summary>
+    /// The same, for any text and country (and so checkable without a window).
+    ///
+    /// The hard case is a number that BEGINS with its own country's code and is not meant to: every
+    /// Kazakh number starts with 7 and the code is +7, Italian mobiles start with 39 and the code is +39.
+    /// The code is therefore taken off only when what was typed is too long to be a national number at
+    /// all (someone wrote the whole international number without a +), never when it could be one.
+    /// </summary>
+    internal static string LocalDigits(string text, Country country)
     {
+        var dial = country.Dial;
         var digits = Digits(text);
-        if (digits.StartsWith("00", StringComparison.Ordinal)) digits = digits[2..];
-        // the country's own code typed again at the front, with a whole number still left after it
-        if (digits.Length >= dial.Length + 7 && digits.StartsWith(dial, StringComparison.Ordinal))
+        // "+972…", or "00972…" (the old way of writing it): the user SAID the front is the country's code
+        bool international = text.TrimStart().StartsWith('+');
+        if (digits.StartsWith("00", StringComparison.Ordinal)) { digits = digits[2..]; international = true; }
+        // with no "+" it is a guess, and it is made only when what was typed is longer than any national
+        // number can be — otherwise a Kazakh 701… or an Italian 391… would lose its own first digits
+        const int LongestNational = 11;
+        if ((international || digits.Length > LongestNational)
+            && digits.Length >= dial.Length + 4 && digits.StartsWith(dial, StringComparison.Ordinal))
             digits = digits[dial.Length..];
-        if (digits.StartsWith('0')) digits = digits[1..]; // the trunk prefix, dropped once (not every zero)
-        int room = Math.Max(4, 15 - dial.Length); // E.164: 15 digits in all
+        // Russia and Kazakhstan dial a long-distance call with 8 where the rest of the world writes +7
+        if (dial == "7" && digits.Length == 11 && digits.StartsWith('8')) digits = digits[1..];
+        // the 0 of dialling at home, dropped once (not every zero). Italy is the country that keeps it:
+        // its numbers are dialled from abroad WITH the zero, and dropping it would break them.
+        else if (digits.StartsWith('0') && country.Iso != "IT") digits = digits[1..];
+        int room = 15 - dial.Length; // E.164: 15 digits in all
         return digits.Length > room ? digits[..room] : digits;
     }
 
@@ -115,6 +132,7 @@ sealed class PhoneBox : UserControl
             var digits = Digits(value);
             // "00972…" is the old way of writing "+972…"; no calling code begins with a zero
             if (digits.StartsWith("00", StringComparison.Ordinal)) digits = digits[2..];
+            // a whole number is given here, so its front IS the country's code
             var country = Countries.OfNumber(digits);
             if (country is not null)
             {
@@ -125,6 +143,7 @@ sealed class PhoneBox : UserControl
             _local.Text = digits;
             _filling = false;
             ShowCountry();
+            Changed?.Invoke(); // a number put here from outside is a change like any other
         }
     }
 
@@ -191,7 +210,7 @@ sealed class PhoneBox : UserControl
             MinimizeBox = MaximizeBox = false;
             ShowInTaskbar = false;
             ClientSize = new Size(360, 430);
-            _search.PlaceholderText = L.T("חיפוש מדינה או קידומת…", "Search a country or a code…");
+            _search.PlaceholderText = ""; // the line above the box already says what to type
             _list.DrawItem += DrawRow;
             // one click chooses: this list exists to pick one country, and waiting for a second click (or
             // for Enter after a click) is the kind of thing nobody guesses

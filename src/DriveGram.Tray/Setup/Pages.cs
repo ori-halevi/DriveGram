@@ -233,8 +233,8 @@ sealed class AccountPage : WizardPage
         if (_only) Ctx.UseAccount(_choices[0].Account);
         if (_choices.Count == 0 && _list.Controls.Count == 0)
             _list.Controls.Add(Theme.Label(L.T(
-                "עוד לא מחובר שום חשבון טלגרם במחשב הזה. סגור את החלון הזה, ובכרטיסיית \"חשבונות\" לחץ \"הוסף חשבון טלגרם…\".",
-                "No Telegram account is connected on this PC yet. Close this window and, on the \"Accounts\" tab, press \"Add a Telegram account…\"."),
+                "עוד לא מחובר שום חשבון טלגרם במחשב הזה. לחץ \"ביטול\", ובכרטיסיית \"חשבונות\" לחץ \"הוסף חשבון טלגרם…\".",
+                "No Telegram account is connected on this PC yet. Press \"Cancel\" and, on the \"Accounts\" tab, press \"Add a Telegram account…\"."),
                 Theme.Body, Theme.Text, 620));
         Changed(_choices.Any(c => c.Button.Checked));
         return Task.CompletedTask;
@@ -259,7 +259,7 @@ sealed class LoginPage : WizardPage
         Text = L.T("משתמשים בפרטי ההתחברות לטלגרם (API) ששמרת קודם  ·  לשנות אותם", "Using the Telegram sign-in details (API) you saved before  ·  change them"),
         AutoSize = true, LinkColor = Theme.Accent, Font = Theme.Small, Margin = new Padding(0, 0, 0, 10), Visible = false,
     };
-    readonly Panel _account = Theme.Card(Color.FromArgb(0xEC, 0xF7, 0xEE), Color.FromArgb(0xB7, 0xDF, 0xC0));
+    readonly Panel _account = Theme.Card(Slot.InfoBack, Slot.InfoBorder);
     readonly Label _accountText = Theme.Label("", Theme.Body, Theme.Text, 600);
     readonly FlowLayoutPanel _signIn = Theme.Column();
     readonly RadioButton _byQr = MethodButton(L.T("סריקת קוד QR (מומלץ)", "Scan a QR code (recommended)"), true);
@@ -275,6 +275,7 @@ sealed class LoginPage : WizardPage
 
     readonly FlowLayoutPanel _phone = Theme.Column();
     readonly PhoneBox _phoneBox = new(260);
+    readonly Label _willSend = Theme.Label("", Theme.Small, Theme.Muted, 620);
     readonly Button _sendCode = Theme.Primary(L.T("שלח קוד", "Send code"));
     readonly FlowLayoutPanel _codeRow = Theme.Row();
     readonly LinkLabel _changeNumber = new()
@@ -308,7 +309,7 @@ sealed class LoginPage : WizardPage
     static RadioButton MethodButton(string text, bool on)
     {
         var rb = new RadioButton { Text = text, AutoSize = true, Checked = on, Appearance = Appearance.Button, FlatStyle = FlatStyle.Flat, Padding = new Padding(10, 4, 10, 4) };
-        rb.FlatAppearance.CheckedBackColor = Color.FromArgb(0xE3, 0xF2, 0xFB);
+        rb.FlatAppearance.CheckedBackColor = Theme.AccentSoft; // kept in step by Theme.Apply
         rb.FlatAppearance.BorderColor = Theme.Border;
         rb.Margin = new Padding(0);
         return rb;
@@ -366,6 +367,15 @@ sealed class LoginPage : WizardPage
         _phone.Controls.Add(Theme.Label(L.T("מספר הטלפון של החשבון (בחר מדינה, והקלד את המספר בלי ה־0 שבהתחלה):",
             "The account's phone number (choose the country, then type the number without its leading 0):"), Theme.Small, Theme.Muted));
         _phone.Controls.Add(phoneRow);
+        _phone.Controls.Add(_willSend);
+        // a number can be written in many shapes; this is the one Telegram will be asked about, so a
+        // number that came out wrong is seen BEFORE a code is sent somewhere else
+        _phoneBox.Changed += () =>
+        {
+            var number = _phoneBox.Number;
+            _willSend.Text = _phoneBox.LocalLength < 5 ? ""
+                : L.T($"הקוד יישלח למספר {L.Ltr(number)}", $"The code goes to {L.Ltr(number)}");
+        };
         _phone.Controls.Add(Theme.Label(L.T(
             "הקוד נשלח לאפליקציית טלגרם עצמה, לצ'אט בשם \"Telegram\" עם ✓ כחול (בטלפון או במחשב). בדרך כלל הוא לא מגיע ב־SMS. כל שליחה חדשה מבטלת את הקוד הקודם.",
             "The code arrives inside the Telegram app, in the chat named \"Telegram\" with a blue ✓ (on your phone or computer), usually not by SMS. Each new code cancels the previous one."),
@@ -768,7 +778,7 @@ sealed class DrivePage : WizardPage
     readonly FlowLayoutPanel _connected = Theme.Column();
     readonly FlowLayoutPanel _choices = Theme.Column();
     readonly FlowLayoutPanel _form = Theme.Column();
-    readonly Panel _vanished = Theme.Card(Color.FromArgb(0xFD, 0xEC, 0xEA), Color.FromArgb(0xE5, 0x9A, 0x92));
+    readonly Panel _vanished = Theme.Card(Slot.DangerBack, Slot.DangerBorder);
     readonly CheckBox _vanishedOk = new() { AutoSize = true, Text = L.T("הבנתי. אפשר להמשיך.", "I understand. Continue.") };
     readonly Label _intro = Theme.Label("", Theme.Body, Theme.Text, 640);
     readonly Label _nameLabel = Theme.Label(L.T("שם הכונן:", "Drive name:"), Theme.Small, Theme.Muted);
@@ -1522,7 +1532,7 @@ sealed class DrivePage : WizardPage
         return score switch
         {
             <= 0 => (1, pw.Length < 10 ? L.T("קצרה מדי", "too short") : L.T("חלשה", "weak"), Theme.Error),
-            1 => (2, L.T("בינונית", "fair"), Color.FromArgb(0xE8, 0x8F, 0x1A)),
+            1 => (2, L.T("בינונית", "fair"), Theme.Attention),
             2 or 3 => (3, L.T("טובה", "good"), Theme.Accent),
             _ => (4, L.T("חזקה מאוד", "very strong"), Theme.Success),
         };

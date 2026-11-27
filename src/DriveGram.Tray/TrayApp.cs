@@ -1807,6 +1807,10 @@ sealed class TrayApp : ApplicationContext, IMainHost
         var running = _drives.Where(d => d.Session is not null).ToList(); // also a drive finishing its uploads before it stops
         long waiting = 0;
         foreach (var d in running) try { waiting += d.Session!.Engine.BytesToUpload(); } catch { }
+        // a damaged file cost the user their limits: a cap that quietly stopped existing is worse than
+        // no cap at all, so it is said once and the Settings tab is one click away
+        if (_daily.TakeLoadFailed() is { } trouble && !_quitting)
+            Balloon(L.T("תקרת ההעלאה", "The upload cap"), trouble, ToolTipIcon.Warning, OpenSettings);
         string? say = null;
         try { say = _daily.Tick(running.Select(d => ((object)d.Session!, d.Session!.Status.BytesUploaded)), waiting); }
         catch (Exception ex) { Log.Warn($"daily uploads: {ex.Message}"); }

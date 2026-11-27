@@ -79,6 +79,9 @@ sealed class MainForm : Form
         _transfers.Start();
         _timer.Tick += (_, _) => Tick();
         _timer.Start();
+        // while the page is still alive: a number typed and not left is only text in its box, and a
+        // disposed box has no text at all
+        FormClosing += (_, _) => _settings.Commit(force: true);
         FormClosed += (_, _) => { _timer.Dispose(); _transfers.Close(); };
         Theme.Apply(this);
     }

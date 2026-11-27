@@ -93,6 +93,10 @@ sealed class DeleteDriveForm : Form
         Shown += (_, _) => cancel.Focus();
     }
 
+    /// <summary>For the screenshots: the state where the button is really armed (red, white on it) — the
+    /// one that cannot be checked by eye otherwise, because it needs the box ticked and the name typed.</summary>
+    internal void Demo() { _understand.Checked = true; _typed.Text = _name; }
+
     void UpdateState()
     {
         bool ok = _understand.Checked && string.Equals(_typed.Text.Trim(), _name, StringComparison.Ordinal);

@@ -110,8 +110,9 @@ sealed class SettingsPage : UserControl
         _capOn.CheckedChanged += (_, _) => { _cap.Enabled = _capOn.Checked; Queue(); };
         _alert.ValueChanged += (_, _) => Queue();
         _cap.ValueChanged += (_, _) => Queue();
-        _alert.TextChanged += (_, _) => Queue();
-        _cap.TextChanged += (_, _) => Queue();
+        // NOT on every keystroke: the "2" of "200" would become the cap for a second, pausing the
+        // uploads. The box tells us when the number is really the number (leaving it, Enter, the arrows),
+        // and a window being closed saves what is typed in it (Commit(force: true) below).
         _save.Tick += (_, _) => { _save.Stop(); Store(); };
         Disposed += (_, _) => { Commit(); _save.Dispose(); };
         Reload();
@@ -149,9 +150,9 @@ sealed class SettingsPage : UserControl
 
     /// <summary>Save a change that is still waiting its moment (the page is going away, or about to be
     /// filled again): without this, ticking the cap and closing the window at once loses the tick.</summary>
-    public void Commit()
+    public void Commit(bool force = false)
     {
-        if (!_save.Enabled) return;
+        if (!force && !_save.Enabled) return;
         _save.Stop();
         Store();
     }

@@ -305,8 +305,11 @@ static class Theme
         var w = Of(c);
         if (back != Slot.None) w.Back = back;
         if (fore != Slot.None) w.Fore = fore;
-        if (back != Slot.None) c.BackColor = Current.Of(back);
-        if (fore != Slot.None) c.ForeColor = Current.Of(fore);
+        // Slot.Fixed means "this colour is its own and no look may touch it" — so it is REMEMBERED and
+        // not painted. (It has no colour of its own; painting it would hand the control Color.Empty,
+        // which in Windows means "take the parent's", and the white on the red button would be lost.)
+        if (back is not (Slot.None or Slot.Fixed)) c.BackColor = Current.Of(back);
+        if (fore is not (Slot.None or Slot.Fixed)) c.ForeColor = Current.Of(fore);
         return c;
     }
 
@@ -359,6 +362,12 @@ static class Theme
             link.DisabledLinkColor = Muted;
         }
         if (root is ListView list) ThemePaint.List(list);
+        // a radio button or check box drawn as a button paints its own "chosen" background
+        if (root is ButtonBase { FlatStyle: FlatStyle.Flat } flat and (RadioButton or CheckBox))
+        {
+            flat.FlatAppearance.CheckedBackColor = AccentSoft;
+            flat.FlatAppearance.BorderColor = Border;
+        }
         foreach (Control child in root.Controls) Apply(child);
         root.Invalidate(true);
         if (root is Form form) ThemePaint.TitleBar(form);

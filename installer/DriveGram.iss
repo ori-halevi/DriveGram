@@ -179,7 +179,8 @@ var
   LookPage: TWizardPage;
   LangBox, ThemeBox: TPanel;
   LangAuto, LangHe, LangEn: TNewRadioButton;
-  LookLight, LookDark, LookRose: TNewRadioButton;
+  LookAuto, LookLight, LookDark, LookRose: TNewRadioButton;
+  WroteLook: Boolean;
 
 function WindowsIsDark: Boolean;
 var Light: Cardinal;
@@ -202,16 +203,32 @@ begin
   Result.ParentBackground := True;
 end;
 
-function MakeRadio(Group: TPanel; Caption: String; Top: Integer): TNewRadioButton;
+{ Left and Width are already in real pixels (Group.Width is); Top is not, like everywhere else here }
+function MakeRadioAt(Group: TPanel; Caption: String; Left, Top, Width: Integer): TNewRadioButton;
 begin
   Result := TNewRadioButton.Create(Group);
   Result.Parent := Group;
   Result.Caption := Caption;
-  Result.Left := ScaleX(8);
+  Result.Left := Left;
   Result.Top := ScaleY(Top);
-  Result.Width := Group.Width - ScaleX(16);
+  Result.Width := Width;
   Result.Height := ScaleY(18);
   Result.Checked := False;
+end;
+
+function MakeRadio(Group: TPanel; Caption: String; Top: Integer): TNewRadioButton;
+begin
+  Result := MakeRadioAt(Group, Caption, ScaleX(8), Top, Group.Width - ScaleX(16));
+end;
+
+{ Windows' own language, to tell "the user answered the language question" from "the dialog just
+  offered what Windows wears anyway" }
+function GetUserDefaultUILanguage: Word;
+  external 'GetUserDefaultUILanguage@kernel32.dll stdcall';
+
+function WindowsIsHebrew: Boolean;
+begin
+  Result := (GetUserDefaultUILanguage and $3FF) = $0D;
 end;
 
 function MakeLabel(Page: TWizardPage; Caption: String; Top: Integer): TNewStaticText;
@@ -227,6 +244,7 @@ begin
 end;
 
 procedure InitializeWizard;
+var Half: Integer;
 begin
   LookPage := CreateCustomPage(wpSelectTasks, CustomMessage('LookTitle'), CustomMessage('LookSubtitle'));
   MakeLabel(LookPage, CustomMessage('LookLanguage'), 0);
@@ -235,14 +253,23 @@ begin
   LangHe := MakeRadio(LangBox, 'עברית', 22);
   LangEn := MakeRadio(LangBox, 'English', 44);
   MakeLabel(LookPage, CustomMessage('LookTheme'), 96);
-  ThemeBox := MakeGroup(LookPage, 116, 68);
-  LookLight := MakeRadio(ThemeBox, CustomMessage('LookLight'), 0);
-  LookDark := MakeRadio(ThemeBox, CustomMessage('LookDark'), 22);
-  LookRose := MakeRadio(ThemeBox, CustomMessage('LookRose'), 44);
-  MakeLabel(LookPage, CustomMessage('LookNote'), 196);
-  { the language keeps following Windows unless the user says otherwise; the look is the one Windows wears }
+  { two by two: four looks in the height of two, so the note below stays on the page }
+  ThemeBox := MakeGroup(LookPage, 116, 46);
+  Half := ThemeBox.Width div 2;
+  LookAuto := MakeRadioAt(ThemeBox, CustomMessage('LookAuto'), ScaleX(8), 0, Half - ScaleX(16));
+  LookLight := MakeRadioAt(ThemeBox, CustomMessage('LookLight'), ScaleX(8), 22, Half - ScaleX(16));
+  LookDark := MakeRadioAt(ThemeBox, CustomMessage('LookDark'), Half, 0, Half - ScaleX(16));
+  LookRose := MakeRadioAt(ThemeBox, CustomMessage('LookRose'), Half, 22, Half - ScaleX(16));
+  MakeLabel(LookPage, CustomMessage('LookNote'), 172);
+  { both questions keep following Windows unless the user says otherwise — the same answer the program
+    itself offers. Only when the user ALREADY answered the language question (the setup language dialog
+    says something else than Windows) is that answer taken as the one they mean. }
   LangAuto.Checked := True;
-  if WindowsIsDark then LookDark.Checked := True else LookLight.Checked := True;
+  if (ActiveLanguage = 'hebrew') <> WindowsIsHebrew then
+  begin
+    if ActiveLanguage = 'hebrew' then LangHe.Checked := True else LangEn.Checked := True;
+  end;
+  LookAuto.Checked := True;
 end;
 
 function SettingsExist: Boolean;
@@ -267,7 +294,8 @@ function ChosenTheme: String;
 begin
   if LookDark.Checked then Result := 'dark'
   else if LookRose.Checked then Result := 'rose'
-  else Result := 'light';
+  else if LookLight.Checked then Result := 'light'
+  else Result := 'auto';
 end;
 
 procedure SaveLookIfFirstInstall;
@@ -280,6 +308,7 @@ begin
   SaveStringToFile(Path, '{' + #13#10 +
     '  "Language": "' + ChosenLanguage + '",' + #13#10 +
     '  "Theme": "' + ChosenTheme + '"' + #13#10 + '}', False);
+  WroteLook := True; { until the install stands: see DeinitializeSetup }
 end;
 
 function NeedsOverlayNames: Boolean;
@@ -474,14 +503,25 @@ begin
   end;
 end;
 
+{ an install that was cancelled or failed must not leave the answers behind: the page is skipped when
+  settings.json exists, so the user would never be asked again }
+procedure DeinitializeSetup;
+begin
+  if WroteLook then
+    DeleteFile(ExpandConstant('{localappdata}\DriveGram\settings.json'));
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var Marker: String;
 begin
-  { the old versions' (one may still be loaded by Explorer until the user signs out): only once the new one
-    is in place and registered, so an install that fails half-way leaves the old one working }
-  { before the files, so a silent install that starts the program right away already has it }
+  { before the files: the steps run ssInstall, then the [Run] entries, then ssPostInstall (measured, not
+    assumed), and a silent install that starts the program right away must already find the answers }
   if CurStep = ssInstall then
     SaveLookIfFirstInstall;
+  if CurStep = ssDone then
+    WroteLook := False; { the install stands, and so does what it wrote }
+  { the old versions' (one may still be loaded by Explorer until the user signs out): only once the new one
+    is in place and registered, so an install that fails half-way leaves the old one working }
   if CurStep = ssPostInstall then
     MoveShellExtensionAside('DriveGramShell-{#AppVersion}.dll');
   if (CurStep = ssPostInstall) and NeedsOverlayNames and not WizardSilent then
