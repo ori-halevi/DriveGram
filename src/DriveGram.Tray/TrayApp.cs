@@ -602,8 +602,10 @@ sealed class TrayApp : ApplicationContext, IMainHost
     /// added in the same sitting, on the same account (each run adds one; the queue continues after it).</summary>
     /// <param name="chooseOther">"Choose another drive of the account": the list of drives, no sign-in.</param>
     /// <param name="freshSignIn">"Sign in with another account" (moving a drive): the sign-in starts signed out.</param>
+    /// <param name="chooseAccount">"Add a drive" with several accounts signed in: the wizard asks which
+    /// account first.</param>
     async Task SetupAsync(DriveController? d, Setup.NextDrive? next = null, List<Setup.NextDrive>? queue = null,
-        bool chooseOther = false, bool freshSignIn = false)
+        bool chooseOther = false, bool freshSignIn = false, bool chooseAccount = false)
     {
         if (_wizard is { IsDisposed: false })
         {
@@ -646,7 +648,8 @@ sealed class TrayApp : ApplicationContext, IMainHost
             : d.MustChooseDrive ? L.T($"DriveGram – בחירת הכונן מחדש ({Ui.DriveTitle(d.State)})", $"DriveGram – choose the drive again ({d.State.DisplayName})")
             : L.T($"DriveGram – חיבור הכונן מחדש ({Ui.DriveTitle(d.State)})", $"DriveGram – connecting the drive again ({d.State.DisplayName})");
         bool signedInHere, driveVanished;
-        using (_wizard = new Setup.SetupWizard(state, isNew, originalChannels, next, queue, title: title, freshSignIn: freshSignIn))
+        using (_wizard = new Setup.SetupWizard(state, isNew, originalChannels, next, queue, title: title,
+                   freshSignIn: freshSignIn, chooseAccount: chooseAccount))
         {
             result = _wizard.ShowDialog();
             signedInHere = _wizard.Context.SignedInHere;
@@ -1604,6 +1607,14 @@ sealed class TrayApp : ApplicationContext, IMainHost
         Log.Info("tray: a Telegram account was added");
         // straight on to its drives: the ones it already has, or a new one
         await AddDrivesAsync(added, createNew: false);
+    }
+
+    /// <summary>"Add a drive" with no account named: the wizard asks which one (and skips the question
+    /// when only one account is signed in here).</summary>
+    public async Task AddDriveChoosingAccountAsync()
+    {
+        await SetupAsync(null, chooseAccount: true);
+        _main?.RefreshAll();
     }
 
     /// <summary>Drives for one account: a new one, or the account's existing drives to connect (several at once).</summary>

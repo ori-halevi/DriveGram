@@ -82,13 +82,10 @@ sealed class TransfersForm : Form
     int _localTotal; // files found (the list shows at most 2,000)
     readonly ListSort _upSort, _localSort;
     readonly Dictionary<string, long> _upRank = [], _localRank = [];
-    // the help (notes and the legend of Explorer's marks) under each list: open or closed, the same in both tabs
-    static bool _helpOpen;
     readonly UiPrefs _prefs = UiPrefs.Load();
     bool _settingFilter;
     readonly System.Windows.Forms.Timer _searchWait = new() { Interval = 250 };
     bool _scannedOnce;
-    readonly List<(LinkLabel Link, Control[] Content)> _helps = [];
 
     readonly ImageList _icons = new() { ImageSize = new Size(18, 18), ColorDepth = ColorDepth.Depth32Bit };
     readonly System.Windows.Forms.Timer _timer = new() { Interval = 1000 };
@@ -192,31 +189,26 @@ sealed class TransfersForm : Form
         return null;
     }
 
-    /// <summary>The help under a list: a link that opens or closes the notes and the legend (closed, the
-    /// list has the room).</summary>
-    Control Help(params Control[] content)
+    /// <summary>
+    /// The strip under a list: what the marks in Explorer mean, and one short line about this list. Always
+    /// there — help nobody opens is help nobody reads — and short enough to leave the list its room; the
+    /// full explanation of every item comes when the mouse rests on it.
+    /// </summary>
+    Control Help(Control note, Control legend)
     {
         var box = new FlowLayoutPanel
         {
             Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(8, 4, 8, 6),
+            FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(12, 7, 12, 8),
         };
-        var link = new LinkLabel { AutoSize = true, Font = Theme.Small, LinkColor = Theme.AccentDark, Margin = new Padding(0, 0, 0, 2) };
-        link.LinkClicked += (_, _) => { _helpOpen = !_helpOpen; ShowHelp(); };
-        box.Controls.Add(link);
-        foreach (var c in content) { c.Dock = DockStyle.None; c.Margin = new Padding(0, 2, 0, 2); box.Controls.Add(c); }
-        _helps.Add((link, content));
-        ShowHelp();
-        return box;
-    }
-
-    void ShowHelp()
-    {
-        foreach (var (link, content) in _helps)
+        box.Wears(Slot.Surface);
+        box.Paint += (_, e) =>
         {
-            link.Text = _helpOpen ? L.T("הסתר עזרה ▴", "Hide help ▴") : L.T("עזרה ומקרא הסימנים ▾", "Help and the marks' legend ▾");
-            foreach (var c in content) c.Visible = _helpOpen;
-        }
+            using var pen = new Pen(Theme.Border);
+            e.Graphics.DrawLine(pen, 0, 0, box.Width, 0); // a line of its own, so it is not read as a row
+        };
+        foreach (var c in new[] { legend, note }) { c.Dock = DockStyle.None; c.Margin = new Padding(0, 2, 0, 2); box.Controls.Add(c); }
+        return box;
     }
 
     static ToolStripTextBox SearchBox()
@@ -342,9 +334,12 @@ sealed class TransfersForm : Form
             _ => item.SubItems[col].Text,
         }, item => _upRank.TryGetValue(item.Name, out var r) ? r : long.MaxValue); // a third click: the queue's order again
         var upNote = Theme.Label(L.T(
+            "השהיה שומרת את הקובץ במחשב הזה עד שתמשיך.  ·  \"בטל\" מוחק קובץ חדש, או מחזיר קובץ ששונה לגרסה ששמורה בטלגרם.",
+            "Pausing keeps the file on this PC until you resume.  ·  \"Cancel\" deletes a new file, or brings a changed one back to the version saved in Telegram."),
+            Theme.Small, Theme.Muted, 860);
+        _legendTip.SetToolTip(upNote, L.T(
             "השהיה: קבצים שעוד לא עלו מחכים במחשב הזה. אם מעתיקים עוד לכונן בזמן ההשהיה, ההעתקה תיעצר אם ייגמר המקום במחשב. \"בטל\" על קובץ חדש מוחק אותו מהכונן לצמיתות (הוא עוד לא שמור בטלגרם); על קובץ ששונה כאן, מבטל את השינוי ומחזיר אותו לגרסה השמורה.",
-            "Paused: files not uploaded yet wait on this PC. Copying more into the drive while paused stops if this PC runs out of space. \"Cancel\" on a new file deletes it from the drive for good (it is not saved in Telegram yet); on a file changed here, it drops the change and brings back the saved version."),
-            Theme.Small, Theme.Muted, 740);
+            "Paused: files not uploaded yet wait on this PC. Copying more into the drive while paused stops if this PC runs out of space. \"Cancel\" on a new file deletes it from the drive for good (it is not saved in Telegram yet); on a file changed here, it drops the change and brings back the saved version."));
         _upEmpty.Dock = DockStyle.Top;
         _upEmpty.Padding = new Padding(10, 14, 10, 0);
         _upEmpty.Visible = false;
@@ -398,9 +393,12 @@ sealed class TransfersForm : Form
             _ => item.SubItems[col].Text,
         }, item => _localRank.TryGetValue(item.Name, out var k) ? k : long.MaxValue);
         var localNote = Theme.Label(L.T(
+            "\"הכן\" מוריד קובץ שלם ושומר אותו כאן עד שתפנה אותו — הוא ייפתח מיד, גם בלי אינטרנט.  ·  אפשר גם בלחיצה ימנית על הקובץ בסייר הקבצים.",
+            "\"Prepare\" downloads a whole file and keeps it here until you free it — it opens at once, even offline.  ·  Also by right-clicking the file in Explorer."),
+            Theme.Small, Theme.Muted, 860);
+        _legendTip.SetToolTip(localNote, L.T(
             "\"הכן\" מוריד את כל הקובץ עכשיו ושומר אותו במחשב עד שתפנה אותו, למשל סרט לערב: הוא ייפתח מיד, גם בלי אינטרנט. גם בסייר הקבצים: לחיצה ימנית על קובץ בכונן ← \"הצג אפשרויות נוספות\" ← \"הכן במחשב הזה (הורד את כולו)\". אחרי \"פנה\" נשארות רק התמונה הממוזערת והפרטים (כמו אורך סרטון), כדי שהתיקייה תיפתח בלי הורדות.",
-            "\"Prepare\" downloads the whole file now and keeps it on this PC until you free it, e.g. a movie for tonight: it opens at once, even offline. In Explorer too: right-click a file in the drive → \"Show more options\" → \"Prepare on this PC (download all of it)\". After \"Free\", only the thumbnail and the details (like a video's length) stay, so the folder opens without downloads."),
-            Theme.Small, Theme.Muted, 740);
+            "\"Prepare\" downloads the whole file now and keeps it on this PC until you free it, e.g. a movie for tonight: it opens at once, even offline. In Explorer too: right-click a file in the drive → \"Show more options\" → \"Prepare on this PC (download all of it)\". After \"Free\", only the thumbnail and the details (like a video's length) stay, so the folder opens without downloads."));
         _localState.Dock = DockStyle.Bottom;
         _localState.Padding = new Padding(8, 4, 8, 2);
         _localEmpty.Dock = DockStyle.Top;

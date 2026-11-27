@@ -32,48 +32,37 @@ static class ThemePaint
     }
 
     // ── lists ────────────────────────────────────────────────────────────────
+    const int LvmGetHeader = 0x101F;
+
+    [DllImport("user32.dll")]
+    static extern IntPtr SendMessage(IntPtr window, int message, IntPtr w, IntPtr l);
+
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+    static extern int SetWindowTheme(IntPtr window, string? app, string? id);
+
     /// <summary>
-    /// A list in the current look. Windows paints a list's column headers itself, in its own grey, which
-    /// a dark window cannot live with — so in a dark look we paint the headers (the rows themselves are
-    /// still drawn by Windows, which keeps selection, check boxes and icons exactly as people expect).
+    /// A list in the current look. The rows' colours are ours, but the column headers are a little window
+    /// of Windows' own inside the list: it paints them, and only its "dark mode" styles make them dark.
+    /// (Painting them ourselves was tried first and came out in pieces — in a Hebrew, mirrored list Windows
+    /// repaints only the part it believes changed.)
     /// </summary>
     public static void List(ListView list)
     {
         list.BackColor = Theme.InputBack;
         list.ForeColor = Theme.Text;
-        bool want = Theme.IsDark;
-        if (list.OwnerDraw == want) { list.Invalidate(); return; }
-        list.OwnerDraw = want;
-        if (!want)
+        void Dress()
         {
-            list.DrawColumnHeader -= Header;
-            list.DrawItem -= AsUsual;
-            list.DrawSubItem -= AsUsualSub;
+            if (!list.IsHandleCreated) return;
+            try
+            {
+                SetWindowTheme(list.Handle, Theme.IsDark ? "DarkMode_Explorer" : "Explorer", null);
+                var header = SendMessage(list.Handle, LvmGetHeader, IntPtr.Zero, IntPtr.Zero);
+                if (header != IntPtr.Zero) SetWindowTheme(header, Theme.IsDark ? "DarkMode_ItemsView" : "ItemsView", null);
+            }
+            catch (Exception ex) { Log.Debug($"theme: list: {ex.Message}"); }
+            list.Invalidate(true);
         }
-        else
-        {
-            list.DrawColumnHeader += Header;
-            list.DrawItem += AsUsual;
-            list.DrawSubItem += AsUsualSub;
-        }
-        list.Invalidate();
-    }
-
-    static void AsUsual(object? sender, DrawListViewItemEventArgs e) => e.DrawDefault = true;
-    static void AsUsualSub(object? sender, DrawListViewSubItemEventArgs e) => e.DrawDefault = true;
-
-    static void Header(object? sender, DrawListViewColumnHeaderEventArgs e)
-    {
-        using var back = new SolidBrush(Theme.Surface);
-        e.Graphics.FillRectangle(back, e.Bounds);
-        using var line = new Pen(Theme.Border);
-        e.Graphics.DrawLine(line, e.Bounds.Right - 1, e.Bounds.Top + 3, e.Bounds.Right - 1, e.Bounds.Bottom - 4);
-        e.Graphics.DrawLine(line, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1);
-        var flags = TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix
-            | (e.Header?.TextAlign == HorizontalAlignment.Right ? TextFormatFlags.Right : TextFormatFlags.Left);
-        if ((sender as ListView)?.RightToLeft == RightToLeft.Yes) flags |= TextFormatFlags.RightToLeft;
-        var text = Rectangle.Inflate(e.Bounds, -6, 0);
-        TextRenderer.DrawText(e.Graphics, e.Header?.Text ?? "", Theme.Small, text, Theme.Muted, flags);
+        if (list.IsHandleCreated) Dress(); else list.HandleCreated += (_, _) => Dress();
     }
 
     // ── menus and tool bars ──────────────────────────────────────────────────

@@ -13,6 +13,8 @@ interface IMainHost : ITransfersHost, ISettingsHost
     List<ToolStripItem> DriveItems(DriveController d);
     Task AddAccountAsync();
     Task AddDrivesAsync(AccountInfo account, bool createNew);
+    /// <summary>"Add a drive" without naming the account: the wizard asks which one.</summary>
+    Task AddDriveChoosingAccountAsync();
     Task SignOutAccountAsync(AccountInfo a);
 }
 
@@ -205,20 +207,39 @@ sealed class MainForm : Form
             title.Controls.Add(new PictureBox { Image = Glyphs.Make(Glyphs.Person, Theme.Accent, 28), Size = new Size(28, 28), Margin = new Padding(0, 0, 10, 0) });
             title.Controls.Add(Theme.Label(L.Name(a.Name), new Font(Theme.Heading.FontFamily, 13f, FontStyle.Bold), Theme.Text));
             col.Controls.Add(title);
-            col.Controls.Add(Theme.Label(drives.Count == 0
-                    ? L.T("עוד אין במחשב הזה כוננים מהחשבון הזה.", "No drives of this account on this PC yet.")
-                    : L.N(drives.Count, $"כונן אחד במחשב הזה: {string.Join(", ", drives.Select(d => d.Name))}",
-                        $"{{0}} כוננים במחשב הזה: {string.Join(", ", drives.Select(d => d.Name))}",
-                        $"1 drive on this PC: {string.Join(", ", drives.Select(d => d.Name))}",
-                        $"{{0}} drives on this PC: {string.Join(", ", drives.Select(d => d.Name))}"),
-                Theme.Body, Theme.Muted, CardWidth - 40));
+            if (drives.Count == 0)
+            {
+                // the account is in, but it holds nothing here yet: say so where the eye lands, not quietly
+                var todo = Theme.Card(Slot.WarnBack, Slot.WarnBorder);
+                var todoRow = Theme.Row();
+                todoRow.Controls.Add(new PictureBox
+                {
+                    Image = Glyphs.Make(Glyphs.Warning, Theme.Attention, 20), Size = new Size(20, 20),
+                    SizeMode = PictureBoxSizeMode.CenterImage, Margin = new Padding(0, 1, 10, 0),
+                });
+                var todoText = Theme.Label(L.T(
+                    "עוד אין כוננים מהחשבון הזה במחשב הזה. לחץ \"הוסף כונן…\" כדי ליצור כונן חדש, או לחבר כונן שכבר קיים בחשבון.",
+                    "No drives of this account on this PC yet. Press \"Add a drive…\" to create a new one, or to connect one the account already has."),
+                    Theme.Body, Theme.Text, CardWidth - 90);
+                todoText.Margin = new Padding(0, 1, 0, 0);
+                todoRow.Controls.Add(todoText);
+                todo.Controls.Add(todoRow);
+                todo.Margin = new Padding(0, 4, 0, 4);
+                col.Controls.Add(todo);
+            }
+            else
+                col.Controls.Add(Theme.Label(
+                    L.N(drives.Count, $"כונן אחד במחשב הזה — {string.Join("   ·   ", drives.Select(d => d.Name))}",
+                        $"{{0}} כוננים במחשב הזה — {string.Join("   ·   ", drives.Select(d => d.Name))}",
+                        $"1 drive on this PC — {string.Join("   ·   ", drives.Select(d => d.Name))}",
+                        $"{{0}} drives on this PC — {string.Join("   ·   ", drives.Select(d => d.Name))}"),
+                    Theme.Body, Theme.Muted, CardWidth - 40));
             var buttons = Theme.Row();
             buttons.Margin = new Padding(0, 10, 0, 0);
-            var create = Theme.Primary(L.T("+  כונן חדש…", "+  New drive…"));
-            create.Click += async (_, _) => await _app.AddDrivesAsync(a, createNew: true);
-            var connect = Theme.Secondary(L.T("חבר כוננים קיימים…", "Connect existing drives…"));
-            connect.Click += async (_, _) => await _app.AddDrivesAsync(a, createNew: false);
-            buttons.Controls.AddRange([create, connect]);
+            // one way in: the window behind it both creates a new drive and connects ones the account has
+            var create = Theme.Primary(L.T("+  הוסף כונן…", "+  Add a drive…"));
+            create.Click += async (_, _) => await _app.AddDrivesAsync(a, createNew: false);
+            buttons.Controls.Add(create);
             if (drives.Count == 0)
             {
                 var signOut = new LinkLabel { Text = L.T("התנתק מהחשבון", "Sign out of this account"), AutoSize = true, Font = Theme.Body, LinkColor = Theme.Muted, Margin = new Padding(16, 8, 16, 0) };
@@ -243,7 +264,7 @@ sealed class MainForm : Form
         _drives.Controls.Add(head);
         var add = Theme.Secondary(L.T("+  הוסף כונן…", "+  Add a drive…"));
         add.Margin = new Padding(0, 10, 0, 12);
-        add.Click += (_, _) => AddDrive(add);
+        add.Click += (_, _) => AddDrive();
         _drives.Controls.Add(add);
 
         if (_app.Drives.Count == 0)
@@ -295,25 +316,12 @@ sealed class MainForm : Form
         _drives.ResumeLayout();
     }
 
-    /// <summary>"Add a drive": one account → its drives; several → choose; none → the accounts tab.</summary>
-    void AddDrive(Control anchor)
+    /// <summary>"Add a drive": one window that asks which account (only when there is more than one) and
+    /// then which drive. With no account at all there is nothing to add a drive to: the Accounts tab first.</summary>
+    void AddDrive()
     {
-        var known = _app.Accounts();
-        if (known.Count == 0) { Select(Tab.Accounts); return; }
-        if (known.Count == 1) { _ = _app.AddDrivesAsync(known[0], createNew: false); return; }
-        var menu = new ContextMenuStrip { Font = Ui.Font, RightToLeft = L.Rtl ? RightToLeft.Yes : RightToLeft.No };
-        menu.Items.Add(new ToolStripMenuItem(L.T("באיזה חשבון?", "On which account?")) { Enabled = false });
-        foreach (var a in known)
-        {
-            var item = new ToolStripMenuItem(L.Name(a.Name));
-            item.Click += async (_, _) => await _app.AddDrivesAsync(a, createNew: false);
-            menu.Items.Add(item);
-        }
-        menu.Items.Add(new ToolStripSeparator());
-        var other = new ToolStripMenuItem(L.T("חשבון טלגרם אחר…", "Another Telegram account…"));
-        other.Click += async (_, _) => await _app.AddAccountAsync();
-        menu.Items.Add(other);
-        menu.Show(anchor, new Point(0, anchor.Height));
+        if (_app.Accounts().Count == 0) { Select(Tab.Accounts); return; }
+        _ = _app.AddDriveChoosingAccountAsync();
     }
 
     static Bitmap? _driveIcon;

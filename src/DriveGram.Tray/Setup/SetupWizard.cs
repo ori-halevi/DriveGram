@@ -237,14 +237,17 @@ sealed class SetupWizard : Form
     public string? SnapshotDir { get; init; }
 
     /// <param name="title">The window's title for this way in (null: by the kind of run).</param>
+    /// <param name="chooseAccount">"Add a drive" from the Drives tab: which account first (skipped when
+    /// there is only one), then the drive. No account can be added here — that is the Accounts tab's job.</param>
     public SetupWizard(AppState state, bool isNew, TelegramChannels? originalChannels = null,
         NextDrive? next = null, List<NextDrive>? queue = null, bool accountOnly = false, bool firstRun = false,
-        string? title = null, bool freshSignIn = false)
+        string? title = null, bool freshSignIn = false, bool chooseAccount = false)
     {
         _ctx = new SetupContext(state, isNew, originalChannels) { Current = next, Queue = queue ?? [], AccountOnly = accountOnly, FreshSignIn = freshSignIn };
         if (next?.Account is { } sameAccount) _ctx.UseAccount(sameAccount); // the same account: no API details, no sign-in
         int more = next is null ? 0 : _ctx.Queue.Count;
-        Text = accountOnly ? L.T("DriveGram – הוספת חשבון טלגרם", "DriveGram – add a Telegram account")
+        Text = chooseAccount ? L.T("DriveGram – הוספת כונן", "DriveGram – add a drive")
+            : accountOnly ? L.T("DriveGram – הוספת חשבון טלגרם", "DriveGram – add a Telegram account")
             : next is { CreateNew: true } ? L.T("DriveGram – כונן חדש", "DriveGram – new drive")
             : next is not null ? L.T("DriveGram – כוננים בחשבון ", "DriveGram – drives on ") + (next.Account is { } na ? L.Name(na.Name) : "") + (more > 0 ? L.N(more, " (ועוד אחד אחריו)", " (ועוד {0} אחריו)", " (1 more after it)", " ({0} more after it)") : "")
             : isNew ? L.T("DriveGram – כונן חדש", "DriveGram – new drive") : L.T($"DriveGram – הגדרות הכונן {Ui.DriveTitle(state)}", $"DriveGram – drive settings: {state.DisplayName}");
@@ -264,6 +267,7 @@ sealed class SetupWizard : Form
 
         List<WizardPage> pages = accountOnly
             ? (firstRun ? [new WelcomePage(_ctx), new ApiPage(_ctx), new LoginPage(_ctx)] : [new ApiPage(_ctx), new LoginPage(_ctx)])
+            : chooseAccount ? [new AccountPage(_ctx), new DrivePage(_ctx), new FinishPage(_ctx)]
             : next is { Account: not null } ? [new DrivePage(_ctx), new FinishPage(_ctx)] // the account is known already
             : next is not null ? [new ApiPage(_ctx), new LoginPage(_ctx), new DrivePage(_ctx), new FinishPage(_ctx)] // another account: sign in first
             : _ctx.UsesTelegram

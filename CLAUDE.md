@@ -48,7 +48,9 @@ WinFsp 2.1 + C# (.NET 10): `src/DriveGram.Core` (engine, index, Telegram), `src/
 - `Application.SetColorMode` (what makes Windows' own scroll bars, drop-downs and title bars dark) must be
   called AFTER `Application.SetCompatibleTextRenderingDefault`, and only takes full effect on windows opened
   after it: the Settings tab says so in one line.
-- A dark list needs its column headers painted by us (`ThemePaint.List`); Windows paints them grey otherwise.
+- A list's column headers are a window of Windows' own inside it: `ThemePaint.List` asks for its dark styles
+  (`DarkMode_Explorer` / `DarkMode_ItemsView`). Painting them ourselves was tried and came out in pieces —
+  in a mirrored (Hebrew) list Windows repaints only the part it believes changed.
 - `ThemedTabs` replaces `TabControl` (its tabs are painted by Windows and cannot be recoloured).
 - Screenshots: `drivegram-tray --snapshot-main <dir> --theme light|dark|rose --he|--en` renders every tab of
   the main window, off screen, with sample data. **Rows and column headers of a list never appear in those

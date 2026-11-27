@@ -25,7 +25,7 @@ sealed class SampleHost : IMainHost
                  {
                      ("T:", "Photos", "1", true),
                      ("U:", "ארכיון", "1", true),
-                     ("V:", "Work", "2", false),
+                     ("V:", "Work", "1", false),
                  })
         {
             var state = AppState.Open("sample-" + letter[0]);
@@ -65,6 +65,7 @@ sealed class SampleHost : IMainHost
 
     public Task AddAccountAsync() => Task.CompletedTask;
     public Task AddDrivesAsync(AccountInfo account, bool createNew) => Task.CompletedTask;
+    public Task AddDriveChoosingAccountAsync() => Task.CompletedTask;
     public Task SignOutAccountAsync(AccountInfo a) => Task.CompletedTask;
 
     public void SetPaused(DriveController d, bool paused) { }
