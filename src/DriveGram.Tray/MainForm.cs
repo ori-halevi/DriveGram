@@ -228,12 +228,14 @@ sealed class MainForm : Form
                 col.Controls.Add(todo);
             }
             else
-                col.Controls.Add(Theme.Label(
-                    L.N(drives.Count, $"כונן אחד במחשב הזה — {string.Join("   ·   ", drives.Select(d => d.Name))}",
-                        $"{{0}} כוננים במחשב הזה — {string.Join("   ·   ", drives.Select(d => d.Name))}",
-                        $"1 drive on this PC — {string.Join("   ·   ", drives.Select(d => d.Name))}",
-                        $"{{0}} drives on this PC — {string.Join("   ·   ", drives.Select(d => d.Name))}"),
-                    Theme.Body, Theme.Muted, CardWidth - 40));
+            {
+                col.Controls.Add(Theme.Label(L.N(drives.Count, "כונן אחד במחשב הזה:", "{0} כוננים במחשב הזה:",
+                    "1 drive on this PC:", "{0} drives on this PC:"), Theme.Body, Theme.Muted, CardWidth - 40));
+                // one left-to-right run: drive letters are Latin, and without this the names of several
+                // drives are reordered among themselves in a Hebrew window
+                col.Controls.Add(Theme.Label(L.LtrPath(string.Join("   ·   ", drives.Select(d => d.Name))),
+                    Theme.Body, Theme.Text, CardWidth - 40));
+            }
             var buttons = Theme.Row();
             buttons.Margin = new Padding(0, 10, 0, 0);
             // one way in: the window behind it both creates a new drive and connects ones the account has
