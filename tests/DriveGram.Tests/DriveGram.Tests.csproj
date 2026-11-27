@@ -21,6 +21,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\DriveGram.Core\DriveGram.Core.csproj" />
     <ProjectReference Include="..\..\src\DriveGram.Host\DriveGram.Host.csproj" />
+    <ProjectReference Include="..\..\src\DriveGram.Tray\DriveGram.Tray.csproj" />
   </ItemGroup>
 
 </Project>

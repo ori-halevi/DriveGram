@@ -48,6 +48,7 @@ sealed class DriveController
     public bool ToldUploadStart;      // the "uploading, wait for the message" balloon was shown
     public DateTime DiskShortQuietUntil;
     public SwitchAccountForm? SwitchAccount;
+    public DriveSpaceForm? Space;
     /// <summary>The user paused every upload of this drive: saved with the drive, so it holds after Settings,
     /// an account switch or a restart.</summary>
     public bool ManualPaused
@@ -1029,11 +1030,11 @@ sealed class TrayApp : ApplicationContext, IMainHost
         if (paused)
             text = L.T(
                 $"העתקה גדולה ל־{L.Ltr(d.Letter)}: אין מספיק מקום פנוי ב־{L.Ltr(disk)}.\n\n" +
-                $"ההעלאות לטלגרם מושהות ({(d.ManualPaused ? "השהית אותן" : "הגעת לתקרה היומית")}), ולכן כל מה שמעתיקים לכונן נשאר בינתיים ב־{L.Ltr(disk)}. " +
+                $"ההעלאות לטלגרם מושהות ({(d.ManualPaused ? "השהית אותן" : $"עברת את תקרת ההעלאה, והן יימשכו {_daily.FreesInWords()}")}), ולכן כל מה שמעתיקים לכונן נשאר בינתיים ב־{L.Ltr(disk)}. " +
                 $"נשארו שם {Ui.Size(free)} שאפשר להשתמש בהם (DriveGram תמיד משאיר עוד 3 GB פנויים), וההעתקה נעצרה.\n\n" +
                 "כדי להמשיך להעתיק: המשך את ההעלאות, או פנה מקום במחשב ונסה שוב.",
                 $"A big copy into {d.Letter}: there is not enough free space on {disk}.\n\n" +
-                $"Uploads to Telegram are paused ({(d.ManualPaused ? "you paused them" : "the daily cap was reached")}), so everything copied into the drive stays on {disk} for now. " +
+                $"Uploads to Telegram are paused ({(d.ManualPaused ? "you paused them" : $"you passed the upload cap, and they go on {_daily.FreesInWords()}")}), so everything copied into the drive stays on {disk} for now. " +
                 $"It has {Ui.Size(free)} left to use (DriveGram always keeps another 3 GB free), and the copy stopped.\n\n" +
                 "To go on copying: resume the uploads, or free up space on this PC and try again.");
         else
@@ -1143,6 +1144,23 @@ sealed class TrayApp : ApplicationContext, IMainHost
                 ToolTipIcon.Warning);
         }
         UpdateIcon();
+    }
+
+    /// <summary>How much of this PC the drive may use, what it uses now, and freeing it — one window.</summary>
+    void ShowDriveSpace(DriveController d)
+    {
+        if (d.Space is { IsDisposed: false }) { d.Space.Activate(); return; }
+        using var form = new DriveSpaceForm(d.State, d.Session, () => _ui.Post(_ => FreeUpSpace(d), null));
+        d.Space = form;
+        var answer = form.ShowDialog();
+        d.Space = null;
+        if (answer != DialogResult.OK || !_drives.Contains(d)) return;
+        if (Math.Abs(d.State.Config.CacheQuotaGb - form.LimitGb) < 0.001) return;
+        d.State.Config.CacheQuotaGb = form.LimitGb;
+        try { d.State.Save(); } catch (Exception ex) { Log.Warn($"drive space: {ex.Message}"); }
+        // takes effect at once on a connected drive (what is over the new limit goes within seconds)
+        if (d.Session is { } s) s.Engine.CacheQuota = (long)(form.LimitGb * (1L << 30));
+        Log.Info($"tray: {d.Name} may keep {form.LimitGb:0.#} GB of temporary copies on this PC");
     }
 
     /// <summary>Delete the local copies of files that are safely in Telegram, only when nothing waits here.</summary>
@@ -1668,7 +1686,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
     {
         if (_daily.CapReached && !AskPastCap())
         {
-            // only the user's own pauses end: the cap still holds until midnight
+            // only the user's own pauses end: the cap still holds until the count falls back under it
             foreach (var d in _drives) { d.ManualPaused = false; ApplyPause(d); }
             return;
         }
@@ -1678,9 +1696,9 @@ sealed class TrayApp : ApplicationContext, IMainHost
 
     bool AskPastCap()
     {
-        if (Ui.Ask(L.T($"הגעת היום לתקרה היומית ({_daily.CapGb:0.#} GB). להמשיך להעלות היום בכל זאת?",
-                $"Today's daily cap ({_daily.CapGb:0.#} GB) was reached. Keep uploading today anyway?")) != DialogResult.Yes) return false;
-        _daily.LiftCapForToday();
+        if (Ui.Ask(L.T($"עברת את התקרה שבחרת ({_daily.CapGb:0.#} GB ב־24 שעות). ההעלאות ימשיכו מעצמן {_daily.FreesInWords()}.\n\nלהמשיך להעלות כבר עכשיו?",
+                $"You passed the cap you chose ({_daily.CapGb:0.#} GB in 24 hours). Uploads go on by themselves {_daily.FreesInWords()}.\n\nGo on uploading now anyway?")) != DialogResult.Yes) return false;
+        _daily.LiftCap();
         return true;
     }
 
@@ -1689,17 +1707,17 @@ sealed class TrayApp : ApplicationContext, IMainHost
         if (files.Count == 0) return;
         bool capHolds = _daily.CapReached;
         if (capHolds && Ui.Ask(L.N(files.Count,
-                $"הגעת היום לתקרה היומית ({_daily.CapGb:0.#} GB). להעלות את הקובץ שבחרת בכל זאת?\n\nשאר הקבצים יישארו מושהים עד מחר, או עד שתמשיך אותם.",
-                $"הגעת היום לתקרה היומית ({_daily.CapGb:0.#} GB). להעלות את {{0}} הקבצים שבחרת בכל זאת?\n\nשאר הקבצים יישארו מושהים עד מחר, או עד שתמשיך אותם.",
-                $"Today's daily cap ({_daily.CapGb:0.#} GB) was reached. Upload the file you chose anyway?\n\nThe other files stay paused until tomorrow, or until you resume them.",
-                $"Today's daily cap ({_daily.CapGb:0.#} GB) was reached. Upload the {{0}} files you chose anyway?\n\nThe other files stay paused until tomorrow, or until you resume them.")) != DialogResult.Yes) return;
+                $"עברת את התקרה שבחרת ({_daily.CapGb:0.#} GB ב־24 שעות). להעלות את הקובץ שבחרת בכל זאת?\n\nשאר הקבצים יישארו מושהים עד שההעלאות ימשיכו מעצמן ({_daily.FreesInWords()}), או עד שתמשיך אותם.",
+                $"עברת את התקרה שבחרת ({_daily.CapGb:0.#} GB ב־24 שעות). להעלות את {{0}} הקבצים שבחרת בכל זאת?\n\nשאר הקבצים יישארו מושהים עד שההעלאות ימשיכו מעצמן ({_daily.FreesInWords()}), או עד שתמשיך אותם.",
+                $"You passed the cap you chose ({_daily.CapGb:0.#} GB in 24 hours). Upload the file you chose anyway?\n\nThe other files stay paused until uploads go on by themselves ({_daily.FreesInWords()}), or until you resume them.",
+                $"You passed the cap you chose ({_daily.CapGb:0.#} GB in 24 hours). Upload the {{0}} files you chose anyway?\n\nThe other files stay paused until uploads go on by themselves ({_daily.FreesInWords()}), or until you resume them.")) != DialogResult.Yes) return;
         // the drive (or the cap) keeps everything else paused, also files copied in later: only these go on
         foreach (var g in files.GroupBy(f => f.D)) g.Key.Session?.Engine.Resume(g.Select(f => f.Id).ToList());
     }
 
     public void LiftCap()
     {
-        _daily.LiftCapForToday();
+        _daily.LiftCap();
         foreach (var d in _drives) ApplyPause(d);
     }
 
@@ -2035,7 +2053,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
     }
 
     // ── menu & status ────────────────────────────────────────────────────────
-    static string StatusOf(DriveController d)
+    string StatusOf(DriveController d)
     {
         if (d.Starting) return L.T("מתחבר…", "connecting…");
         if (d.Stopping) return L.T("מתנתק…", "disconnecting…");
@@ -2057,7 +2075,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
         var wait = s.WaitingUntil is { } until ? L.T($" · טלגרם ביקש להמתין עד {until:HH:mm}", $" · Telegram asked to wait until {until:HH:mm}") : "";
         if (st.PendingFiles > 0 && st.UploadsInFlight == 0 && s.Engine.PendingNotPaused() == 0)
             return (s.Engine.PausedAll && !d.ManualPaused
-                    ? L.T("ההעלאות מושהות עד חצות (תקרה יומית): ", "uploads paused until midnight (daily cap): ")
+                    ? L.T($"ההעלאות מושהות (תקרת העלאה; יימשכו {_daily.FreesInWords()}): ", $"uploads paused (upload cap; they go on {_daily.FreesInWords()}): ")
                     : L.T("ההעלאות מושהות: ", "uploads paused: "))
                    + L.N(st.PendingFiles, "קובץ אחד מחכה", "{0} קבצים מחכים", "1 file waits", "{0} files wait")
                    + L.T($" במחשב הזה ({Ui.Size(st.StagedBytes)})", $" on this PC ({Ui.Size(st.StagedBytes)})");
@@ -2164,7 +2182,7 @@ sealed class TrayApp : ApplicationContext, IMainHost
         _menu.Items.Add(transfers);
         _menu.Items.Add(Item(L.T("קבצים שהכנתי…", "Files I prepared…"), ShowPrepared));
         _menu.Items.Add(Item(L.T("חשבונות טלגרם והוספת כונן…", "Telegram accounts and adding a drive…"), () => ShowMain(DriveGram.Tray.MainForm.Tab.Accounts)));
-        var settings = Item(L.T("הגדרות (שפה, מראה, תקרה יומית)…", "Settings (language, look, daily cap)…"), OpenSettings);
+        var settings = Item(L.T("הגדרות (שפה, מראה, תקרת העלאה)…", "Settings (language, look, upload cap)…"), OpenSettings);
         settings.Image = Glyphs.Make(Glyphs.Settings, Setup.Theme.AccentDark, 16);
         _menu.Items.Add(settings);
 
@@ -2192,8 +2210,8 @@ sealed class TrayApp : ApplicationContext, IMainHost
         list.Add(Item(L.T("פתח את הכונן", "Open the drive"), () => OpenDrive(d), on, bold: true));
         list.Add(Item(L.T("סל המחזור…", "Recycle bin…"), () => ShowTrash(d), on));
         list.Add(Item(L.T("ייצוא כל הקבצים לתיקייה…", "Export every file to a folder…"), () => Export(d), on));
-        // works disconnected too: only local copies are deleted
-        list.Add(Item(L.T("פנה מקום במחשב הזה…", "Free up space on this PC…"), () => FreeUpSpace(d), !d.Starting && !d.Stopping && !d.FreeingOffline));
+        // works disconnected too: only local copies are involved
+        list.Add(Item(L.T("מקום במחשב הזה…", "Space on this PC…"), () => ShowDriveSpace(d), !d.Starting && !d.Stopping && !d.FreeingOffline));
         list.Add(new ToolStripSeparator());
         if (d.Session is null)
             list.Add(Item(L.T("חבר", "Connect"), async () => { if (d.NeedsSetup) await SetupAsync(d); else await MountAsync(d); },

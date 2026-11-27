@@ -118,10 +118,11 @@ public sealed class ContentEngine : IAsyncDisposable
         _remote = remote;
         _keys = keys;
         _o = options ?? new EngineOptions();
+        _cacheQuota = _o.CacheQuota;
         CS = keys.ChunkSize;
         _staging = Path.Combine(stateDir, "staging");
         Directory.CreateDirectory(_staging);
-        _cache = new BlockCache(Path.Combine(stateDir, "cache"), _o.CacheQuota, waitForKept: true) // Start → LoadKept
+        _cache = new BlockCache(Path.Combine(stateDir, "cache"), _cacheQuota, waitForKept: true) // Start → LoadKept
         {
             PreviewQuota = PreviewQuota,
         };
@@ -1246,6 +1247,23 @@ public sealed class ContentEngine : IAsyncDisposable
         return now - Interlocked.Read(ref _progressAt) < 20_000;
     }
 
+    long _cacheQuota;
+
+    /// <summary>
+    /// How much this PC may keep of files that are already safely in Telegram, so opening them again costs
+    /// no download. Only temporary copies count: files the user prepared on purpose are never evicted and
+    /// are not counted here. Can be changed while the drive runs (the drive's "space on this PC" window).
+    /// </summary>
+    public long CacheQuota
+    {
+        get => Interlocked.Read(ref _cacheQuota);
+        set
+        {
+            Interlocked.Exchange(ref _cacheQuota, Math.Max(128L << 20, value));
+            FitCacheToDisk(0);
+        }
+    }
+
     /// <summary>The cache is only a copy: when the local disk runs low it shrinks (below its current size
     /// if needed) to keep MinFreeDisk free, plus `needed` bytes for a write that is waiting.</summary>
     void FitCacheToDisk(long needed)
@@ -1255,7 +1273,7 @@ public sealed class ContentEngine : IAsyncDisposable
         long room = _cache.Bytes - _cache.KeptBytes + _cache.PreviewBytes + FreeDisk() - _o.MinFreeDisk - needed;
         long preview = Math.Clamp(room / 8, 0, PreviewQuota);
         _cache.PreviewQuota = preview;
-        _cache.SetQuota(Math.Clamp(room - preview, Math.Min(128L << 20, _o.CacheQuota), _o.CacheQuota));
+        _cache.SetQuota(Math.Clamp(room - preview, Math.Min(128L << 20, CacheQuota), CacheQuota));
         Interlocked.Exchange(ref _freeAt, 0); // re-measure right away
     }
 
@@ -1725,7 +1743,7 @@ public sealed class ContentEngine : IAsyncDisposable
     /// <summary>Pending files that are not paused (what "wait for the uploads" waits for).</summary>
     /// <summary>What Explorer read for thumbnails and details, kept apart (see BlockCache): 1 GB at most,
     /// less when the disk is short (FitCacheToDisk).</summary>
-    long PreviewQuota => Math.Clamp(_o.CacheQuota / 8, 64L << 20, 1L << 30);
+    long PreviewQuota => Math.Clamp(CacheQuota / 8, 64L << 20, 1L << 30);
 
     public int PendingNotPaused() => _db.PendingNodes().Count(id => !IsPaused(id));
     /// <summary>Everything not (all) in Telegram yet, and whether its upload is paused (Explorer's icons follow

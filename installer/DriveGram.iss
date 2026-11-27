@@ -70,7 +70,7 @@ english.WinFspFailed=Installing WinFsp did not finish. The drive cannot work wit
 
 [Tasks]
 ; "Start with Windows" belongs to the app (setup wizard + tray menu); the uninstaller removes it
-Name: "desktopicon"; Description: "{cm:Desktop}"; Flags: unchecked
+Name: "desktopicon"; Description: "{cm:Desktop}"
 
 [Files]
 Source: "..\publish\*"; DestDir: "{app}"; Excludes: "DriveGramShell-*.dll"; Flags: ignoreversion recursesubdirs createallsubdirs

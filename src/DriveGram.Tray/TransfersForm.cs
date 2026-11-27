@@ -312,10 +312,10 @@ sealed class TransfersForm : Form
         _resumeSel.ToolTipText = L.T("המשך את הקבצים המסומנים ברשימה", "Resume the files selected in the list");
         _cancelSel.ToolTipText = L.T("בטל את ההעלאה של הקבצים המסומנים ברשימה", "Cancel the upload of the files selected in the list");
         upBar.Items.Add(new ToolStripSeparator());
-        var cap = Button(upBar, Glyphs.Gauge, L.T("תקרה יומית…", "Daily cap…"), () => _host.OpenSettings());
+        var cap = Button(upBar, Glyphs.Gauge, L.T("תקרת העלאה…", "Upload cap…"), () => _host.OpenSettings());
         cap.Overflow = ToolStripItemOverflow.Never; // never hidden behind the toolbar's "»"
-        cap.ToolTipText = L.T("נקבעת בהגדרות: כמה מותר להעלות ביום, והתראה לפני שמגיעים לזה",
-            "Set in Settings: how much may be uploaded a day, and a notice before reaching it");
+        cap.ToolTipText = L.T("נקבעת בהגדרות: כמה מותר להעלות ב־24 שעות, והתראה לפני שמגיעים לזה",
+            "Set in Settings: how much may be uploaded in 24 hours, and a notice before reaching it");
         upBar.Items.Add(_upSearch);
         _upSearch.TextChanged += (_, _) => RefreshNow();
         _up.Columns.Add(L.T("קובץ", "File"), 280);
@@ -468,8 +468,8 @@ sealed class TransfersForm : Form
     {
         _demo = true;
         _timer.Stop(); // the sample rows stay put (a refresh would replace them with the real ones: none)
-        _summary.Text = L.T("נותרו להעלות 11.6 GB   ·   מהירות 4.2 MB/שנייה   ·   עוד כ־47 דקות   ·   היום הועלו 23.4 GB   ·   תקרה יומית 50GB",
-            "11.6 GB left to upload   ·   4.2 MB/s   ·   about 47 minutes left   ·   23.4 GB uploaded today   ·   daily cap 50 GB");
+        _summary.Text = L.T("נותרו להעלות 11.6 GB   ·   מהירות 4.2 MB/שנייה   ·   עוד כ־47 דקות   ·   ב־24 שעות עלו 23.4 GB   ·   תקרה 50GB",
+            "11.6 GB left to upload   ·   4.2 MB/s   ·   about 47 minutes left   ·   23.4 GB uploaded in 24 hours   ·   cap 50 GB");
         long G = 1L << 30, M = 1L << 20;
         var ups = new[]
         {
@@ -504,8 +504,8 @@ sealed class TransfersForm : Form
             "Prepared files take 5.3 GB. Temporary copies of files you opened: 1.1 GB (removed by themselves when space is needed).");
         _tabs.Selected = tab;
         _capBar.Visible = tab == 0;
-        _capText.Text = L.T("הגעת לתקרה היומית (50GB): ההעלאות מושהות עד חצות. הקבצים מחכים בבטחה במחשב הזה.",
-            "The daily cap (50 GB) was reached: uploads are paused until midnight. The files wait safely on this PC.");
+        _capText.Text = L.T("הגעת לתקרה (50GB ב־24 שעות): ההעלאות מושהות ויימשכו מעצמן בעוד כ־3 שעות (בערך ב־21:15). הקבצים מחכים בבטחה במחשב הזה.",
+            "The cap (50 GB in 24 hours) was reached: uploads are paused and go on by themselves in about 3 hours (around 21:15). The files wait safely on this PC.");
     }
 
     static readonly int BarWidth = TextRenderer.MeasureText("100%  " + new string('\u25B0', 8), Ui.Font).Width + 36;
@@ -570,15 +570,15 @@ sealed class TransfersForm : Form
             if (speed > 1024) parts.Add(L.T($"מהירות {Ui.Size((long)speed)}/שנייה", $"{Ui.Size((long)speed)}/s"));
             if (speed > 1024) parts.Add(TimeLeft(left / speed));
         }
-        parts.Add(L.T($"היום הועלו {Ui.Size(_host.Daily.TodayBytes)}", $"{Ui.Size(_host.Daily.TodayBytes)} uploaded today"));
-        if (_host.Daily.CapGb > 0) parts.Add(L.T($"תקרה יומית {_host.Daily.CapGb:0.#} GB", $"daily cap {_host.Daily.CapGb:0.#} GB"));
+        parts.Add(L.T($"ב־24 שעות עלו {Ui.Size(_host.Daily.RecentBytes)}", $"{Ui.Size(_host.Daily.RecentBytes)} uploaded in 24 hours"));
+        if (_host.Daily.CapGb > 0) parts.Add(L.T($"תקרה ל־24 שעות {_host.Daily.CapGb:0.#} GB", $"24-hour cap {_host.Daily.CapGb:0.#} GB"));
         var waits = drives.Select(d => d.Session!.WaitingUntil).Where(w => w is not null).Max();
         if (waits is { } until && until > DateTime.Now)
             parts.Add(L.T($"טלגרם ביקש להמתין עד {until:HH:mm:ss}", $"Telegram asked to wait until {until:HH:mm:ss}"));
         _summary.Text = string.Join("\u00A0\u00A0·   ", parts.Select(p => p.Replace(' ', '\u00A0')));
         _capBar.Visible = _host.Daily.CapReached;
-        _capText.Text = L.T($"הגעת לתקרה היומית ({_host.Daily.CapGb:0.#} GB): ההעלאות מושהות עד חצות. הקבצים מחכים בבטחה במחשב הזה.",
-            $"The daily cap ({_host.Daily.CapGb:0.#} GB) was reached: uploads are paused until midnight. The files wait safely on this PC.");
+        _capText.Text = L.T($"הגעת לתקרה ({_host.Daily.CapGb:0.#} GB ב־24 שעות): ההעלאות מושהות ויימשכו מעצמן {_host.Daily.FreesInWords()}. הקבצים מחכים בבטחה במחשב הזה.",
+            $"The cap ({_host.Daily.CapGb:0.#} GB in 24 hours) was reached: uploads are paused and go on by themselves {_host.Daily.FreesInWords()}. The files wait safely on this PC.");
 
         RefreshUploads(drives);
         if (_tabs.Selected == 1) RefreshLocalProgress();
@@ -625,7 +625,7 @@ sealed class TransfersForm : Form
             item.SubItems[3].Text = Bar(u.Total <= 0 ? 0 : (double)u.Done / u.Total);
             var (icon, state) = u.State switch
             {
-                UploadState.Paused => ("paused", d.Session!.Engine.PausedAll && _host.Daily.CapReached ? L.T("מושהה (תקרה יומית)", "Paused (daily cap)") : L.T("מושהה", "Paused")),
+                UploadState.Paused => ("paused", d.Session!.Engine.PausedAll && _host.Daily.CapReached ? L.T("מושהה (תקרה)", "Paused (cap)") : L.T("מושהה", "Paused")),
                 UploadState.Uploading when waitUntil is { } w && w > DateTime.Now => ("up", L.T("טלגרם ביקש להמתין", "Telegram asked to wait")),
                 UploadState.Uploading when d.Uploading && d.Speed / Math.Max(1, sending.GetValueOrDefault(d)) is var each && each > 16 * 1024 && u.Total > u.Done
                     => ("up", L.T("עולה", "Uploading") + "  ·  " + TimeLeft((u.Total - u.Done) / each)),

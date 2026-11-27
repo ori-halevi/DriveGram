@@ -83,26 +83,26 @@ sealed class SettingsPage : UserControl
             "Scroll bars and a few small parts that Windows draws itself match the new look the next time DriveGram starts.")));
 
         // ── the daily cap ──
-        col.Controls.Add(Head(L.T("תקרה יומית להעלאות", "Daily upload cap")));
+        col.Controls.Add(Head(L.T("תקרת העלאה (24 שעות)", "Upload cap (24 hours)")));
         col.Controls.Add(Note(L.T(
-            "טלגרם לא מפרסם מגבלה יומית. מה שידוע: חשבון בלי Premium מעלה לאט יותר, וטלגרם חוסם דפוסים שנראים כמו ספאם או שימוש לרעה. אם אתה מעדיף להיזהר, אפשר לקבל התראה או לעצור את ההעלאות בכמות שתבחר. הספירה כוללת את כל הכוננים במחשב הזה.",
-            "Telegram publishes no daily limit. What is known: an account without Premium uploads more slowly, and Telegram blocks patterns that look like spam or abuse. If you prefer to be careful, you can get a notice, or pause uploads, at an amount you choose. It counts every drive on this PC.")));
+            "טלגרם לא מפרסם מגבלה יומית. מה שידוע: חשבון בלי Premium מעלה לאט יותר, וטלגרם חוסם דפוסים שנראים כמו ספאם או שימוש לרעה. אם אתה מעדיף להיזהר, אפשר לקבל התראה או לעצור את ההעלאות בכמות שתבחר. הספירה היא על 24 השעות האחרונות (לא עד חצות), וכוללת את כל הכוננים במחשב הזה.",
+            "Telegram publishes no daily limit. What is known: an account without Premium uploads more slowly, and Telegram blocks patterns that look like spam or abuse. If you prefer to be careful, you can get a notice, or pause uploads, at an amount you choose. The count covers the last 24 hours (not up to midnight), and every drive on this PC.")));
         col.Controls.Add(_today);
 
-        _alertOn = Theme.WrapCheck(L.T("התרע כשביום אחד עולים לטלגרם יותר מ־:", "Tell me when more than this goes up to Telegram in one day:"), Theme.Body, TextWidth);
+        _alertOn = Theme.WrapCheck(L.T("התרע כשב־24 השעות האחרונות עלו לטלגרם יותר מ־:", "Tell me when more than this went up to Telegram in the last 24 hours:"), Theme.Body, TextWidth);
         _alertOn.Margin = new Padding(0, 12, 0, 2);
         col.Controls.Add(_alertOn);
         col.Controls.Add(WithGb(_alert));
-        col.Controls.Add(Note(L.T("ההתראה מופיעה גם מראש, כשמה שממתין להעלאה עומד לחרוג מהכמות הזו.",
-            "The notice also comes ahead of time, when what waits to upload is about to pass that amount.")));
+        col.Controls.Add(Note(L.T("ההתראה מופיעה גם מראש, כשמה שממתין להעלאה עומד לחרוג מהכמות הזו, ותופיע שוב רק אחרי שהספירה תרד מתחת לכמות.",
+            "The notice also comes ahead of time, when what waits to upload is about to pass that amount, and comes again only once the count has fallen back under it.")));
 
-        _capOn = Theme.WrapCheck(L.T("עצור את ההעלאות עד חצות כשביום אחד עולים יותר מ־:", "Pause uploads until midnight once more than this went up in one day:"), Theme.Body, TextWidth);
+        _capOn = Theme.WrapCheck(L.T("עצור את ההעלאות כשב־24 השעות האחרונות עלו יותר מ־:", "Pause uploads once more than this went up in the last 24 hours:"), Theme.Body, TextWidth);
         _capOn.Margin = new Padding(0, 12, 0, 2);
         col.Controls.Add(_capOn);
         col.Controls.Add(WithGb(_cap));
         col.Controls.Add(Note(L.T(
-            "בזמן העצירה הקבצים מחכים בבטחה במחשב הזה ועולים לבד אחרי חצות. אפשר גם להמשיך בכל זאת מלשונית \"העברות\". העתקה גדולה לכונן בזמן העצירה עלולה להיעצר כשנגמר המקום במחשב.",
-            "While paused, files wait safely on this PC and go up by themselves after midnight. You can also go on anyway from the \"Transfers\" tab. A big copy into the drive while paused may stop when this PC runs out of space.")));
+            "הספירה מתגלגלת: מה שעלה לפני 24 שעות יוצא ממנה מעצמו, וההעלאות ממשיכות לבד. בינתיים הקבצים מחכים בבטחה במחשב הזה, ואפשר גם להמשיך בכל זאת מלשונית \"העברות\". העתקה גדולה לכונן בזמן העצירה עלולה להיעצר כשנגמר המקום במחשב.",
+            "The count rolls: what went up 24 hours ago leaves it by itself, and the uploads go on. Meanwhile the files wait safely on this PC, and you can also go on anyway from the \"Transfers\" tab. A big copy into the drive while paused may stop when this PC runs out of space.")));
 
         Controls.Add(col);
 
@@ -168,8 +168,8 @@ sealed class SettingsPage : UserControl
     }
 
     /// <summary>Every second from the window: only what changes by itself (today's uploads).</summary>
-    public void Tick() => _today.Text = L.T($"היום הועלו עד עכשיו: {Ui.Size(_daily.TodayBytes)}",
-        $"Uploaded so far today: {Ui.Size(_daily.TodayBytes)}");
+    public void Tick() => _today.Text = L.T($"ב־24 השעות האחרונות עלו: {Ui.Size(_daily.RecentBytes)}",
+        $"Uploaded in the last 24 hours: {Ui.Size(_daily.RecentBytes)}");
 
     /// <summary>
     /// One look to choose from: its name, a small picture of a window in it, and a mark when it is the
