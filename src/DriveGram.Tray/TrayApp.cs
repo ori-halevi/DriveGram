@@ -134,7 +134,9 @@ sealed class TrayApp : ApplicationContext, IMainHost
         {
             if (e.IsAvailable) _ui.Post(async _ => { await Task.Delay(3000); RetryWaitingDrivesNow(); }, null);
         };
-        ShellIntegration.ClearStaleDriveIcons(_drives.Select(x => x.State.Config.MountPoint)); // left by a crash on a borrowed letter
+        // left by a crash on a borrowed letter. Only the real copy does this: one run for a look, with its
+        // own data folder, must not touch what Explorer shows for the drives of the real one.
+        if (AppState.IsUsualRoot) ShellIntegration.ClearStaleDriveIcons(_drives.Select(x => x.State.Config.MountPoint));
         SystemEvents.PowerModeChanged += (_, e) => { if (e.Mode == PowerModes.Resume) _ui.Post(_ => OnResume(), null); };
 
         // Explorer's overlay icons and right-click menu ask here (the shell extension)

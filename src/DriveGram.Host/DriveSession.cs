@@ -95,7 +95,7 @@ public sealed class DriveSession : IAsyncDisposable
     }
 
     /// <summary>Signalled by `drivegram quit` (and the installer): the tray app finishes uploads and exits.</summary>
-    public const string QuitEventName = @"Local\DriveGram-quit";
+    public static string QuitEventName => AppState.Scoped(@"Local\DriveGram-quit");
 
     public static string StopEventName(AppState state) => @"Local\DriveGram-stop-" + Path.GetFileName(state.Dir);
     static string InstanceName(AppState state) => InstanceName(state.Dir);

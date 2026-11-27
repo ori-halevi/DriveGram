@@ -46,6 +46,25 @@ public sealed class AppState
         ? r
         : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DriveGram");
 
+    /// <summary>
+    /// A name shared by everything that belongs to ONE data folder: the "DriveGram is running" mutex and
+    /// the events the command line signals. The usual folder keeps the plain names (what every installed
+    /// copy, and the installer, already look for); a folder chosen with DRIVEGRAM_ROOT gets its own, so a
+    /// copy run from the source for a look at it lives beside the installed one instead of waking it.
+    /// </summary>
+    public static string Scoped(string name) => IsUsualRoot
+        ? name
+        : name + "-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            Path.GetFullPath(Root).TrimEnd('\\', '/').ToUpperInvariant())))[..8];
+
+    /// <summary>Is this the real data folder of this Windows user (and not a copy run for a look at it)?
+    /// A copy with its own folder leaves everything machine-wide — Explorer's drive icons, for instance —
+    /// to the real one.</summary>
+    public static bool IsUsualRoot => string.Equals(
+        Path.GetFullPath(Root).TrimEnd('\\', '/'),
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DriveGram"),
+        StringComparison.OrdinalIgnoreCase);
+
     public string Dir { get; }
     public string Id => Path.GetFileName(Dir);
     public string? Folder => Config.Folder;   // FolderRemote path (offline trial), or null for Telegram

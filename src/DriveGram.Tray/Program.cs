@@ -5,10 +5,11 @@ namespace DriveGram.Tray;
 
 static class Program
 {
-    /// <summary>Named mutex = "the tray app is running": single instance, and the installer waits on it.</summary>
-    public const string RunningMutex = "DriveGramTrayRunning";
+    /// <summary>Named mutex = "the tray app is running": one copy per data folder (so a copy run from the
+    /// source, with its own DRIVEGRAM_ROOT, runs beside the installed one), and the installer waits on it.</summary>
+    public static string RunningMutex => AppState.Scoped("DriveGramTrayRunning");
     /// <summary>A second launch signals this, so the running copy shows itself instead.</summary>
-    public const string ActivateEvent = @"Local\DriveGram-activate";
+    public static string ActivateEvent => AppState.Scoped(@"Local\DriveGram-activate");
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll")]
     static extern bool SetProcessShutdownParameters(uint level, uint flags);

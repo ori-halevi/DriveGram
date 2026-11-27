@@ -34,7 +34,7 @@ DriveGram.Sync.DriveIdentity? newIdentity = null; // set when `init` creates a b
 var driveSel = Opt("--drive");
 Log.Open(Path.Combine(AppState.Root, "logs"));
 var command0 = argv.Count > 0 ? argv[0].ToLowerInvariant() : "help";
-if (folder is null && command0 is "status" && System.Threading.Mutex.TryOpenExisting("DriveGramTrayRunning", out var trayForStatus))
+if (folder is null && command0 is "status" && System.Threading.Mutex.TryOpenExisting(AppState.Scoped("DriveGramTrayRunning"), out var trayForStatus))
 {
     trayForStatus.Dispose();
     foreach (var s in AppState.All().Where(a => a.Folder is null))
@@ -46,7 +46,7 @@ if (folder is null && command0 is "status" && System.Threading.Mutex.TryOpenExis
     return 0;
 }
 if (folder is null && command0 is "setup" or "login" or "init" or "mount" or "status" or "uninstall-cleanup"
-    && System.Threading.Mutex.TryOpenExisting("DriveGramTrayRunning", out var trayRunning))
+    && System.Threading.Mutex.TryOpenExisting(AppState.Scoped("DriveGramTrayRunning"), out var trayRunning))
 {
     trayRunning.Dispose();
     Console.Error.WriteLine("DriveGram is running in the notification area. Exit it first (tray icon > Exit): two programs must not use the same Telegram sign-in at once.");
@@ -163,7 +163,7 @@ async Task<int> WaitQuit()
 {
     for (int s = 0; s < 600; s++)
     {
-        if (!System.Threading.Mutex.TryOpenExisting("DriveGramTrayRunning", out var m)) return 0;
+        if (!System.Threading.Mutex.TryOpenExisting(AppState.Scoped("DriveGramTrayRunning"), out var m)) return 0;
         m.Dispose();
         await Task.Delay(1000);
     }
